@@ -1,0 +1,72 @@
+"""CLI: waypoints YAML を検証して FollowWaypoints goal を送る。不正 YAML は非 0 終了。"""
+
+import argparse
+import sys
+
+import rclpy
+from rclpy.action import ActionClient
+
+from lightnav_mission.waypoint_files import WaypointFileError, load_waypoints_file
+from lightnav_msgs.action import FollowWaypoints
+from lightnav_msgs.msg import Waypoint
+
+EXIT_OK = 0
+EXIT_FAILED = 1
+SERVER_WAIT_S = 5.0
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("waypoints_yaml")
+    parser.add_argument("--start-index", type=int, default=0)
+    parser.add_argument("--action-name", default="/lightnav/mission/follow_waypoints")
+    arguments = parser.parse_args(argv)
+
+    try:
+        records = load_waypoints_file(arguments.waypoints_yaml)
+    except WaypointFileError as error:
+        print(f"YAML 不正: {error}", file=sys.stderr)
+        return EXIT_FAILED
+    if not 0 <= arguments.start_index < len(records):
+        print("start-index が範囲外", file=sys.stderr)
+        return EXIT_FAILED
+
+    rclpy.init()
+    node = rclpy.create_node("send_waypoints")
+    client = ActionClient(node, FollowWaypoints, arguments.action_name)
+    try:
+        if not client.wait_for_server(timeout_sec=SERVER_WAIT_S):
+            print("action サーバが見つからない", file=sys.stderr)
+            return EXIT_FAILED
+        goal = FollowWaypoints.Goal()
+        goal.waypoints = [
+            Waypoint(x=record.x, y=record.y, arrival_radius_m=record.arrival_radius_m)
+            for record in records
+        ]
+        goal.start_index = arguments.start_index
+        send_future = client.send_goal_async(
+            goal, feedback_callback=lambda message: node.get_logger().info(
+                f"{message.feedback.state} wp={message.feedback.current_waypoint_index}"
+                f" dist={message.feedback.distance_to_waypoint_m:.2f}"
+            ),
+        )
+        rclpy.spin_until_future_complete(node, send_future)
+        goal_handle = send_future.result()
+        if not goal_handle.accepted:
+            print("goal が reject された", file=sys.stderr)
+            return EXIT_FAILED
+        result_future = goal_handle.get_result_async()
+        rclpy.spin_until_future_complete(node, result_future)
+        result = result_future.result().result
+        print(f"success={result.success} reached={result.reached_count} {result.message}")
+        return EXIT_OK if result.success else EXIT_FAILED
+    except KeyboardInterrupt:
+        return EXIT_FAILED
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
