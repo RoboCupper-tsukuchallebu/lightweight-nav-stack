@@ -131,14 +131,24 @@ def run_real_service_probe(exit_mode):
     return json.loads(completed.stdout.strip().splitlines()[-1])
 
 
-@pytest.mark.parametrize("exit_mode", ["deactivate", "shutdown"])
-def test_real_service_exists_only_while_active(exit_mode):
-    report = run_real_service_probe(exit_mode)
-    assert report["service_after_configure"] is False
-    assert report["service_after_activate"] is True
-    assert report["advertised_when_active"] is True
-    assert report["round_trip"] == {"answered": True, "success": True, "waypoint_indices": [5]}
-    assert report["service_after_exit_from_active"] is False
+SUCCESS_ROUND_TRIP = {"answered": True, "success": True, "waypoint_indices": [5]}
+
+
+def test_deactivate_removes_service_and_reactivate_restores_it():
+    report = run_real_service_probe("deactivate")
+    assert report["ready_before_activate"] is False
+    assert report["ready_when_active"] is True
+    assert report["round_trip"] == SUCCESS_ROUND_TRIP
+    assert report["ready_after_exit"] is False
+    assert report["ready_after_reactivate"] is True
+    assert report["round_trip_after_reactivate"] == SUCCESS_ROUND_TRIP
+
+
+def test_shutdown_from_active_removes_service():
+    report = run_real_service_probe("shutdown")
+    assert report["ready_when_active"] is True
+    assert report["round_trip"] == SUCCESS_ROUND_TRIP
+    assert report["ready_after_exit"] is False
 
 
 def test_processing_time_including_path_assembly(node):

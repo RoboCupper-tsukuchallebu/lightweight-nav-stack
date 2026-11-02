@@ -3,6 +3,7 @@ service and prints one JSON object. Not collected by pytest (name has no test_ p
 
 import json
 import sys
+import time
 
 import rclpy
 from lightnav_planner.planner_node import SERVICE_NAME, PlannerNode
@@ -12,6 +13,7 @@ from lightnav_msgs.msg import Waypoint
 from lightnav_msgs.srv import PlanPath
 
 CALL_TIMEOUT_S = 5.0
+GRAPH_SETTLE_TIMEOUT_S = 5.0
 
 
 def call_plan_path(planner_node, client_node, client):
@@ -34,8 +36,17 @@ def call_plan_path(planner_node, client_node, client):
     }
 
 
-def is_advertised(client_node):
-    return SERVICE_NAME in dict(client_node.get_service_names_and_types())
+def wait_until_service_gone(planner_node, client_node, client):
+    """Spin so graph updates arrive, then report whether the client still sees the service."""
+    executor = SingleThreadedExecutor()
+    executor.add_node(planner_node)
+    executor.add_node(client_node)
+    deadline = time.monotonic() + GRAPH_SETTLE_TIMEOUT_S
+    while client.service_is_ready() and time.monotonic() < deadline:
+        executor.spin_once(timeout_sec=0.1)
+    executor.remove_node(client_node)
+    executor.remove_node(planner_node)
+    return client.service_is_ready()
 
 
 def main(shutdown_from_active):
@@ -43,18 +54,20 @@ def main(shutdown_from_active):
     planner_node = PlannerNode()
     client_node = rclpy.create_node("planner_probe_client")
     client = client_node.create_client(PlanPath, SERVICE_NAME)
-    report = {}
+    report = {"ready_before_activate": client.service_is_ready()}
     planner_node.trigger_configure()
-    report["service_after_configure"] = planner_node._service is not None
     planner_node.trigger_activate()
-    report["service_after_activate"] = planner_node._service is not None
-    report["advertised_when_active"] = client.wait_for_service(timeout_sec=CALL_TIMEOUT_S)
+    report["ready_when_active"] = client.wait_for_service(timeout_sec=CALL_TIMEOUT_S)
     report["round_trip"] = call_plan_path(planner_node, client_node, client)
     if shutdown_from_active:
         planner_node.trigger_shutdown()
     else:
         planner_node.trigger_deactivate()
-    report["service_after_exit_from_active"] = planner_node._service is not None
+    report["ready_after_exit"] = wait_until_service_gone(planner_node, client_node, client)
+    if not shutdown_from_active:
+        planner_node.trigger_activate()
+        report["ready_after_reactivate"] = client.wait_for_service(timeout_sec=CALL_TIMEOUT_S)
+        report["round_trip_after_reactivate"] = call_plan_path(planner_node, client_node, client)
     print(json.dumps(report))
     planner_node.destroy_node()
     client_node.destroy_node()
