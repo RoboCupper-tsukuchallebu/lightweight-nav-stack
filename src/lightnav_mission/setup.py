@@ -11,7 +11,7 @@ setup(
         ("share/" + PACKAGE_NAME, ["package.xml"]),
     ],
     install_requires=["setuptools", "pyyaml"],
-    tests_require=["pytest"],
+    extras_require={"test": ["pytest"]},
     zip_safe=True,
     maintainer="lightnav maintainers",
     maintainer_email="maintainers@example.com",

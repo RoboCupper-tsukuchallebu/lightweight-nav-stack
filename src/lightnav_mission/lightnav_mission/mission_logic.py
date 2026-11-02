@@ -3,6 +3,7 @@
 import math
 from dataclasses import dataclass
 from enum import Enum
+from itertools import pairwise
 
 
 class MissionState(str, Enum):
@@ -115,3 +116,18 @@ def update_no_motion(
         # 動いているので窓を張り直す
         return NoMotionTracker(now_s, x, y), False
     return tracker, now_s - tracker.start_stamp_s >= no_motion_timeout_s
+
+
+def validate_plan_response(
+    pose_count: int, waypoint_indices, expected_waypoint_count: int
+) -> str | None:
+    """PlanPath 応答の整合性を検証する。問題があれば理由、無ければ None。"""
+    if pose_count == 0:
+        return "経路が空"
+    if len(waypoint_indices) != expected_waypoint_count:
+        return f"waypoint_indices の長さ {len(waypoint_indices)} が waypoint 数 {expected_waypoint_count} と違う"
+    if any(not 0 <= path_index < pose_count for path_index in waypoint_indices):
+        return "waypoint_indices が経路の範囲外"
+    if any(later < earlier for earlier, later in pairwise(waypoint_indices)):
+        return "waypoint_indices が単調でない"
+    return None

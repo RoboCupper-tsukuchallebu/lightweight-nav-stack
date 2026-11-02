@@ -4,6 +4,7 @@ import math
 import random
 import threading
 import time
+from dataclasses import dataclass
 
 import rclpy
 from geometry_msgs.msg import PoseStamped
@@ -25,6 +26,7 @@ from lightnav_mission.mission_logic import (
     next_state,
     should_replan_on_large_correction,
     update_no_motion,
+    validate_plan_response,
 )
 from lightnav_msgs.action import FollowWaypoints
 from lightnav_msgs.msg import FollowStatus, LocalizationStatus, PathWithId
@@ -48,6 +50,7 @@ PARAMETER_DEFAULTS = {
     "no_motion_timeout_s": 5.0,
     "no_motion_distance_m": 0.1,
 }
+NON_NEGATIVE_PARAMETERS = ("pass_index_margin", "v_progress_min")
 POSITIVE_PARAMETERS = (
     "default_arrival_radius_m", "final_arrival_radius_m", "tick_hz",
     "pose_timeout_s", "plan_timeout_s", "no_motion_timeout_s", "no_motion_distance_m",
@@ -66,8 +69,8 @@ def is_goal_valid(goal: FollowWaypoints.Goal) -> bool:
 
 
 class MissionNode(LifecycleNode):
-    def __init__(self):
-        super().__init__("lightnav_mission")
+    def __init__(self, **node_kwargs):
+        super().__init__("lightnav_mission", **node_kwargs)
         self._session_id = random.randint(1, MAX_SESSION_ID)  # 0 は無効
         self._path_id = 0
         self._state = MissionState.IDLE
@@ -80,16 +83,23 @@ class MissionNode(LifecycleNode):
         self._localization_state = LOCALIZATION_STATE_UNKNOWN
         self._is_large_correction_pending = False
         self._parameters = {}
+        self._services, self._subscriptions = [], []
+        self._follow_status_time_s = 0.0
+        self._was_large_correction = False
+        for name, default in PARAMETER_DEFAULTS.items():
+            self.declare_parameter(name, default)
         self._last_path_message: PathWithId | None = None
 
     # ---- lifecycle ----
 
     def on_configure(self, previous_state) -> TransitionCallbackReturn:
-        for name, default in PARAMETER_DEFAULTS.items():
-            self.declare_parameter(name, default)
         self._parameters = {name: self.get_parameter(name).value for name in PARAMETER_DEFAULTS}
-        if any(self._parameters[name] <= 0 for name in POSITIVE_PARAMETERS):
-            self.get_logger().error("パラメータ不正: 正でなければならない値がある")
+        if (
+            any(self._parameters[name] <= 0 for name in POSITIVE_PARAMETERS)
+            or any(self._parameters[name] < 0 for name in NON_NEGATIVE_PARAMETERS)
+            or not self._parameters["pose_topic"]
+        ):
+            self.get_logger().error("パラメータ不正")
             return TransitionCallbackReturn.FAILURE
 
         group = ReentrantCallbackGroup()
@@ -103,22 +113,22 @@ class MissionNode(LifecycleNode):
         )
         self._path_publisher = self.create_lifecycle_publisher(
             PathWithId, "/lightnav/path", path_qos)
-        self.create_subscription(
+        self._subscriptions.append(self.create_subscription(
             PoseStamped, self._parameters["pose_topic"], self._on_pose, 10,
-            callback_group=group)
-        self.create_subscription(
+            callback_group=group))
+        self._subscriptions.append(self.create_subscription(
             FollowStatus, "/lightnav/follow_status", self._on_follow_status, 10,
-            callback_group=group)
+            callback_group=group))
         if self._parameters["localization_status_topic"]:
-            self.create_subscription(
+            self._subscriptions.append(self.create_subscription(
                 LocalizationStatus, self._parameters["localization_status_topic"],
-                self._on_localization_status, status_qos, callback_group=group)
+                self._on_localization_status, status_qos, callback_group=group))
         self._plan_client = self.create_client(
             PlanPath, "/lightnav/planner/plan_path", callback_group=group)
-        self.create_service(
-            Trigger, "/lightnav/mission/pause", self._on_pause, callback_group=group)
-        self.create_service(
-            Trigger, "/lightnav/mission/resume", self._on_resume, callback_group=group)
+        self._services.append(self.create_service(
+            Trigger, "/lightnav/mission/pause", self._on_pause, callback_group=group))
+        self._services.append(self.create_service(
+            Trigger, "/lightnav/mission/resume", self._on_resume, callback_group=group))
         self._action_server = ActionServer(
             self, FollowWaypoints, "/lightnav/mission/follow_waypoints",
             execute_callback=self._execute,
@@ -128,8 +138,24 @@ class MissionNode(LifecycleNode):
         return TransitionCallbackReturn.SUCCESS
 
     def on_deactivate(self, previous_state) -> TransitionCallbackReturn:
-        self._bump_generation()  # 実行中の goal を打ち切る
+        # 実行中の goal を打ち切り、publisher が無効になる前に停止経路を出して IDLE に戻す
+        with self._generation_lock:
+            self._goal_generation += 1
+            self._publish_path_locked()
+            self._state = MissionState.IDLE
+            self._is_pause_requested = False
         return super().on_deactivate(previous_state)
+
+    def on_cleanup(self, previous_state) -> TransitionCallbackReturn:
+        self._action_server.destroy()
+        for service in self._services:
+            self.destroy_service(service)
+        for subscription in self._subscriptions:
+            self.destroy_subscription(subscription)
+        self.destroy_client(self._plan_client)
+        self.destroy_publisher(self._path_publisher)
+        self._services, self._subscriptions = [], []
+        return TransitionCallbackReturn.SUCCESS
 
     # ---- 入力 ----
 
@@ -145,15 +171,19 @@ class MissionNode(LifecycleNode):
     def _on_follow_status(self, message: FollowStatus) -> None:
         if message.session_id == self._session_id and message.path_id == self._path_id:
             self._latest_follow_status = message
+            self._follow_status_time_s = self._now_s()
 
     def _on_localization_status(self, message: LocalizationStatus) -> None:
         self._localization_state = message.state
-        if message.is_large_correction:
-            self._is_large_correction_pending = True
+        if message.is_large_correction and not self._was_large_correction:
+            self._is_large_correction_pending = True  # 立ち上がりだけで再計画する
+        self._was_large_correction = message.is_large_correction
 
     def _on_pause(self, request, response):
-        self._is_pause_requested = self._state is MissionState.FOLLOWING
-        response.success = self._is_pause_requested
+        # PAUSED 中の再送は成功扱いの no-op（フラグに触らない）
+        if self._state is MissionState.FOLLOWING:
+            self._is_pause_requested = True
+        response.success = self._state in (MissionState.FOLLOWING, MissionState.PAUSED)
         response.message = "" if response.success else "FOLLOWING 中のみ pause できる"
         return response
 
@@ -184,7 +214,8 @@ class MissionNode(LifecycleNode):
     def _is_current(self, generation: int) -> bool:
         return generation == self._goal_generation
 
-    def _publish_path(self, path: Path | None = None, indices=()) -> None:
+    def _publish_path_locked(self, path: Path | None = None, indices=()) -> None:
+        """_generation_lock を持って呼ぶ。path_id の採番と出版を排他する。"""
         self._path_id += 1
         self._latest_follow_status = None
         message = PathWithId()
@@ -195,49 +226,28 @@ class MissionNode(LifecycleNode):
         message.path = path if path is not None else Path()
         message.path.header.frame_id = GLOBAL_FRAME_ID
         message.waypoint_indices = list(indices)
-        self._path_publisher.publish(message)
+        if self._path_publisher.is_activated:
+            self._path_publisher.publish(message)
         self._last_path_message = message
 
-    def _stop_path(self) -> None:
-        self._publish_path()
+    def _publish_if_current(self, generation, path=None, indices=()) -> bool:
+        with self._generation_lock:
+            if not self._is_current(generation):
+                return False
+            self._publish_path_locked(path, indices)
+            return True
 
-    def _request_plan(self, waypoints, start_index):
-        """成功なら (path, 絶対インデックス対応の経路 index 配列)、失敗なら (None, 理由)。"""
-        if self._latest_pose is None:
-            return None, "姿勢が未受信"
-        request = PlanPath.Request()
-        request.frame_id = GLOBAL_FRAME_ID
-        request.start = self._latest_pose
-        request.waypoints = list(waypoints[start_index:])
-        if not self._plan_client.wait_for_service(timeout_sec=self._parameters["plan_timeout_s"]):
-            return None, "PlanPath サービスが無い"
-        future = self._plan_client.call_async(request)
-        deadline = time.monotonic() + self._parameters["plan_timeout_s"]
-        while not future.done():
-            if time.monotonic() > deadline:
-                future.cancel()
-                return None, "PlanPath がタイムアウト"
-            time.sleep(0.01)
-        response = future.result()
-        if not response.success:
-            return None, f"PlanPath 失敗: {response.message}"
-        return response.path, list(response.waypoint_indices)
-
-    def _plan_and_publish(self, waypoints, start_index):
-        path, indices_or_reason = self._request_plan(waypoints, start_index)
-        if path is None:
-            return None, indices_or_reason
-        self._publish_path(path, indices_or_reason)
-        return indices_or_reason, ""
-
-    def _transition(self, event: MissionEvent) -> None:
-        self._state = next_state(self._state, event)
+    def _transition_if_current(self, generation: int, event: MissionEvent) -> None:
+        with self._generation_lock:
+            if self._is_current(generation):
+                self._state = next_state(self._state, event)
 
     def _finish(self, goal_handle, generation, is_success, message, reached_count):
-        """終了処理。preempt 済みなら新しい goal の経路を壊さないよう stop を出さない。"""
-        if self._is_current(generation):
-            self._stop_path()
-            self._transition(MissionEvent.CANCEL)
+        """終了処理。現行 goal のときだけ stop を出して IDLE に戻す（preempt 先を壊さない）。"""
+        with self._generation_lock:
+            if self._is_current(generation):
+                self._publish_path_locked()
+                self._state = next_state(self._state, MissionEvent.ABORT)
         result = FollowWaypoints.Result(
             success=is_success, message=message, reached_count=reached_count)
         if goal_handle.is_cancel_requested:
@@ -248,15 +258,17 @@ class MissionNode(LifecycleNode):
             goal_handle.abort()
         return result
 
-    def _build_feedback(self, index, distance_m, is_not_moving):
+    def _build_feedback(self, index, distance_m, is_not_moving, is_planning=False):
         status = self._latest_follow_status
         feedback = FollowWaypoints.Feedback()
-        feedback.state = self._state.value
+        feedback.state = MissionState.PLANNING.value if is_planning else self._state.value
         feedback.current_waypoint_index = index
         feedback.distance_to_waypoint_m = float(distance_m)
         feedback.path_id = self._path_id
         feedback.localization_state = self._localization_state
         feedback.is_not_moving = is_not_moving
+        feedback.follow_state = FollowStatus.NO_PATH
+        feedback.active_layer = FollowStatus.LAYER_NONE
         if status is not None:
             feedback.follow_state = status.state
             feedback.active_layer = status.active_layer
@@ -264,93 +276,145 @@ class MissionNode(LifecycleNode):
             feedback.is_stuck = status.is_stuck
         return feedback
 
+    def _is_pose_fresh(self) -> bool:
+        return (
+            self._latest_pose is not None
+            and self._now_s() - self._latest_pose_time_s <= self._parameters["pose_timeout_s"]
+        )
+
+    def _begin_plan(self, waypoints, index) -> "PendingPlan":
+        """計画要求を作る。応答待ちは tick ごとに _poll_plan で行い、スレッドをブロックしない。"""
+        return PendingPlan(
+            waypoints=waypoints, index=index,
+            deadline_s=self._now_s() + self._parameters["plan_timeout_s"])
+
+    def _poll_plan(self, pending: "PendingPlan"):
+        """戻り値: ("waiting"|"failed"|"done", 理由, 経路, 経路 index 列)。"""
+        if pending.future is None:
+            if self._now_s() > pending.deadline_s:
+                return "failed", "姿勢またはPlanPathサービスが得られずタイムアウト", None, None
+            if not (self._is_pose_fresh() and self._plan_client.service_is_ready()):
+                return "waiting", "", None, None
+            request = PlanPath.Request()
+            request.frame_id = GLOBAL_FRAME_ID
+            request.start = self._latest_pose
+            request.waypoints = list(pending.waypoints[pending.index:])
+            pending.future = self._plan_client.call_async(request)
+        if not pending.future.done():
+            if self._now_s() > pending.deadline_s:
+                pending.future.cancel()
+                return "failed", "PlanPath がタイムアウト", None, None
+            return "waiting", "", None, None
+        response = pending.future.result()
+        if response is None or not response.success:
+            reason = response.message if response is not None else "応答なし"
+            return "failed", f"PlanPath 失敗: {reason}", None, None
+        problem = validate_plan_response(
+            len(response.path.poses), response.waypoint_indices,
+            len(pending.waypoints) - pending.index)
+        if problem:
+            return "failed", f"PlanPath 応答が不正: {problem}", None, None
+        return "done", "", response.path, list(response.waypoint_indices)
+
     def _execute(self, goal_handle):
         generation = self._bump_generation()
-        goal = goal_handle.request
-        waypoints = list(goal.waypoints)
-        index = goal.start_index
-        self._is_pause_requested = False
-        self._is_large_correction_pending = False
-        self._transition(MissionEvent.GOAL_ACCEPTED)
+        try:
+            return self._run_goal(goal_handle, generation)
+        except Exception as error:  # noqa: BLE001 例外でも必ず停止経路を出して abort する
+            self.get_logger().error(f"mission 実行中の例外: {error!r}")
+            return self._finish(goal_handle, generation, False, f"内部エラー: {error!r}", 0)
 
-        path_indices, reason = self._plan_and_publish(waypoints, index)
-        if path_indices is None:
-            self._transition(MissionEvent.PLAN_FAILED)
-            return self._finish(goal_handle, generation, False, reason, index)
-        self._transition(MissionEvent.PLAN_SUCCEEDED)
-        plan_offset = index  # path_indices[k] は waypoints[plan_offset + k] に対応
-
+    def _run_goal(self, goal_handle, generation):
+        waypoints = list(goal_handle.request.waypoints)
+        index = goal_handle.request.start_index
         parameters = self._parameters
+        with self._generation_lock:
+            self._is_pause_requested = False
+            self._is_large_correction_pending = False
+            self._state = next_state(self._state, MissionEvent.GOAL_ACCEPTED)
+        pending = self._begin_plan(waypoints, index)
+        path_indices, plan_offset = None, index
         tracker = NoMotionTracker()
-        plan_sent_s = self._now_s()
-        has_resent = False
+        plan_sent_s, has_resent = self._now_s(), False
         period_s = 1.0 / parameters["tick_hz"]
         while rclpy.ok():
             time.sleep(period_s)
             if not self._is_current(generation):
-                return self._finish(goal_handle, generation, False, "新しい goal に置き換えられた", index)
+                return self._finish(
+                    goal_handle, generation, False, "preempt または deactivate で打ち切られた", index)
             if goal_handle.is_cancel_requested:
                 return self._finish(goal_handle, generation, False, "キャンセルされた", index)
 
             if self._state is MissionState.PAUSED:
                 if not self._is_pause_requested:
-                    self._transition(MissionEvent.RESUME)
-                    path_indices, reason = self._plan_and_publish(waypoints, index)
-                    if path_indices is None:
-                        return self._finish(goal_handle, generation, False, reason, index)
-                    self._transition(MissionEvent.PLAN_SUCCEEDED)
-                    plan_offset, plan_sent_s, has_resent = index, self._now_s(), False
+                    self._transition_if_current(generation, MissionEvent.RESUME)
+                    self._is_large_correction_pending = False
+                    pending = self._begin_plan(waypoints, index)
                 goal_handle.publish_feedback(self._build_feedback(index, 0.0, False))
+                if self._state is MissionState.PAUSED:
+                    continue
+            elif self._is_pause_requested:
+                pending = None  # 計画待ちも破棄して停止する
+                if self._publish_if_current(generation):
+                    self._transition_if_current(generation, MissionEvent.PAUSE)
                 continue
-            if self._is_pause_requested:
-                self._transition(MissionEvent.PAUSE)
-                self._stop_path()
-                continue
-
-            if should_replan_on_large_correction(
-                self._state, self._is_large_correction_pending,
-                parameters["replan_on_large_correction"],
+            if (
+                pending is None
+                and should_replan_on_large_correction(
+                    self._state, self._is_large_correction_pending,
+                    parameters["replan_on_large_correction"])
             ):
+                pending = self._begin_plan(waypoints, index)
                 self._is_large_correction_pending = False
-                path_indices, reason = self._plan_and_publish(waypoints, index)
-                if path_indices is None:
+
+            if pending is not None:
+                outcome, reason, path, indices = self._poll_plan(pending)
+                if outcome == "failed":
+                    self._transition_if_current(generation, MissionEvent.PLAN_FAILED)
                     return self._finish(goal_handle, generation, False, reason, index)
-                plan_offset, plan_sent_s, has_resent = index, self._now_s(), False
-            self._is_large_correction_pending = False
-
-            pose = self._latest_pose
-            is_pose_fresh = (
-                pose is not None
-                and self._now_s() - self._latest_pose_time_s <= parameters["pose_timeout_s"]
-            )
-            status = self._latest_follow_status
-            if status is None:
-                elapsed_s = self._now_s() - plan_sent_s
-                if elapsed_s > parameters["plan_timeout_s"]:
-                    if has_resent:
-                        return self._finish(
-                            goal_handle, generation, False, "FollowStatus が一致しない", index)
-                    self._path_publisher.publish(self._last_path_message)
-                    plan_sent_s, has_resent = self._now_s(), True
-
-            if not is_pose_fresh:
-                # 到達判定は保留（abort しない）
-                goal_handle.publish_feedback(self._build_feedback(index, 0.0, False))
+                if outcome == "waiting":
+                    goal_handle.publish_feedback(
+                        self._build_feedback(index, 0.0, False, is_planning=True))
+                    continue
+                self._is_large_correction_pending = False  # 新しい経路は現在位置から計画済み
+                if not self._publish_if_current(generation, path, indices):
+                    continue  # 次の tick で打ち切りを検出する
+                self._transition_if_current(generation, MissionEvent.PLAN_SUCCEEDED)
+                path_indices, plan_offset = indices, pending.index
+                plan_sent_s, has_resent = self._now_s(), False
+                pending = None
+            if path_indices is None:
                 continue
 
+            status = self._latest_follow_status
+            if status is not None and self._follow_status_time_s > plan_sent_s:
+                has_resent = False
+            last_alive_s = max(plan_sent_s, self._follow_status_time_s) if status else plan_sent_s
+            if self._now_s() - last_alive_s > parameters["plan_timeout_s"]:
+                if has_resent:
+                    return self._finish(
+                        goal_handle, generation, False, "FollowStatus が途絶または不一致", index)
+                with self._generation_lock:
+                    if self._is_current(generation) and self._last_path_message is not None:
+                        self._path_publisher.publish(self._last_path_message)
+                plan_sent_s, has_resent = self._now_s(), True
+
+            if not self._is_pose_fresh():
+                goal_handle.publish_feedback(self._build_feedback(index, 0.0, False))
+                continue  # 到達判定は保留（abort しない）
+            pose = self._latest_pose
             target = waypoints[index]
             distance_m = math.hypot(
                 pose.pose.position.x - target.x, pose.pose.position.y - target.y)
-            is_final = index == len(waypoints) - 1
             radius_m = effective_arrival_radius_m(
-                target.arrival_radius_m, is_final,
+                target.arrival_radius_m, index == len(waypoints) - 1,
                 parameters["default_arrival_radius_m"], parameters["final_arrival_radius_m"])
             new_index = advance_waypoint_index(
                 index, len(waypoints), distance_m, radius_m,
                 status.closest_index if status is not None else None,
                 path_indices[index - plan_offset], parameters["pass_index_margin"])
             if new_index == len(waypoints):
-                self._transition(MissionEvent.FINAL_REACHED)
+                self._transition_if_current(generation, MissionEvent.FINAL_REACHED)
                 return self._finish(goal_handle, generation, True, "全点到達", new_index)
             index = new_index
 
@@ -363,6 +427,16 @@ class MissionNode(LifecycleNode):
                 self.get_logger().warn("指令しているのに動いていない（モーター無効・空転の可能性）")
             goal_handle.publish_feedback(self._build_feedback(index, distance_m, is_not_moving))
         return self._finish(goal_handle, generation, False, "シャットダウン", index)
+
+
+@dataclass
+class PendingPlan:
+    """応答待ちの PlanPath 要求。deadline はサービス待ちと応答待ちで共有する。"""
+
+    waypoints: list
+    index: int
+    deadline_s: float
+    future: object = None
 
 
 def main(args=None) -> None:
