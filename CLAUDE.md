@@ -26,3 +26,8 @@ pixi run lint    # ruff check src
 - `nav2_*` への依存を入れない（CI が package.xml / CMakeLists.txt / pixi.toml を検査する）。
 - 変数名を省略しない（`pos` ではなく `position` など）。
 - マージは人間が行う。force push・履歴書き換えをしない。
+
+## テストの書き方
+
+- ament_python: `setup.py` に `extras_require={"test": ["pytest"]}` を書き、`test/` に pytest 形式で置く（colcon が unittest 扱いにして 0 件で落ちるのを防ぐ）。launch_testing は `@pytest.mark.launch_test` で動く。pytest は 9 で launch_testing plugin が壊れるため `>=8,<9` にピン留め済み。
+- C++ の gtest: `ament_add_gtest` は ROS の gtest ソースと conda の gtest 1.18 ヘッダが食い違いビルド不能。`find_package(GTest REQUIRED)` + `add_executable` + `GTest::gtest_main` + `ament_add_test(... --gtest_output=xml:${AMENT_TEST_RESULTS_DIR}/${PROJECT_NAME}/<name>.gtest.xml GENERATE_RESULT_FOR_RETURN_CODE_ZERO)` を使う。

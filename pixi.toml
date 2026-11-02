@@ -7,7 +7,7 @@ platforms = ["osx-arm64", "linux-64"]
 ros-jazzy-ros-base = "*"
 colcon-common-extensions = "*"
 setuptools = "*"
-pytest = "*"
+pytest = ">=8,<9"
 pyyaml = "*"
 numpy = "*"
 eigen = "*"
