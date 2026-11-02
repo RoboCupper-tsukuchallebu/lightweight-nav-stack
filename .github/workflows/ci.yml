@@ -4,20 +4,19 @@ on:
   push:
     branches: [develop, main]
 
-env:
-  ROS_LOCALHOST_ONLY: "1"
-
 jobs:
   no-nav2-dependency:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Fail if any manifest depends on nav2
+      - name: Fail if any dependency or source mentions nav2
         run: |
-          # Only manifests are searched, so this file and docs cannot trigger it.
-          if grep -rIn --include=package.xml --include=CMakeLists.txt --include=pixi.toml \
+          # Targets are limited to manifests, lock and sources so this file and docs cannot trigger it.
+          if grep -rIniE --include=pixi.toml --include=pixi.lock --include=package.xml \
+              --include=CMakeLists.txt --include=setup.py --include='*.py' --include='*.cpp' \
+              --include='*.hpp' --include='*.launch.xml' --include='*.launch.yaml' \
               --exclude-dir=.pixi --exclude-dir=build --exclude-dir=install --exclude-dir=.git \
-              'nav2_' .; then
+              'nav2[_-]' .; then
             echo "nav2 dependency is forbidden" >&2
             exit 1
           fi
