@@ -1,0 +1,191 @@
+#include <gtest/gtest.h>
+
+#include <cmath>
+#include <limits>
+
+#include "lightnav_safety_gate/safety_gate_logic.hpp"
+
+using namespace lightnav_safety_gate;  // NOLINT
+
+namespace
+{
+
+constexpr double kPeriodSeconds = 0.05;
+const double kNaN = std::numeric_limits<double>::quiet_NaN();
+const double kInfinity = std::numeric_limits<double>::infinity();
+
+SafetyGateLimits defaultLimits()
+{
+  return {0.8, 0.6, 0.5, 1.0, 1.0, 2.0};
+}
+
+EmergencyStopTimeouts defaultTimeouts()
+{
+  return {0.3, 0.5};
+}
+
+EmergencyStopInputs healthyInputs()
+{
+  EmergencyStopInputs inputs;
+  inputs.is_active = true;
+  inputs.has_obstacle_status = true;
+  inputs.obstacle_status_age_s = 0.1;
+  inputs.has_command = true;
+  inputs.command_age_s = 0.1;
+  return inputs;
+}
+
+}  // namespace
+
+TEST(EmergencyStop, healthyInputsDoNotStop)
+{
+  EXPECT_FALSE(shouldEmergencyStop(healthyInputs(), defaultTimeouts()));
+}
+
+// Each priority-0 condition alone must stop; table of single-fault cases.
+TEST(EmergencyStop, everySingleFaultStops)
+{
+  struct Case
+  {
+    const char * name;
+    void (* apply)(EmergencyStopInputs &);
+  };
+  const Case cases[] = {
+    {"not active", [](EmergencyStopInputs & i) {i.is_active = false;}},
+    {"no obstacle status yet", [](EmergencyStopInputs & i) {i.has_obstacle_status = false;}},
+    {"obstacle status timed out", [](EmergencyStopInputs & i) {i.obstacle_status_age_s = 0.6;}},
+    {"obstacle status age NaN", [](EmergencyStopInputs & i) {i.obstacle_status_age_s = kNaN;}},
+    {"obstacle status age negative", [](EmergencyStopInputs & i) {i.obstacle_status_age_s = -1.0;}},
+    {"stop zone occupied", [](EmergencyStopInputs & i) {i.is_stop_zone_occupied = true;}},
+    {"input stale", [](EmergencyStopInputs & i) {i.is_input_stale = true;}},
+    {"no command yet", [](EmergencyStopInputs & i) {i.has_command = false;}},
+    {"command timed out", [](EmergencyStopInputs & i) {i.command_age_s = 0.4;}},
+    {"command age NaN", [](EmergencyStopInputs & i) {i.command_age_s = kNaN;}},
+    {"command age infinite", [](EmergencyStopInputs & i) {i.command_age_s = kInfinity;}},
+    {"hard stop", [](EmergencyStopInputs & i) {i.is_hard_stop = true;}},
+  };
+  for (const Case & test_case : cases) {
+    EmergencyStopInputs inputs = healthyInputs();
+    test_case.apply(inputs);
+    EXPECT_TRUE(shouldEmergencyStop(inputs, defaultTimeouts())) << test_case.name;
+  }
+}
+
+// All 2^6 combinations of boolean conditions: stop unless every one is benign.
+TEST(EmergencyStop, allBooleanCombinationsStopUnlessAllBenign)
+{
+  for (int bits = 0; bits < 64; ++bits) {
+    EmergencyStopInputs inputs;
+    inputs.is_active = bits & 1;
+    inputs.has_obstacle_status = bits & 2;
+    inputs.has_command = bits & 4;
+    inputs.is_stop_zone_occupied = bits & 8;
+    inputs.is_input_stale = bits & 16;
+    inputs.is_hard_stop = bits & 32;
+    const bool is_all_benign = inputs.is_active && inputs.has_obstacle_status &&
+      inputs.has_command && !inputs.is_stop_zone_occupied && !inputs.is_input_stale &&
+      !inputs.is_hard_stop;
+    EXPECT_EQ(shouldEmergencyStop(inputs, defaultTimeouts()), !is_all_benign) << bits;
+  }
+}
+
+TEST(EmergencyStop, ageExactlyAtTimeoutIsStillFresh)
+{
+  EmergencyStopInputs inputs = healthyInputs();
+  inputs.command_age_s = 0.3;
+  inputs.obstacle_status_age_s = 0.5;
+  EXPECT_FALSE(shouldEmergencyStop(inputs, defaultTimeouts()));
+}
+
+TEST(Finite, rejectsNonFiniteComponents)
+{
+  EXPECT_TRUE(isFinite({0.1, -0.2}));
+  EXPECT_FALSE(isFinite({kNaN, 0.0}));
+  EXPECT_FALSE(isFinite({0.0, kNaN}));
+  EXPECT_FALSE(isFinite({kInfinity, 0.0}));
+  EXPECT_FALSE(isFinite({0.0, -kInfinity}));
+}
+
+TEST(Saturate, clampsBothSigns)
+{
+  const PlanarVelocity result = saturate({5.0, -5.0}, defaultLimits());
+  EXPECT_DOUBLE_EQ(result.linear_mps, 0.8);
+  EXPECT_DOUBLE_EQ(result.angular_rps, -0.6);
+  const PlanarVelocity inside = saturate({0.3, 0.2}, defaultLimits());
+  EXPECT_DOUBLE_EQ(inside.linear_mps, 0.3);
+  EXPECT_DOUBLE_EQ(inside.angular_rps, 0.2);
+}
+
+TEST(LimitRate, zeroTargetBypassesRateLimit)
+{
+  const PlanarVelocity result = limitRate({0.8, 0.6}, {0.0, 0.0}, defaultLimits(), kPeriodSeconds);
+  EXPECT_EQ(result.linear_mps, 0.0);
+  EXPECT_EQ(result.angular_rps, 0.0);
+}
+
+TEST(LimitRate, accelerationIsLimitedPerPeriod)
+{
+  const PlanarVelocity result = limitRate({0.0, 0.0}, {0.6, 0.4}, defaultLimits(), kPeriodSeconds);
+  EXPECT_NEAR(result.linear_mps, 0.5 * kPeriodSeconds, 1e-12);
+  EXPECT_NEAR(result.angular_rps, 1.0 * kPeriodSeconds, 1e-12);
+}
+
+TEST(LimitRate, decelerationUsesDecelerationLimit)
+{
+  const PlanarVelocity result = limitRate({0.6, 0.4}, {0.2, 0.1}, defaultLimits(), kPeriodSeconds);
+  EXPECT_NEAR(result.linear_mps, 0.6 - 1.0 * kPeriodSeconds, 1e-12);
+  EXPECT_NEAR(result.angular_rps, 0.4 - 2.0 * kPeriodSeconds, 1e-12);
+}
+
+TEST(LimitRate, smallStepReachesTargetWithoutOvershoot)
+{
+  const PlanarVelocity result =
+    limitRate({0.10, 0.0}, {0.11, 0.0}, defaultLimits(), kPeriodSeconds);
+  EXPECT_DOUBLE_EQ(result.linear_mps, 0.11);
+}
+
+TEST(LimitRate, negativeDirectionAcceleratesSymmetrically)
+{
+  const PlanarVelocity result = limitRate({0.0, 0.0}, {-0.6, -0.4}, defaultLimits(), kPeriodSeconds);
+  EXPECT_NEAR(result.linear_mps, -0.5 * kPeriodSeconds, 1e-12);
+  EXPECT_NEAR(result.angular_rps, -1.0 * kPeriodSeconds, 1e-12);
+}
+
+TEST(LimitRate, signReversalDeceleratesTowardZeroFirst)
+{
+  const PlanarVelocity result = limitRate({0.3, 0.3}, {-0.5, -0.5}, defaultLimits(), kPeriodSeconds);
+  EXPECT_NEAR(result.linear_mps, 0.3 - 1.0 * kPeriodSeconds, 1e-12);
+  EXPECT_NEAR(result.angular_rps, 0.3 - 2.0 * kPeriodSeconds, 1e-12);
+}
+
+TEST(LimitRate, signReversalNearZeroDoesNotCrossZeroInOneStep)
+{
+  const PlanarVelocity result = limitRate({0.01, 0.0}, {-0.5, 0.0}, defaultLimits(), kPeriodSeconds);
+  EXPECT_DOUBLE_EQ(result.linear_mps, 0.0);
+}
+
+TEST(LimitRate, rampReachesTargetInExpectedSteps)
+{
+  PlanarVelocity output{0.0, 0.0};
+  for (int step = 0; step < 24; ++step) {
+    output = limitRate(output, {0.6, 0.0}, defaultLimits(), kPeriodSeconds);
+  }
+  EXPECT_NEAR(output.linear_mps, 0.6, 1e-9);  // 0.6 / (0.5 * 0.05) = 24 steps
+}
+
+TEST(Limits, validationRejectsNonPositiveAndNonFinite)
+{
+  EXPECT_TRUE(areLimitsValid(defaultLimits()));
+  SafetyGateLimits limits = defaultLimits();
+  limits.linear_max_mps = 0.0;
+  EXPECT_FALSE(areLimitsValid(limits));
+  limits = defaultLimits();
+  limits.angular_deceleration_max_rps2 = kNaN;
+  EXPECT_FALSE(areLimitsValid(limits));
+  limits = defaultLimits();
+  limits.acceleration_max_mps2 = -1.0;
+  EXPECT_FALSE(areLimitsValid(limits));
+  limits = defaultLimits();
+  limits.angular_max_rps = kInfinity;
+  EXPECT_FALSE(areLimitsValid(limits));
+}
