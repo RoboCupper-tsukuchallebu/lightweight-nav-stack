@@ -36,6 +36,7 @@ struct LocalizerParameters {
   double gps_node_gap_s = 0.2;       // beyond this a GPS fix gets its own node
   int gps_conflict_count = 5;
   double drift_rate = 0.02;
+  double map_submap_rebuild_distance_m = 50.0;
   double initial_sigma_xy_m = 0.5;
   double initial_sigma_yaw_rad = 0.1;
 };
@@ -77,6 +78,8 @@ class Localizer {
   const std::string& last_error() const;
   std::size_t pending_scan_count() const;
   void inject_optimization_failure_for_test();
+  // Next prior-map rebuild: 1 = the worker throws, 2 = starting the worker throws system_error.
+  void inject_map_rebuild_failure_for_test(int mode);
 
   double last_scan_time_ms() const;
   double last_match_time_ms() const;

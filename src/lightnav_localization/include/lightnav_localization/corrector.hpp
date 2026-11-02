@@ -15,6 +15,8 @@ struct CorrectorParameters {
 // Moves the published map->base pose toward the target map->base pose at a limited speed. The
 // difference is taken at the base pose (not on T_map_odom), so a yaw correction far from the odom
 // origin does not swing the output by (distance x angle).
+// Only x, y and yaw are slewed (the 2D pose the downstream adapter projects to). z, roll and pitch
+// follow the target immediately (tentative decision, see the PR).
 class Corrector {
  public:
   explicit Corrector(const CorrectorParameters& parameters) : parameters_(parameters) {}
@@ -25,36 +27,39 @@ class Corrector {
   // `odom_to_base` is the current wheel odometry pose. Non-positive elapsed time does not move.
   const Eigen::Isometry3d& step(double elapsed_sec, const Eigen::Isometry3d& odom_to_base) {
     if (elapsed_sec <= 0.0) return applied_;
-    const Eigen::Isometry3d remaining = remaining_at_base(odom_to_base);
-    const double distance = remaining.translation().norm();
-    const Eigen::AngleAxisd rotation(remaining.rotation());
-    const double angle = rotation.angle();
+    const Eigen::Isometry3d current = applied_ * odom_to_base;
+    const Eigen::Isometry3d goal = target_ * odom_to_base;
+    const Eigen::Vector2d offset = (goal.translation() - current.translation()).head<2>();
+    const double distance = offset.norm();
     const double translation_ratio =
         distance > 1e-12 ? std::min(1.0, parameters_.slew_mps * elapsed_sec / distance) : 1.0;
-    const double rotation_ratio =
-        angle > 1e-12 ? std::min(1.0, parameters_.slew_rps * elapsed_sec / angle) : 1.0;
-    Eigen::Isometry3d increment = Eigen::Isometry3d::Identity();
-    increment.translation() = translation_ratio * remaining.translation();
-    increment.linear() =
-        Eigen::AngleAxisd(rotation_ratio * angle, rotation.axis()).toRotationMatrix();
-    const Eigen::Isometry3d new_map_to_base = applied_ * odom_to_base * increment;
-    applied_ = new_map_to_base * odom_to_base.inverse();
+    const double yaw_difference = wrap(yaw_of(goal) - yaw_of(current));
+    const double yaw_step = std::clamp(yaw_difference, -parameters_.slew_rps * elapsed_sec,
+                                       parameters_.slew_rps * elapsed_sec);
+    Eigen::Isometry3d next = goal;  // z, roll, pitch from the goal
+    next.translation().head<2>() = current.translation().head<2>() + translation_ratio * offset;
+    // goal rotation = Rz(yaw_goal) * tilt; keep the tilt, set the yaw to the slewed value.
+    const double yaw_next = yaw_of(current) + yaw_step;
+    next.linear() = Eigen::AngleAxisd(yaw_next - yaw_of(goal), Eigen::Vector3d::UnitZ()).toRotationMatrix() *
+                    goal.rotation();
+    applied_ = next * odom_to_base.inverse();
     return applied_;
   }
 
   const Eigen::Isometry3d& applied() const { return applied_; }
+  // Horizontal distance still to be applied at the base.
   double pending_correction_m(const Eigen::Isometry3d& odom_to_base) const {
-    return remaining_at_base(odom_to_base).translation().norm();
+    return ((target_ * odom_to_base).translation() - (applied_ * odom_to_base).translation()).head<2>().norm();
   }
   bool is_large_correction(const Eigen::Isometry3d& odom_to_base) const {
     return pending_correction_m(odom_to_base) > parameters_.large_correction_threshold_m;
   }
 
  private:
-  // Target base pose expressed in the currently published base frame.
-  Eigen::Isometry3d remaining_at_base(const Eigen::Isometry3d& odom_to_base) const {
-    return (applied_ * odom_to_base).inverse() * (target_ * odom_to_base);
+  static double yaw_of(const Eigen::Isometry3d& pose) {
+    return std::atan2(pose.rotation()(1, 0), pose.rotation()(0, 0));
   }
+  static double wrap(double angle) { return std::atan2(std::sin(angle), std::cos(angle)); }
 
   CorrectorParameters parameters_;
   Eigen::Isometry3d applied_ = Eigen::Isometry3d::Identity();

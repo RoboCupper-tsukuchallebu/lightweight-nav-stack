@@ -5,7 +5,9 @@
 #include <cmath>
 #include <future>
 #include <map>
+#include <stdexcept>
 #include <string>
+#include <system_error>
 
 #include "lightnav_localization/downsample.hpp"
 
@@ -13,7 +15,6 @@ namespace lightnav_localization {
 namespace {
 
 constexpr double kMapSubmapRadiusM = 100.0;
-constexpr double kMapSubmapRebuildDistanceM = 50.0;
 constexpr double kWheelBufferSec = 3.0;
 constexpr double kNeverSec = -1e9;
 constexpr std::size_t kMaxPendingScans = 20;
@@ -91,6 +92,8 @@ struct Localizer::Implementation {
   Eigen::Isometry3d last_wheel_pose = Eigen::Isometry3d::Identity();
   double position_std_m = 0.0;
 
+  Eigen::Isometry3d previous_scan_pose = Eigen::Isometry3d::Identity();  // map->base at the last scan
+  Eigen::Isometry3d previous_scan_odom = Eigen::Isometry3d::Identity();
   double last_keyframe_sec = 0.0;  // last node that carries a scan (GPS-only nodes do not count)
   Eigen::Isometry3d last_keyframe_odom = Eigen::Isometry3d::Identity();
   std::deque<NodeRecord> nodes;
@@ -100,6 +103,7 @@ struct Localizer::Implementation {
   std::vector<PendingGps> pending_gps;
   std::function<void(MatchResult&)> map_match_hook;
   std::string last_error;
+  int rebuild_failure_mode = 0;  // test seam: 1 = worker throws, 2 = launch throws
   double scan_time_ms = 0.0;
   double match_time_ms = 0.0;
   double submap_rebuild_time_ms = 0.0;
@@ -169,7 +173,13 @@ struct Localizer::Implementation {
     if (map_points.empty()) return;
     if (pending_map_target.valid() &&
         pending_map_target.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
-      MapTargetBuild built = pending_map_target.get();
+      MapTargetBuild built;
+      try {
+        built = pending_map_target.get();
+      } catch (const std::exception& exception) {
+        last_error = std::string("prior-map rebuild failed, keeping the old target: ") + exception.what();
+        built.target = PreparedTarget();
+      }
       if (built.target.is_valid()) {
         map_target = built.target;
         map_target_center = built.center;
@@ -183,12 +193,21 @@ struct Localizer::Implementation {
       has_map_target = map_target.is_valid();
       return;
     }
-    if ((center.head<2>() - map_target_center).norm() < kMapSubmapRebuildDistanceM) return;
+    if ((center.head<2>() - map_target_center).norm() < parameters.map_submap_rebuild_distance_m) return;
     if (pending_map_target.valid()) return;  // already rebuilding
     const Eigen::Vector2d rebuild_center = center.head<2>();
-    pending_map_target = std::async(std::launch::async, [this, rebuild_center] {
-      return build_map_target(map_points, rebuild_center);
-    });
+    try {
+      if (rebuild_failure_mode == 2) throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+      const bool should_fail = rebuild_failure_mode == 1;
+      pending_map_target = std::async(std::launch::async, [this, rebuild_center, should_fail] {
+        if (should_fail) throw std::runtime_error("injected rebuild failure");
+        return build_map_target(map_points, rebuild_center);
+      });
+    } catch (const std::system_error& error) {
+      // Thread could not be started: keep matching against the old target.
+      last_error = std::string("prior-map rebuild could not start, keeping the old target: ") + error.what();
+    }
+    rebuild_failure_mode = 0;
   }
 
   void mark_absolute(double stamp) {
@@ -237,6 +256,8 @@ struct Localizer::Implementation {
       nodes.push_back({0, pending.stamp, *odom_now});
       lidar.add_keyframe(initial, cloud);
       lidar_nodes.push_back(0);
+      previous_scan_pose = initial;
+      previous_scan_odom = *odom_now;
       last_keyframe_sec = pending.stamp;
       last_keyframe_odom = *odom_now;
       is_graph_started = true;
@@ -248,12 +269,15 @@ struct Localizer::Implementation {
     const Eigen::Isometry3d last_pose = pose_of(last.index);
     const Eigen::Isometry3d wheel_relative = last.odom_to_base.inverse() * *odom_now;
     const Eigen::Isometry3d prediction = last_pose * wheel_relative;
-    const double moved_m = wheel_relative.translation().norm();
 
     Eigen::Isometry3d best = prediction;
     std::optional<MatchResult> lidar_result;
     if (lidar.has_submap()) {
-      MatchResult result = lidar.match(cloud, prediction, moved_m);
+      // The LiDAR prediction starts at the previous SCAN (10 Hz), so the gate compares with at most
+      // 0.1 s of wheel motion, not with everything since the last keyframe.
+      const Eigen::Isometry3d scan_relative = previous_scan_odom.inverse() * *odom_now;
+      const Eigen::Isometry3d scan_prediction = previous_scan_pose * scan_relative;
+      MatchResult result = lidar.match(cloud, scan_prediction, scan_relative.translation().norm());
       if (result.is_accepted) {
         best = result.target_to_source;
         lidar_result = result;
@@ -263,6 +287,11 @@ struct Localizer::Implementation {
 
     const double moved_since_keyframe_m =
         (odom_now->translation() - last_keyframe_odom.translation()).norm();
+    const auto remember_scan = [&](const Eigen::Isometry3d& pose) {
+      previous_scan_pose = pose;
+      previous_scan_odom = *odom_now;
+    };
+    remember_scan(best);
     const bool is_keyframe = moved_since_keyframe_m >= parameters.keyframe_distance_m ||
                              pending.stamp - last_keyframe_sec >= parameters.keyframe_time_s;
     if (is_keyframe) {
@@ -403,6 +432,8 @@ LocalizationState Localizer::poll_state(double now_sec) {
 std::size_t Localizer::pending_scan_count() const { return implementation_->pending_scans.size(); }
 
 const std::string& Localizer::last_error() const { return implementation_->last_error; }
+
+void Localizer::inject_map_rebuild_failure_for_test(int mode) { implementation_->rebuild_failure_mode = mode; }
 
 void Localizer::inject_optimization_failure_for_test() { implementation_->graph->inject_failure_once(); }
 

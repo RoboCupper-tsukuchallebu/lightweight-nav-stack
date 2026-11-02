@@ -10,8 +10,9 @@ using namespace lightnav_localization::testing;
 
 namespace {
 // Real GICP Hessian of a scan matched against itself, in a corridor with or without end caps.
-Eigen::Matrix<double, 6, 6> corridor_hessian(bool has_end_caps) {
-  const SyntheticWorld world({{0.0, 0.0}, {400.0, 0.0}}, has_end_caps);
+Eigen::Matrix<double, 6, 6> corridor_hessian(bool has_end_caps, double max_range_m = 60.0) {
+  SyntheticWorld world({{0.0, 0.0}, {400.0, 0.0}}, has_end_caps);
+  world.set_max_range(max_range_m);
   const Eigen::Isometry3d pose = arc_pose(0.0, Eigen::Vector2d(200.0, 0.0), 0.0, 0.0, 0.0);
   const auto timed = world.synthesize_scan([&pose](double) { return pose; }, 0.0, 0.1, true, 360, 8);
   PointList points;
@@ -52,4 +53,17 @@ TEST(MatchInformation, RealHessianOfOpenCorridorWeakensSlidingDirectionOnly) {
   EXPECT_GE(sliding_sigma_m, 1.0);
   EXPECT_LE(lateral_sigma_m, 0.05);
 
+}
+
+// Review medium 2: the verdict must not depend on how far the sensor sees. Outdoors the effective
+// range is often 40-50 m; the sliding direction must be weak there too.
+TEST(MatchInformation, SlidingDirectionIsWeakAtEveryEffectiveRange) {
+  for (const double range_m : {20.0, 30.0, 40.0, 45.0, 50.0, 60.0}) {
+    const Eigen::Matrix<double, 6, 6> covariance =
+        information_from_hessian(corridor_hessian(false, range_m), InformationLimits{}).inverse();
+    std::printf("range %.0f m: sliding sigma %.2f m, lateral sigma %.3f m\n", range_m,
+                std::sqrt(covariance(3, 3)), std::sqrt(covariance(4, 4)));
+    EXPECT_GE(std::sqrt(covariance(3, 3)), 1.0) << "range " << range_m;
+    EXPECT_LE(std::sqrt(covariance(4, 4)), 0.05) << "range " << range_m;
+  }
 }

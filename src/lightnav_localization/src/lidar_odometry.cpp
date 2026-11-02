@@ -37,8 +37,12 @@ MatchResult LidarOdometry::match(const PointList& scan_in_base, const Eigen::Iso
   matcher.inlier_ratio_min = parameters_.inlier_ratio_min;
   matcher.gate_translation_m =
       parameters_.gate_translation_m + parameters_.gate_translation_ratio * moved_since_keyframe_m;
-  matcher.gate_rotation_rad = parameters_.gate_yaw_rad;
-  return match_scan(submap_, scan_in_base, prediction, matcher);
+  matcher.gate_rotation_rad = M_PI;  // the Issue gates yaw only; roll/pitch come from this match
+  MatchResult result = match_scan(submap_, scan_in_base, prediction, matcher);
+  const Eigen::Matrix3d difference = prediction.rotation().transpose() * result.target_to_source.rotation();
+  const double yaw_difference = std::abs(std::atan2(difference(1, 0), difference(0, 0)));
+  result.is_accepted = result.is_accepted && yaw_difference <= parameters_.gate_yaw_rad;
+  return result;
 }
 
 }  // namespace lightnav_localization

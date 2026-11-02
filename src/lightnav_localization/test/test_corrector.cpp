@@ -81,3 +81,18 @@ TEST(Corrector, NegativeElapsedTimeDoesNotMove) {
   corrector.step(-0.5, odom_at(0.0));
   EXPECT_NEAR(corrector.applied().translation().x(), 0.0, 1e-12);
 }
+
+// Decision (tentative): z, roll and pitch are not slewed; only x, y, yaw are.
+TEST(Corrector, HeightAndTiltFollowTargetImmediately) {
+  Corrector corrector(CorrectorParameters{});
+  corrector.reset(Eigen::Isometry3d::Identity());
+  Eigen::Isometry3d target = Eigen::Isometry3d::Identity();
+  target.translation().z() = 0.8;
+  target.linear() = Eigen::AngleAxisd(0.17, Eigen::Vector3d::UnitY()).toRotationMatrix();
+  corrector.set_target(target);
+  const Eigen::Isometry3d odom = odom_at(0.0);
+  const Eigen::Isometry3d output = corrector.step(0.02, odom) * odom;
+  EXPECT_NEAR(output.translation().z(), 0.8, 1e-9);
+  EXPECT_NEAR(std::asin(-output.rotation()(2, 0)), 0.17, 1e-9);
+  EXPECT_FALSE(corrector.is_large_correction(odom));  // pending counts the horizontal part only
+}

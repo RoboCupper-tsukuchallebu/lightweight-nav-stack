@@ -62,6 +62,7 @@ struct Course {
 
 const Course kShortCourse{{20.0, 20.0}, {1.0}};
 // The Issue's course: 200 m with two 90 degree turns.
+const Course kOpenCorridor{{120.0}, {}};
 const Course kSpecCourse{{70.0, 60.0, 70.0}, {1.0, -1.0}};
 
 GpsFix fix_at_enu(double east_m, double north_m) {
@@ -86,6 +87,10 @@ struct Scenario {
   bool use_spec_course = false;
   bool has_real_map_hole = false;  // remove map points inside the hole instead of faking a failed match
   double wheel_scale = 1.05;
+  double ramp_blend_m = 0.6;  // 0 = pitch steps 10 degrees at once
+  bool is_open_corridor = false;  // 120 m straight, no end caps
+  double map_rebuild_distance_m = 50.0;
+  int rebuild_failure_mode = 0;
   bool has_ramp = false;  // 10 degree climb over 10 m (horizontal) starting at x = 5 m
   double initial_offset_m = 0.0;  // start this far to the left of truth (needs a correction)
   double large_correction_threshold_m = 1.0;
@@ -111,7 +116,7 @@ struct Report {
   bool published_after_reinitialize = false;
   bool saw_large_correction = false;
   double max_pitch_error_deg = 0.0;          // whole run, includes the ramp entry transient
-  double max_pitch_error_on_ramp_deg = 0.0;  // truth x in [7, 14] m: settled on the climb
+  double max_pitch_error_on_ramp_deg = 0.0;  // truth x in [5, 15] m: the whole climb
   double max_output_speed_mps = 0.0;
   double final_position_error_m = 0.0;
   std::string last_error;
@@ -121,11 +126,12 @@ struct Report {
 };
 
 Report run(const Scenario& scenario) {
-  const Course& course = scenario.use_spec_course ? kSpecCourse : kShortCourse;
-  SyntheticWorld world(course.centerline());
+  const Course& course = scenario.is_open_corridor ? kOpenCorridor : (scenario.use_spec_course ? kSpecCourse : kShortCourse);
+  SyntheticWorld world(course.centerline(), !scenario.is_open_corridor);
   constexpr double kRampAngleRad = 10.0 * M_PI / 180.0;
   if (scenario.has_ramp) world.set_ramp(5.0, 10.0, kRampAngleRad);
-  const auto truth_at = [&course, &world](double time) {
+  const double ramp_blend_m = scenario.ramp_blend_m;
+  const auto truth_at = [&course, &world, ramp_blend_m](double time) {
     Eigen::Isometry3d pose = course.truth_at(time);
     const double x = pose.translation().x();
     const double yaw = std::atan2(pose.rotation()(1, 0), pose.rotation()(0, 0));
@@ -133,7 +139,7 @@ Report run(const Scenario& scenario) {
     if (world.is_on_ramp(x) && std::abs(yaw) < 0.1) {  // climbing along +x: nose up
       // The pitch changes over ~1 s (0.6 m) at both ends of the ramp, as a vehicle does; a step of 10
       // degrees would also exceed the 0.1 rad LiDAR odometry rotation gate by construction.
-      const double blend = std::min({1.0, (x - 5.0) / 0.6, (15.0 - x) / 0.6});
+      const double blend = ramp_blend_m <= 0.0 ? 1.0 : std::min({1.0, (x - 5.0) / ramp_blend_m, (15.0 - x) / ramp_blend_m});
       pose.linear() = pose.linear() * Eigen::AngleAxisd(-world.ramp_angle_rad() * blend, Eigen::Vector3d::UnitY()).toRotationMatrix();
     }
     return pose;
@@ -141,6 +147,7 @@ Report run(const Scenario& scenario) {
   const PointList full_map = world.sample_map(0.2);
   LocalizerParameters parameters;
   parameters.state.odom_only_max_distance_m = scenario.odom_only_max_distance_m;
+  parameters.map_submap_rebuild_distance_m = scenario.map_rebuild_distance_m;
   parameters.corrector.large_correction_threshold_m = scenario.large_correction_threshold_m;
   Localizer* localizer_pointer = nullptr;
   PointList map = scenario.has_map ? full_map : PointList{};
@@ -186,6 +193,7 @@ Report run(const Scenario& scenario) {
   Eigen::Isometry3d initial_pose = truth_at(0.0);
   initial_pose.translation().y() += scenario.initial_offset_m;
   localizer.initialize(initial_pose);
+  bool has_injected_rebuild_failure = false;
   std::optional<Eigen::Vector3d> previous_output_position;
 
   std::mt19937 random_generator(11);
@@ -237,6 +245,10 @@ Report run(const Scenario& scenario) {
       localizer.initialize(truth);
       has_reinitialized = true;
     }
+    if (scenario.rebuild_failure_mode != 0 && !has_injected_rebuild_failure && time_sec > 8.0) {
+      localizer.inject_map_rebuild_failure_for_test(scenario.rebuild_failure_mode);
+      has_injected_rebuild_failure = true;
+    }
     const auto output = localizer.on_wheel_odom(time_sec, odom);
     if (has_reinitialized && output) report.published_after_reinitialize = true;
     report.scan_ms_max = std::max(report.scan_ms_max, localizer.last_scan_time_ms());
@@ -252,7 +264,7 @@ Report run(const Scenario& scenario) {
     const double pitch_error_deg =
         std::abs(std::asin(-output->map_to_base.rotation()(2, 0)) - std::asin(-truth.rotation()(2, 0))) * 180.0 / M_PI;
     report.max_pitch_error_deg = std::max(report.max_pitch_error_deg, pitch_error_deg);
-    if (truth.translation().x() >= 7.0 && truth.translation().x() <= 14.0) {
+    if (truth.translation().x() >= 5.0 && truth.translation().x() <= 15.0) {
       report.max_pitch_error_on_ramp_deg = std::max(report.max_pitch_error_on_ramp_deg, pitch_error_deg);
     }
     report.saw_large_correction |= output->is_large_correction;
@@ -427,13 +439,51 @@ TEST(Localizer, ClimbsA10DegreeRamp) {
   Scenario scenario;
   scenario.has_ramp = true;
   const Report report = run(scenario);
-  std::printf("H: max pos err %.3f m, pitch err on the settled climb %.2f deg, whole run %.2f deg\n",
+  std::printf("H: max pos err %.3f m, pitch err over x in [5, 15] m: %.2f deg, whole run %.2f deg\n",
               report.max_position_error_m, report.max_pitch_error_on_ramp_deg, report.max_pitch_error_deg);
-  // Settled climb: within the Issue's +-2 deg. The ramp-entry transient (estimate lags ~1.5 s,
-  // up to ~7 deg, and leans ~2.6 deg early because the ramp is already visible ahead) is NOT
-  // within 2 deg: see the PR; only a loose bound is asserted for it.
-  EXPECT_LT(report.max_pitch_error_on_ramp_deg, 2.0);
-  EXPECT_LT(report.max_pitch_error_deg, 10.0);
+  EXPECT_LT(report.max_pitch_error_on_ramp_deg, 2.0);  // the Issue's +-2 deg over the whole climb
   EXPECT_LT(report.max_position_error_m, 0.2);
   EXPECT_TRUE(report.is_tracking_at_end);
+}
+
+// Review high 1: the pitch changes by 10 degrees at once (the LiDAR odometry gate used to reject
+// anything above 0.1 rad of full rotation). z, roll and pitch are not slewed.
+TEST(Localizer, SurvivesAPitchStep) {
+  Scenario scenario;
+  scenario.has_ramp = true;
+  scenario.ramp_blend_m = 0.0;
+  const Report report = run(scenario);
+  std::printf("H step: max pos err %.3f m, pitch err over x in [5, 15] m: %.2f deg\n",
+              report.max_position_error_m, report.max_pitch_error_on_ramp_deg);
+  EXPECT_LT(report.max_pitch_error_on_ramp_deg, 2.0);
+  EXPECT_LT(report.max_position_error_m, 0.2);
+}
+
+// Review medium 1: a corridor whose ends cannot be seen. With a 5 % wheel scale error the dead
+// reckoning drifts ~6 m along the corridor; the map factor must not freeze that drift (its sliding
+// direction is weak) so GPS (sigma 1 m) pulls the pose back.
+TEST(Localizer, OpenCorridorIsCorrectedByGpsNotFrozenByMap) {
+  Scenario scenario;
+  scenario.is_open_corridor = true;
+  scenario.wheel_scale = 1.05;
+  const Report report = run(scenario);
+  std::printf("open corridor: wheel-only end err %.2f m, max pos err %.2f m, final %.2f m\n",
+              report.wheel_only_end_error_m, report.max_position_error_m, report.final_position_error_m);
+  EXPECT_GT(report.wheel_only_end_error_m, 5.0);
+  EXPECT_LT(report.final_position_error_m, 1.5);
+  EXPECT_LT(report.max_position_error_m, 2.5);
+}
+
+// Review medium 3: a failing prior-map rebuild (worker exception, or thread start failure) keeps
+// the old target, records the cause and does not stop the localizer.
+TEST(Localizer, MapRebuildFailureKeepsOldTarget) {
+  for (const int mode : {1, 2}) {
+    Scenario scenario;
+    scenario.map_rebuild_distance_m = 5.0;
+    scenario.rebuild_failure_mode = mode;
+    const Report report = run(scenario);
+    EXPECT_NE(report.last_error.find("prior-map rebuild"), std::string::npos) << "mode " << mode;
+    EXPECT_LT(report.max_position_error_m, 0.3) << "mode " << mode;
+    EXPECT_TRUE(report.is_tracking_at_end) << "mode " << mode;
+  }
 }

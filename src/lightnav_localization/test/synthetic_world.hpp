@@ -39,6 +39,7 @@ class SyntheticWorld {
   }
 
   // Floor rises at `angle_rad` from x = begin_x over `horizontal_length_m`, then stays level.
+  void set_max_range(double range_m) { max_range_m_ = range_m; }
   void set_ramp(double begin_x, double horizontal_length_m, double angle_rad) {
     ramp_begin_x_ = begin_x;
     ramp_end_x_ = begin_x + horizontal_length_m;
@@ -174,7 +175,7 @@ class SyntheticWorld {
         nearest = std::min(nearest, range);
       }
     }
-    return nearest < kMaxRangeM ? nearest : std::numeric_limits<double>::infinity();
+    return nearest < max_range_m_ ? nearest : std::numeric_limits<double>::infinity();
   }
 
   // Floor pieces: level before the ramp, the ramp plane, level after it (z = slope * x + offset).
@@ -199,7 +200,7 @@ class SyntheticWorld {
     return nearest;
   }
 
-  static constexpr double kMaxRangeM = 60.0;
+  double max_range_m_ = 60.0;
   bool has_ramp_ = false;
   double ramp_begin_x_ = 0.0;
   double ramp_end_x_ = 0.0;
