@@ -4,6 +4,8 @@
 """
 
 import argparse
+import math
+import os
 import sys
 
 import yaml
@@ -21,19 +23,37 @@ EXIT_INVALID_INPUT = 1
 EXIT_FLAGGED = 2
 
 
+class InputErrorArgumentParser(argparse.ArgumentParser):
+    """引数エラーを終了コード 1（入力不正）にする。2 は flagged 専用。"""
+
+    def error(self, message):
+        self.exit(EXIT_INVALID_INPUT, f"{self.prog}: error: {message}\n")
+
+
+def _positive_finite(text: str) -> float:
+    value = float(text)
+    if not math.isfinite(value) or value <= 0.0:
+        raise argparse.ArgumentTypeError("正の有限値でなければならない")
+    return value
+
+
 def build_argument_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = InputErrorArgumentParser(description=__doc__)
     parser.add_argument("raw", help="waypoints_raw.yaml")
     parser.add_argument("trajectory", help="trajectory.csv")
     parser.add_argument("--output", default="waypoints.yaml")
-    parser.add_argument("--max-correction-m", type=float, default=2.0)
-    parser.add_argument("--max-gap-s", type=float, default=2.0)
+    parser.add_argument("--max-correction-m", type=_positive_finite, default=2.0)
+    parser.add_argument("--max-gap-s", type=_positive_finite, default=2.0)
     return parser
 
 
 def main(argv=None) -> int:
     arguments = build_argument_parser().parse_args(argv)
-    if arguments.output in (arguments.raw, arguments.trajectory):
+    if any(
+        os.path.exists(arguments.output) and os.path.samefile(arguments.output, source)
+        for source in (arguments.raw, arguments.trajectory)
+        if os.path.exists(source)
+    ):
         print("出力先が入力と同じ（入力は上書きしない）", file=sys.stderr)
         return EXIT_INVALID_INPUT
     try:

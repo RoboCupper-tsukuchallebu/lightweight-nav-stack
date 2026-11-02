@@ -1,5 +1,6 @@
 """mission_node を fake の PlanPath サーバ・FollowStatus・LocalizationStatus で動かす単体試験。"""
 
+import contextlib
 import threading
 import time
 
@@ -127,10 +128,8 @@ def rig():
     mission.trigger_activate()
     assert harness.action_client.wait_for_server(timeout_sec=5.0)
     yield mission, harness
-    try:
-        mission.trigger_deactivate()  # 試験内で deactivate 済みなら失敗するので無視
-    except Exception:  # noqa: BLE001
-        pass
+    with contextlib.suppress(Exception):  # 試験内で deactivate 済みなら失敗するので無視
+        mission.trigger_deactivate()
     executor.shutdown()
     thread.join(timeout=2.0)
 

@@ -13,6 +13,7 @@ from lightnav_msgs.msg import Waypoint
 EXIT_OK = 0
 EXIT_FAILED = 1
 SERVER_WAIT_S = 5.0
+CANCEL_WAIT_S = 2.0
 
 
 def main(argv=None) -> int:
@@ -56,7 +57,17 @@ def main(argv=None) -> int:
             print("goal が reject された", file=sys.stderr)
             return EXIT_FAILED
         result_future = goal_handle.get_result_async()
-        rclpy.spin_until_future_complete(node, result_future)
+        try:
+            rclpy.spin_until_future_complete(node, result_future)
+        except KeyboardInterrupt:
+            # Ctrl-C ではロボットを走らせたまま終わらず、goal を cancel する
+            cancel_future = goal_handle.cancel_goal_async()
+            rclpy.spin_until_future_complete(node, cancel_future, timeout_sec=CANCEL_WAIT_S)
+            if cancel_future.done():
+                print("Ctrl-C: goal を cancel した", file=sys.stderr)
+            else:
+                print("Ctrl-C: cancel を確認できなかった。ロボットが走行中の可能性", file=sys.stderr)
+            return EXIT_FAILED
         result = result_future.result().result
         print(f"success={result.success} reached={result.reached_count} {result.message}")
         return EXIT_OK if result.success else EXIT_FAILED
