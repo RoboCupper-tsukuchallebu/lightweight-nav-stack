@@ -40,13 +40,16 @@ class StateMachine {
         (inputs.requires_scans && inputs.now_sec - inputs.last_scan_sec > parameters_.scan_timeout_s)) {
       return state_ = LocalizationState::kInputStale;
     }
+    // Position uncertainty applies in every state, not only when nothing absolute is available.
+    if (inputs.position_std_m > parameters_.lost_position_std_m) {
+      return state_ = LocalizationState::kLost;
+    }
     const bool has_map = inputs.now_sec - inputs.last_map_match_sec <= parameters_.tracking_window_s;
     const bool has_gps = inputs.now_sec - inputs.last_gps_sec <= parameters_.gps_timeout_s;
     if (has_map) return state_ = LocalizationState::kTracking;
     if (has_gps) return state_ = LocalizationState::kGpsOnly;
     const bool is_over_limit = inputs.odom_only_distance_m > parameters_.odom_only_max_distance_m ||
-                               inputs.odom_only_duration_s > parameters_.odom_only_max_s ||
-                               inputs.position_std_m > parameters_.lost_position_std_m;
+                               inputs.odom_only_duration_s > parameters_.odom_only_max_s;
     return state_ = is_over_limit ? LocalizationState::kLost : LocalizationState::kOdomOnly;
   }
 

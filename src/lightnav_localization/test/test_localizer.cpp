@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdio>
 #include <random>
+#include <string>
 
 #include "lightnav_localization/localizer.hpp"
 #include "synthetic_world.hpp"
@@ -53,6 +54,8 @@ struct Scenario {
   double gps_off_begin_sec = -1.0;
   double gps_off_end_sec = -1.0;
   double odom_only_max_distance_m = 50.0;
+  double fail_optimization_at_sec = -1.0;  // injects a GTSAM failure once
+  bool reinitialize_after_lost = false;
   int false_convergence_every = 0;
   double false_shift_m = 0.0;
 };
@@ -69,6 +72,8 @@ struct Report {
   bool published_after_lost = false;
   bool is_tracking_at_end = false;
   double wheel_only_end_error_m = 0.0;
+  bool published_after_reinitialize = false;
+  std::string last_error;
   double scan_ms_max = 0.0;
   double match_ms_max = 0.0;
   double rebuild_ms_max = 0.0;
@@ -109,6 +114,7 @@ Report run(const Scenario& scenario) {
   Eigen::Isometry3d odom = Eigen::Isometry3d::Identity();
   Eigen::Isometry3d wheel_only = truth_at(0.0);
   Report report;
+  bool has_reinitialized = false;
   const int step_count = static_cast<int>(kTotalSec / kDt);
   for (int step = 0; step <= step_count; ++step) {
     const double time_sec = step * kDt;
@@ -143,19 +149,30 @@ Report run(const Scenario& scenario) {
       }
       localizer.on_gps(time_sec, fix);
     }
+    if (scenario.fail_optimization_at_sec >= 0.0 && std::abs(time_sec - scenario.fail_optimization_at_sec) < kDt / 2) {
+      localizer.inject_optimization_failure_for_test();
+    }
+    if (scenario.reinitialize_after_lost && report.saw_lost && !has_reinitialized) {
+      localizer.initialize(truth);
+      has_reinitialized = true;
+    }
     const auto output = localizer.on_wheel_odom(time_sec, odom);
+    if (has_reinitialized && output) report.published_after_reinitialize = true;
     report.scan_ms_max = std::max(report.scan_ms_max, localizer.last_scan_time_ms());
     report.match_ms_max = std::max(report.match_ms_max, localizer.last_match_time_ms());
     report.rebuild_ms_max = std::max(report.rebuild_ms_max, localizer.last_submap_rebuild_time_ms());
     const bool is_hole = time_sec >= scenario.map_hole_begin_sec && time_sec <= scenario.map_hole_end_sec;
-    if (report.saw_lost && output) report.published_after_lost = true;
+    if (report.saw_lost && output && !has_reinitialized) report.published_after_lost = true;
     if (!output) {
       if (output.has_value() == false && time_sec > 3.0 && report.saw_odom_only) report.saw_lost = true;
       continue;
     }
-    if (time_sec < 5.0) continue;  // warm-up: yaw settles from the 0.1 rad initial prior (2 deg at 3 s)
+    
     const double position_error = (output->map_to_base.translation() - truth.translation()).head<2>().norm();
-    const double yaw_error = std::abs(Eigen::AngleAxisd(truth.rotation().transpose() * output->map_to_base.rotation()).angle()) * 180.0 / M_PI;
+    // Yaw only: the full rotation angle also contains roll/pitch noise (the 2 deg seen at 3 s in the
+    // first version of this test was tilt, not yaw).
+    const Eigen::Matrix3d rotation_error = truth.rotation().transpose() * output->map_to_base.rotation();
+    const double yaw_error = std::abs(std::atan2(rotation_error(1, 0), rotation_error(0, 0))) * 180.0 / M_PI;
     report.max_position_error_m = std::max(report.max_position_error_m, position_error);
     report.max_yaw_error_deg = std::max(report.max_yaw_error_deg, yaw_error);
     if (is_hole) report.max_error_in_hole_m = std::max(report.max_error_in_hole_m, position_error);
@@ -165,6 +182,7 @@ Report run(const Scenario& scenario) {
     if (time_sec > scenario.map_hole_end_sec && output->state == LocalizationState::kTracking) report.saw_tracking_after_hole = true;
     report.is_tracking_at_end = output->state == LocalizationState::kTracking;
   }
+  report.last_error = localizer.last_error();
   report.wheel_only_end_error_m = (wheel_only.translation() - truth_at(kTotalSec).translation()).head<2>().norm();
   return report;
 }
@@ -226,4 +244,48 @@ TEST(Localizer, FalseConvergenceAlongCorridorDoesNotJumpThePose) {
     std::printf("C: shift %.1f m -> max pos err %.3f m\n", shift_m, report.max_position_error_m);
     EXPECT_LT(report.max_position_error_m, 0.3);
   }
+}
+
+// Review high 3: an optimization failure restarts the window from the current estimate; the pose
+// must stay near truth (no uninitialized pose reaches the sub-map) and the cause is reported.
+TEST(Localizer, RecoversFromOptimizationFailure) {
+  Scenario scenario;
+  scenario.fail_optimization_at_sec = 12.3;
+  const Report report = run(scenario);
+  EXPECT_FALSE(report.last_error.empty());
+  EXPECT_LT(report.max_position_error_m, 0.3);
+  EXPECT_TRUE(report.is_tracking_at_end);
+}
+
+// Review high 4: initialize() is the way out of LOST.
+TEST(Localizer, InitializeLeavesLost) {
+  Scenario scenario;
+  scenario.has_map = false;
+  scenario.is_gps_enabled = false;
+  scenario.odom_only_max_distance_m = 8.0;
+  scenario.reinitialize_after_lost = true;
+  const Report report = run(scenario);
+  EXPECT_TRUE(report.saw_lost);
+  EXPECT_TRUE(report.published_after_reinitialize);
+}
+
+// Review high 6: the scan queue is bounded, also before initialize() and while wheel odometry is
+// silent.
+TEST(Localizer, ScanQueueIsBounded) {
+  Localizer localizer(LocalizerParameters{}, PointList{}, std::nullopt);
+  const std::vector<TimedPoint> scan(10, TimedPoint{Eigen::Vector3f(1, 0, 0), 0.0F});
+  for (int index = 0; index < 100; ++index) localizer.on_scan(index * 0.1, scan);
+  EXPECT_EQ(localizer.pending_scan_count(), 0u);  // not initialized: nothing can consume them
+  localizer.initialize(Eigen::Isometry3d::Identity());
+  for (int index = 0; index < 100; ++index) localizer.on_scan(index * 0.1, scan);
+  EXPECT_LE(localizer.pending_scan_count(), 20u);
+}
+
+// Review medium 6: INPUT_STALE is observable without a wheel sample.
+TEST(Localizer, PollStateReportsStaleWheel) {
+  Localizer localizer(LocalizerParameters{}, PointList{}, std::nullopt);
+  EXPECT_EQ(localizer.poll_state(0.0), LocalizationState::kInitializing);
+  localizer.initialize(Eigen::Isometry3d::Identity());
+  localizer.on_wheel_odom(1.0, Eigen::Isometry3d::Identity());
+  EXPECT_EQ(localizer.poll_state(1.5), LocalizationState::kInputStale);
 }

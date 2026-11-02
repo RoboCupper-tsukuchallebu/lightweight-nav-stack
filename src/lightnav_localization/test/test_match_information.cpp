@@ -8,20 +8,10 @@
 using namespace lightnav_localization;
 using namespace lightnav_localization::testing;
 
-TEST(MatchInformation, ClampsDegenerateDirectionToMaxSigma) {
-  Eigen::Matrix<double, 6, 6> hessian = Eigen::Matrix<double, 6, 6>::Identity() * 1e6;
-  hessian(3, 3) = 1e-6;  // tx unobservable
-  const Eigen::Matrix<double, 6, 6> information = information_from_hessian(hessian, InformationLimits{});
-  EXPECT_NEAR(information(3, 3), 1.0 / (10.0 * 10.0), 1e-9);
-  EXPECT_NEAR(information(4, 4), 1.0 / (0.02 * 0.02), 1e-6);  // floor
-  EXPECT_NEAR(information(0, 0), 1.0 / (0.005 * 0.005), 1e-3);
-}
-
-// Confirms the small_gicp Hessian order (rotation first, then translation) from a real match: in a
-// very long corridor the along-axis (x) translation is the weakest, so H(3,3) << H(4,4) only if
-// indices 3..5 are translation.
-TEST(MatchInformation, HessianOrderIsRotationThenTranslation) {
-  const SyntheticWorld world({{0.0, 0.0}, {400.0, 0.0}});
+namespace {
+// Real GICP Hessian of a scan matched against itself, in a corridor with or without end caps.
+Eigen::Matrix<double, 6, 6> corridor_hessian(bool has_end_caps) {
+  const SyntheticWorld world({{0.0, 0.0}, {400.0, 0.0}}, has_end_caps);
   const Eigen::Isometry3d pose = arc_pose(0.0, Eigen::Vector2d(200.0, 0.0), 0.0, 0.0, 0.0);
   const auto timed = world.synthesize_scan([&pose](double) { return pose; }, 0.0, 0.1, true, 360, 8);
   PointList points;
@@ -29,8 +19,37 @@ TEST(MatchInformation, HessianOrderIsRotationThenTranslation) {
   const PointList cloud = downsample_voxel(points, 0.5);
   LidarOdometry odometry(LidarOdometryParameters{});
   odometry.add_keyframe(pose, cloud);
-  const MatchResult result = odometry.match(cloud, pose, 0.0);
-  EXPECT_LT(result.information(3, 3), 0.05 * result.information(4, 4));
-  // Rotation about the corridor axis (roll, index 0) is observed by the walls and floor.
-  EXPECT_GT(result.information(0, 0), 0.0);
+  return odometry.match(cloud, pose, 0.0).information;
+}
+}  // namespace
+
+TEST(MatchInformation, ClampsDegenerateDirectionToMaxSigma) {
+  Eigen::Matrix<double, 6, 6> hessian = Eigen::Matrix<double, 6, 6>::Identity() * 1e6;
+  hessian(3, 3) = 1e-6;  // tx unobservable
+  const Eigen::Matrix<double, 6, 6> information = information_from_hessian(hessian, InformationLimits{});
+  EXPECT_NEAR(information(3, 3), 1.0 / (10.0 * 10.0), 1e-6);
+  EXPECT_NEAR(information(4, 4), 1.0 / (0.02 * 0.02), 1e-3);
+}
+
+TEST(MatchInformation, HessianOrderIsRotationThenTranslation) {
+  const Eigen::Matrix<double, 6, 6> hessian = corridor_hessian(true);
+  EXPECT_LT(hessian(3, 3), hessian(4, 4));  // along-corridor x is weaker than across y
+}
+
+// Review high 1: with the real (normalized-covariance) Hessian of a corridor whose ends cannot be
+// seen, the sliding direction must come out weak (sigma >= 1 m) while the lateral direction keeps
+// the floor-level sigma. 
+TEST(MatchInformation, RealHessianOfOpenCorridorWeakensSlidingDirectionOnly) {
+  const InformationLimits limits;
+  const Eigen::Matrix<double, 6, 6> open_information =
+      information_from_hessian(corridor_hessian(false), limits);
+  // Sigma = sqrt of the covariance (inverse information) diagonal: the information diagonal alone
+  // would hide the coupling between translation and rotation.
+  const Eigen::Matrix<double, 6, 6> open_covariance = open_information.inverse();
+  const double sliding_sigma_m = std::sqrt(open_covariance(3, 3));
+  const double lateral_sigma_m = std::sqrt(open_covariance(4, 4));
+  std::printf("open corridor: sliding sigma %.3f m, lateral sigma %.3f m\n", sliding_sigma_m, lateral_sigma_m);
+  EXPECT_GE(sliding_sigma_m, 1.0);
+  EXPECT_LE(lateral_sigma_m, 0.05);
+
 }

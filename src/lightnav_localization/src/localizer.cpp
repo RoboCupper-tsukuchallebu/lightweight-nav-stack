@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <map>
+#include <string>
 
 #include "lightnav_localization/downsample.hpp"
 
@@ -14,6 +15,8 @@ constexpr double kMapSubmapRadiusM = 100.0;
 constexpr double kMapSubmapRebuildDistanceM = 50.0;
 constexpr double kWheelBufferSec = 3.0;
 constexpr double kNeverSec = -1e9;
+constexpr std::size_t kMaxPendingScans = 20;
+constexpr std::size_t kMaxPendingGps = 20;
 
 using Clock = std::chrono::steady_clock;
 double elapsed_ms(Clock::time_point start) {
@@ -43,14 +46,15 @@ struct PendingGps {
 
 struct Localizer::Implementation {
   Implementation(const LocalizerParameters& parameters_in, const PointList& map_points_in,
-                 const std::optional<GpsOrigin>& gps_origin)
+                 const std::optional<GpsOrigin>& gps_origin_in)
       : parameters(parameters_in),
         map_points(map_points_in),
         graph(std::make_unique<PoseGraph>(parameters_in.graph)),
         lidar(parameters_in.lidar_odometry),
         corrector(parameters_in.corrector),
         machine(parameters_in.state),
-        conflict(parameters_in.gps_conflict_count) {
+        conflict(parameters_in.gps_conflict_count),
+        gps_origin(gps_origin_in) {
     if (gps_origin) gps.emplace(*gps_origin, parameters_in.gps);
   }
 
@@ -61,6 +65,7 @@ struct Localizer::Implementation {
   Corrector corrector;
   StateMachine machine;
   GpsConflictCounter conflict;
+  std::optional<GpsOrigin> gps_origin;
   std::optional<GpsConverter> gps;
   PoseBuffer buffer;
   PreparedTarget map_target;
@@ -88,30 +93,41 @@ struct Localizer::Implementation {
   std::vector<PendingScan> pending_scans;
   std::vector<PendingGps> pending_gps;
   std::function<void(MatchResult&)> map_match_hook;
+  std::string last_error;
   double scan_time_ms = 0.0;
   double match_time_ms = 0.0;
   double submap_rebuild_time_ms = 0.0;
 
   Eigen::Isometry3d pose_of(int index) {
     if (const auto pose = graph->pose(index)) return pose_cache[index] = *pose;
-    return pose_cache[index];
+    const auto cached = pose_cache.find(index);
+    if (cached != pose_cache.end()) return cached->second;
+    return pose_cache.empty() ? Eigen::Isometry3d::Identity() : pose_cache.rbegin()->second;
   }
 
-  void refresh_after_optimize() {
+  // Optimizes; returns true when the optimization failed and the window was restarted from the
+  // current estimate (node indices are renumbered from 0 and the lidar sub-map is dropped, so
+  // callers must re-read nodes.back().index).
+  bool refresh_after_optimize() {
+    bool was_restarted = false;
     if (!graph->optimize()) {
-      // Optimization exception: restart the window from the current estimate.
-      const Eigen::Isometry3d current = pose_of(nodes.back().index);
+      last_error = "pose graph optimization failed, window restarted: " + graph->last_error();
+      const Eigen::Isometry3d current = pose_cache.at(nodes.back().index);
+      const NodeRecord latest_node = nodes.back();
       graph = std::make_unique<PoseGraph>(parameters.graph);
-      graph->add_first_node(nodes.back().stamp, current, parameters.initial_sigma_xy_m,
+      graph->add_first_node(latest_node.stamp, current, parameters.initial_sigma_xy_m,
                             parameters.initial_sigma_yaw_rad);
-      graph->optimize();
-      nodes = {{0, nodes.back().stamp, nodes.back().odom_to_base}};
+      nodes.clear();
+      nodes.push_back({0, latest_node.stamp, latest_node.odom_to_base});
+      lidar = LidarOdometry(parameters.lidar_odometry);
       lidar_nodes.clear();
       pose_cache.clear();
       pose_cache[0] = current;
+      if (!graph->optimize()) last_error += " (restart also failed)";
+      was_restarted = true;
     }
     const int latest = nodes.back().index;
-    pose_cache[latest] = *graph->pose(latest);
+    if (const auto pose = graph->pose(latest)) pose_cache[latest] = *pose;
     if (const auto std_values = graph->position_and_yaw_std(latest)) {
       position_std_m = std::max((*std_values)[0], (*std_values)[1]);
     }
@@ -120,6 +136,7 @@ struct Localizer::Implementation {
       pose_cache.erase(nodes.front().index);
       nodes.pop_front();
     }
+    return was_restarted;
   }
 
   void sync_lidar_submap() {
@@ -234,8 +251,9 @@ struct Localizer::Implementation {
       pose_cache[index] = best;
       try_map_match(index, pending.stamp, best, cloud);
       refresh_after_optimize();
-      lidar.add_keyframe(pose_of(index), cloud);
-      lidar_nodes.push_back(index);
+      const int current_index = nodes.back().index;  // renumbered after a restart
+      lidar.add_keyframe(pose_of(current_index), cloud);
+      lidar_nodes.push_back(current_index);
       while (static_cast<int>(lidar_nodes.size()) > parameters.lidar_odometry.submap_keyframes) {
         lidar_nodes.pop_front();
       }
@@ -279,6 +297,19 @@ struct Localizer::Implementation {
     if (is_new_node || decision.measurement) refresh_after_optimize();
   }
 
+  StateInputs make_state_inputs(double now_sec) const {
+    StateInputs inputs;
+    inputs.now_sec = now_sec;
+    inputs.last_wheel_sec = last_wheel_sec;
+    inputs.last_scan_sec = last_scan_sec;
+    inputs.last_map_match_sec = last_map_sec;
+    inputs.last_gps_sec = last_gps_sec;
+    inputs.odom_only_distance_m = distance_since_absolute_m;
+    inputs.odom_only_duration_s = now_sec - absolute_reference_sec;
+    inputs.position_std_m = std::hypot(position_std_m, parameters.drift_rate * distance_since_absolute_m);
+    return inputs;
+  }
+
   void drain() {
     while (true) {
       const double newest = buffer.size() > 0 ? last_wheel_sec : kNeverSec;
@@ -290,7 +321,7 @@ struct Localizer::Implementation {
       const bool gps_ready = gps_it != pending_gps.end() && gps_it->stamp <= newest;
       if (!scan_ready && !gps_ready) return;
       if (scan_ready && (!gps_ready || scan_it->stamp <= gps_it->stamp)) {
-        const PendingScan scan = *scan_it;
+        PendingScan scan = std::move(*scan_it);
         pending_scans.erase(scan_it);
         process_scan(scan);
       } else {
@@ -308,22 +339,45 @@ Localizer::Localizer(const LocalizerParameters& parameters, const PointList& map
 Localizer::~Localizer() = default;
 
 void Localizer::initialize(const Eigen::Isometry3d& map_to_base) {
-  implementation_->requested_initial_pose = map_to_base;
+  // Full reset (also the way out of LOST): graph, queues, sub-map, state machine and slew.
+  auto fresh = std::make_unique<Implementation>(implementation_->parameters, implementation_->map_points,
+                                                implementation_->gps_origin);
+  fresh->map_match_hook = implementation_->map_match_hook;
+  fresh->requested_initial_pose = map_to_base;
+  implementation_ = std::move(fresh);
 }
 
 void Localizer::on_scan(double header_stamp_sec, std::vector<TimedPoint> scan) {
+  // Before initialize() nobody can consume scans; dropping them keeps the queue from growing.
+  if (!implementation_->requested_initial_pose) return;
   float latest_offset = 0.0F;
   for (const TimedPoint& point : scan) latest_offset = std::max(latest_offset, point.time_offset_sec);
-  implementation_->pending_scans.push_back({header_stamp_sec, header_stamp_sec + latest_offset, std::move(scan)});
+  auto& queue = implementation_->pending_scans;
+  queue.push_back({header_stamp_sec, header_stamp_sec + latest_offset, std::move(scan)});
+  if (queue.size() > kMaxPendingScans) queue.erase(queue.begin());  // oldest first
 }
 
 void Localizer::on_gps(double stamp_sec, const GpsFix& fix) {
-  implementation_->pending_gps.push_back({stamp_sec, fix});
+  auto& queue = implementation_->pending_gps;
+  queue.push_back({stamp_sec, fix});
+  if (queue.size() > kMaxPendingGps) queue.erase(queue.begin());
 }
 
 void Localizer::set_map_match_hook(std::function<void(MatchResult&)> hook) {
   implementation_->map_match_hook = std::move(hook);
 }
+
+LocalizationState Localizer::poll_state(double now_sec) {
+  Implementation& self = *implementation_;
+  if (!self.is_started) return LocalizationState::kInitializing;
+  return self.machine.update(self.make_state_inputs(now_sec));
+}
+
+std::size_t Localizer::pending_scan_count() const { return implementation_->pending_scans.size(); }
+
+const std::string& Localizer::last_error() const { return implementation_->last_error; }
+
+void Localizer::inject_optimization_failure_for_test() { implementation_->graph->inject_failure_once(); }
 
 double Localizer::last_scan_time_ms() const { return implementation_->scan_time_ms; }
 double Localizer::last_match_time_ms() const { return implementation_->match_time_ms; }
@@ -333,6 +387,14 @@ std::optional<LocalizerOutput> Localizer::on_wheel_odom(double stamp_sec,
                                                         const Eigen::Isometry3d& odom_to_base) {
   Implementation& self = *implementation_;
   if (!self.requested_initial_pose) return std::nullopt;
+  if (stamp_sec < self.last_wheel_sec) {
+    self.buffer = PoseBuffer();
+    self.pending_scans.clear();
+    self.pending_gps.clear();
+    self.last_error = "wheel odometry time went backwards: buffers cleared";
+    self.last_wheel_sec = stamp_sec;
+    self.last_wheel_pose = odom_to_base;
+  }
   const double elapsed_sec = self.last_wheel_sec > kNeverSec ? stamp_sec - self.last_wheel_sec : 0.0;
   if (!self.is_started) {
     self.corrector.reset(*self.requested_initial_pose * odom_to_base.inverse());
@@ -348,19 +410,20 @@ std::optional<LocalizerOutput> Localizer::on_wheel_odom(double stamp_sec,
   self.last_wheel_sec = stamp_sec;
   self.buffer.add(stamp_sec, odom_to_base);
   self.buffer.prune_before(stamp_sec - kWheelBufferSec);
+  // A scan older than the buffer can no longer be deskewed.
+  const double oldest_usable_sec = stamp_sec - kWheelBufferSec;
+  self.pending_scans.erase(
+      std::remove_if(self.pending_scans.begin(), self.pending_scans.end(),
+                     [&](const PendingScan& scan) { return scan.stamp < oldest_usable_sec; }),
+      self.pending_scans.end());
+  self.pending_gps.erase(
+      std::remove_if(self.pending_gps.begin(), self.pending_gps.end(),
+                     [&](const PendingGps& fix) { return fix.stamp < oldest_usable_sec; }),
+      self.pending_gps.end());
   self.drain();
 
-  const Eigen::Isometry3d map_to_odom = self.corrector.step(elapsed_sec);
-  StateInputs inputs;
-  inputs.now_sec = stamp_sec;
-  inputs.last_wheel_sec = stamp_sec;
-  inputs.last_scan_sec = self.last_scan_sec;
-  inputs.last_map_match_sec = self.last_map_sec;
-  inputs.last_gps_sec = self.last_gps_sec;
-  inputs.odom_only_distance_m = self.distance_since_absolute_m;
-  inputs.odom_only_duration_s = stamp_sec - self.absolute_reference_sec;
-  const double drift_std = self.parameters.drift_rate * self.distance_since_absolute_m;
-  inputs.position_std_m = std::hypot(self.position_std_m, drift_std);
+  const Eigen::Isometry3d map_to_odom = self.corrector.step(elapsed_sec, odom_to_base);
+  const StateInputs inputs = self.make_state_inputs(stamp_sec);
   const LocalizationState state = self.machine.update(inputs);
   if (!self.machine.should_publish_odom()) return std::nullopt;
 
@@ -368,8 +431,8 @@ std::optional<LocalizerOutput> Localizer::on_wheel_odom(double stamp_sec,
   output.map_to_base = map_to_odom * odom_to_base;
   output.state = state;
   output.position_std_m = inputs.position_std_m;
-  output.is_large_correction = self.corrector.is_large_correction();
-  output.pending_correction_m = self.corrector.pending_correction_m();
+  output.is_large_correction = self.corrector.is_large_correction(odom_to_base);
+  output.pending_correction_m = self.corrector.pending_correction_m(odom_to_base);
   output.is_gps_conflict = self.conflict.is_conflict();
   return output;
 }

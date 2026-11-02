@@ -5,6 +5,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include "lightnav_localization/corrector.hpp"
@@ -56,6 +57,7 @@ class Localizer {
             const std::optional<GpsOrigin>& gps_origin);
   ~Localizer();
 
+  // Starts (or restarts after LOST) from this pose, discarding graph, queues and sub-map.
   void initialize(const Eigen::Isometry3d& map_to_base);
 
   // Output for this wheel sample (nullopt while the state withholds odom). Also drains queued
@@ -64,6 +66,13 @@ class Localizer {
   // Queued until wheel odometry covers the end of the scan (stamp + largest time offset).
   void on_scan(double header_stamp_sec, std::vector<TimedPoint> scan);
   void on_gps(double stamp_sec, const GpsFix& fix);
+
+  // State at `now_sec` without a wheel sample (INPUT_STALE when the wheel stopped). Not
+  // thread-safe: Localizer must be called from one thread (the ROS node's executor).
+  LocalizationState poll_state(double now_sec);
+  const std::string& last_error() const;
+  std::size_t pending_scan_count() const;
+  void inject_optimization_failure_for_test();
 
   double last_scan_time_ms() const;
   double last_match_time_ms() const;

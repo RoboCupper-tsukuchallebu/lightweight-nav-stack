@@ -3,6 +3,7 @@
 #include <Eigen/Geometry>
 #include <map>
 #include <memory>
+#include <string>
 #include <optional>
 
 namespace lightnav_localization {
@@ -54,11 +55,18 @@ class PoseGraph {
   // sqrt of the (x, y) marginal variances and the yaw standard deviation.
   std::optional<Eigen::Vector3d> position_and_yaw_std(int index) const;
   int latest_index() const { return latest_index_; }
+  // Message of the last exception caught in optimize()/covariance (empty if none).
+  const std::string& last_error() const { return last_error_; }
+  // Test seam: the next optimize() fails as if GTSAM had thrown.
+  void inject_failure_once() { should_fail_once_ = true; }
 
  private:
   struct Implementation;
   std::unique_ptr<Implementation> implementation_;
   int latest_index_ = -1;
+  std::string last_error_;
+  bool should_fail_once_ = false;
+  mutable std::string covariance_error_;
 };
 
 }  // namespace lightnav_localization

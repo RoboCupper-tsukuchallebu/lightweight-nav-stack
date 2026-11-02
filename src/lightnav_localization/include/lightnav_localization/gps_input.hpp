@@ -42,7 +42,7 @@ struct GpsMeasurement {
 };
 
 // Why a fix was not used. kNone means accepted.
-enum class GpsRejection { kNone, kNoFix, kHdop, kGate };
+enum class GpsRejection { kNone, kNoFix, kHdop, kGate, kInvalid };
 
 struct GpsDecision {
   GpsRejection rejection = GpsRejection::kNone;

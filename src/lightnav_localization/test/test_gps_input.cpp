@@ -70,3 +70,17 @@ TEST(GpsInput, ConflictFlagAfterConsecutiveRejections) {
   counter.record(false);
   EXPECT_FALSE(counter.is_conflict());
 }
+
+TEST(GpsInput, RejectsNanAndFallsBackWhenKnownStdIsZero) {
+  const GpsConverter converter(kOrigin, GpsParameters{});
+  const Eigen::Isometry3d predicted = Eigen::Isometry3d::Identity();
+  GpsFix nan_fix = fix_at_enu(0, 0);
+  nan_fix.latitude_deg = std::nan("");
+  EXPECT_EQ(converter.evaluate(nan_fix, predicted, 0.1).rejection, GpsRejection::kInvalid);
+  GpsFix zero_std = fix_at_enu(0, 0);
+  zero_std.has_known_covariance = true;
+  zero_std.known_std_m = 0.0;
+  const GpsDecision decision = converter.evaluate(zero_std, predicted, 0.1);
+  ASSERT_TRUE(decision.measurement.has_value());
+  EXPECT_GT(decision.measurement->sigma_m.x(), 0.0);
+}

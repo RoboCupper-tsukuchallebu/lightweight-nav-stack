@@ -62,3 +62,14 @@ TEST(StateMachine, StaleWheelWithholdsOdom) {
   EXPECT_EQ(machine.update(inputs), LocalizationState::kInputStale);
   EXPECT_FALSE(machine.should_publish_odom());
 }
+
+TEST(StateMachine, LargePositionStdIsLostEvenWhileTrackingOrGpsOnly) {
+  for (const bool has_map : {true, false}) {
+    StateMachine machine(StateMachineParameters{});
+    machine.start_tracking();
+    StateInputs inputs = fresh_inputs(5.0);
+    (has_map ? inputs.last_map_match_sec : inputs.last_gps_sec) = 5.0;
+    inputs.position_std_m = 2.5;
+    EXPECT_EQ(machine.update(inputs), LocalizationState::kLost);
+  }
+}

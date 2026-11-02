@@ -25,13 +25,17 @@ constexpr double kCorridorHalfWidthM = 2.0;
 class SyntheticWorld {
  public:
   // `centerline` must have axis-aligned legs. Walls end flush at the course ends (closed by caps).
-  explicit SyntheticWorld(const std::vector<Eigen::Vector2d>& centerline) {
+  // `has_end_caps = false` leaves the ends open (only the max range limits the view), which makes
+  // the corridor axis unobservable for scan matching.
+  explicit SyntheticWorld(const std::vector<Eigen::Vector2d>& centerline, bool has_end_caps = true) {
     centerline_ = centerline;
     for (std::size_t leg = 0; leg + 1 < centerline.size(); ++leg) {
       add_leg_walls(centerline, leg);
     }
-    walls_.push_back({front_cap_start(centerline), front_cap_end(centerline)});
-    walls_.push_back({back_cap_start(centerline), back_cap_end(centerline)});
+    if (has_end_caps) {
+      walls_.push_back({front_cap_start(centerline), front_cap_end(centerline)});
+      walls_.push_back({back_cap_start(centerline), back_cap_end(centerline)});
+    }
   }
 
   // Wall and floor surface samples at `spacing_m`, world frame (floor at z = 0).

@@ -10,7 +10,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <exception>
+#include <stdexcept>
 
 namespace lightnav_localization {
 namespace {
@@ -128,9 +130,14 @@ void PoseGraph::add_gps_factor(int index, const Eigen::Vector3d& position,
 bool PoseGraph::optimize() {
   Implementation& graph = *implementation_;
   try {
+    if (should_fail_once_) {
+      should_fail_once_ = false;
+      throw std::runtime_error("injected optimization failure");
+    }
     graph.smoother.update(graph.pending_factors, graph.pending_values, graph.pending_stamps);
     graph.estimate = graph.smoother.calculateEstimate();
-  } catch (const std::exception&) {
+  } catch (const std::exception& exception) {
+    last_error_ = exception.what();
     return false;
   }
   graph.pending_factors.resize(0);
@@ -148,8 +155,13 @@ std::optional<Eigen::Isometry3d> PoseGraph::pose(int index) const {
 std::optional<Eigen::Vector3d> PoseGraph::position_and_yaw_std(int index) const {
   const gtsam::Values& estimate = implementation_->estimate;
   if (!estimate.exists(key_of(index))) return std::nullopt;
-  const gtsam::Matrix covariance =
-      implementation_->smoother.getISAM2().marginalCovariance(key_of(index));
+  gtsam::Matrix covariance;
+  try {
+    covariance = implementation_->smoother.getISAM2().marginalCovariance(key_of(index));
+  } catch (const std::exception& exception) {
+    covariance_error_ = exception.what();
+    return std::nullopt;
+  }
   return Eigen::Vector3d(std::sqrt(covariance(3, 3)), std::sqrt(covariance(4, 4)),
                          std::sqrt(covariance(2, 2)));
 }
