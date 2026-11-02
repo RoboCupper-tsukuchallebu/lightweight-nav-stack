@@ -5,6 +5,7 @@ import rclpy
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import LaserScan, PointCloud2
 from sensor_msgs_py import point_cloud2
@@ -49,8 +50,8 @@ class KinematicSimNode(Node):
         self.declare_parameter("odom_frame_id", "world")
         self.declare_parameter("sensor_offset_xyz", [0.1, 0.0, 0.3])
         # Flat arrays because ROS parameters cannot nest: [x, y, radius, ...] and [x1, y1, x2, y2, ...].
-        self.declare_parameter("obstacles", [0.0] * 0)
-        self.declare_parameter("walls", [0.0] * 0)
+        self.declare_parameter("obstacles", Parameter.Type.DOUBLE_ARRAY)
+        self.declare_parameter("walls", Parameter.Type.DOUBLE_ARRAY)
         self.declare_parameter("ground_slope_deg", 0.0)
         self.declare_parameter("scan_range_max_m", 10.0)
         self.declare_parameter("scan_beam_count", 360)
@@ -90,7 +91,7 @@ class KinematicSimNode(Node):
         return float(self.get_parameter(name).value)
 
     def _number_array(self, name):
-        return [float(value) for value in self.get_parameter(name).value]
+        return [float(value) for value in self.get_parameter_or(name, Parameter(name, Parameter.Type.DOUBLE_ARRAY, [])).value]
 
     def _positive(self, name):
         value = self._number(name)
