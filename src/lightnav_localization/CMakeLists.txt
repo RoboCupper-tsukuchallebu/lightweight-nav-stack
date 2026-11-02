@@ -19,7 +19,8 @@ add_library(lightnav_localization_core
   src/matcher.cpp
   src/pose_graph.cpp
   src/gps_input.cpp
-  src/lidar_odometry.cpp)
+  src/lidar_odometry.cpp
+  src/localizer.cpp)
 target_include_directories(lightnav_localization_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
@@ -44,7 +45,7 @@ if(BUILD_TESTING)
   # Plain GTest (not ament_add_gtest): the vendored gtest source of ament_cmake_gtest does not
   # compile against the gtest headers in the pixi environment.
   find_package(GTest REQUIRED)
-  foreach(test_name pcd_io map_metadata pose_buffer deskew matcher performance pose_graph gps_input corrector state_machine lidar_odometry)
+  foreach(test_name pcd_io map_metadata pose_buffer deskew matcher performance pose_graph gps_input corrector state_machine lidar_odometry localizer match_information)
     add_executable(test_${test_name} test/test_${test_name}.cpp)
     target_link_libraries(test_${test_name} lightnav_localization_core GTest::gtest GTest::gtest_main)
     target_compile_options(test_${test_name} PRIVATE -Wall -Wextra -Werror)

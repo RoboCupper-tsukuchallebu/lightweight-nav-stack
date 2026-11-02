@@ -7,6 +7,13 @@
 
 namespace lightnav_localization {
 
+inline Eigen::Matrix<double, 6, 6> diagonal_information(double sigma_m, double sigma_rad) {
+  Eigen::Matrix<double, 6, 6> information = Eigen::Matrix<double, 6, 6>::Zero();
+  information.topLeftCorner<3, 3>().diagonal().setConstant(1.0 / (sigma_rad * sigma_rad));
+  information.bottomRightCorner<3, 3>().diagonal().setConstant(1.0 / (sigma_m * sigma_m));
+  return information;
+}
+
 struct PoseGraphParameters {
   double window_s = 30.0;
   double huber_k = 1.0;
@@ -33,9 +40,11 @@ class PoseGraph {
   // Wheel odometry: relative motion (2D lifted to 3D) from the previous node to the new one.
   int add_node_with_wheel_factor(double stamp_sec, const Eigen::Isometry3d& guess,
                                  const Eigen::Isometry3d& wheel_relative);
+  // `information` is 6x6 in GTSAM Pose3 order (rotation xyz, then translation xyz).
   void add_lidar_odometry_factor(int from_index, int to_index, const Eigen::Isometry3d& relative,
-                                 double sigma_m, double sigma_rad);
-  void add_map_factor(int index, const Eigen::Isometry3d& pose, double sigma_m, double sigma_rad);
+                                 const Eigen::Matrix<double, 6, 6>& information);
+  void add_map_factor(int index, const Eigen::Isometry3d& pose,
+                      const Eigen::Matrix<double, 6, 6>& information);
   void add_gps_factor(int index, const Eigen::Vector3d& position, const Eigen::Vector3d& sigma_m);
   // Optimizes. Returns false if GTSAM threw; the caller then rebuilds from the current estimate.
   bool optimize();

@@ -103,18 +103,18 @@ int PoseGraph::add_node_with_wheel_factor(double stamp_sec, const Eigen::Isometr
 }
 
 void PoseGraph::add_lidar_odometry_factor(int from_index, int to_index,
-                                          const Eigen::Isometry3d& relative, double sigma_m,
-                                          double sigma_rad) {
+                                          const Eigen::Isometry3d& relative,
+                                          const Eigen::Matrix<double, 6, 6>& information) {
   implementation_->pending_factors.emplace_shared<gtsam::BetweenFactor<gtsam::Pose3>>(
       key_of(from_index), key_of(to_index), to_gtsam(relative),
-      pose_noise({sigma_rad, sigma_rad, sigma_rad}, {sigma_m, sigma_m, sigma_m}));
+      gtsam::noiseModel::Gaussian::Information(information));
 }
 
-void PoseGraph::add_map_factor(int index, const Eigen::Isometry3d& pose, double sigma_m,
-                               double sigma_rad) {
+void PoseGraph::add_map_factor(int index, const Eigen::Isometry3d& pose,
+                               const Eigen::Matrix<double, 6, 6>& information) {
   implementation_->pending_factors.emplace_shared<gtsam::PriorFactor<gtsam::Pose3>>(
       key_of(index), to_gtsam(pose),
-      robust(pose_noise({sigma_rad, sigma_rad, sigma_rad}, {sigma_m, sigma_m, sigma_m}),
+      robust(gtsam::noiseModel::Gaussian::Information(information),
              implementation_->parameters.huber_k));
 }
 

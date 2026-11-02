@@ -117,7 +117,7 @@ TEST(PoseGraph, LidarOdometryOverridesPlanarConstraintOnSlope) {
     const Eigen::Isometry3d wheel_relative = translation_pose(kStepM, 0.0);  // blind to the slope
     truth = truth * true_relative;
     const int index = graph.add_node_with_wheel_factor(step, *graph.pose(previous) * wheel_relative, wheel_relative);
-    graph.add_lidar_odometry_factor(previous, index, true_relative, 0.02, 0.005);
+    graph.add_lidar_odometry_factor(previous, index, true_relative, diagonal_information(0.02, 0.005));
     ASSERT_TRUE(graph.optimize());
   }
   const Eigen::Isometry3d estimate = *graph.pose(graph.latest_index());
