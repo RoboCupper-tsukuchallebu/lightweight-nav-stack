@@ -126,18 +126,42 @@ def unconfigured_rig():
         Parameter("plan_timeout_s", value=2.0),
         Parameter("tick_hz", value=20.0),
     ]
-    mission = MissionNode(parameter_overrides=overrides)
-    harness = Harness()
-    executor = MultiThreadedExecutor(num_threads=8)
-    executor.add_node(mission)
-    executor.add_node(harness)
-    thread = threading.Thread(target=executor.spin, daemon=True)
-    thread.start()
-    yield mission, harness
-    with contextlib.suppress(Exception):  # 試験内で deactivate 済みなら失敗するので無視
-        mission.trigger_deactivate()
-    executor.shutdown()
-    thread.join(timeout=2.0)
+    observer = rclpy.create_node("mission_cleanup_observer")
+    planner_client = None
+    try:
+        planner_client = observer.create_client(PlanPath, "/lightnav/planner/plan_path")
+        with contextlib.ExitStack() as cleanup:
+            mission = MissionNode(parameter_overrides=overrides)
+            cleanup.callback(mission.destroy_node)
+            harness = Harness()
+            cleanup.callback(harness.destroy_node)
+            executor = MultiThreadedExecutor(num_threads=8)
+            executor.add_node(mission)
+            executor.add_node(harness)
+            thread = threading.Thread(target=executor.spin, daemon=True)
+            thread.start()
+            try:
+                observed_planner_service = wait_until(planner_client.service_is_ready)
+                yield mission, harness
+            finally:
+                with contextlib.suppress(Exception):  # 試験内で deactivate 済みなら失敗するので無視
+                    mission.trigger_deactivate()
+                for node in (mission, harness):
+                    for timer in node.timers:
+                        timer.cancel()
+                executor.shutdown()
+                thread.join(timeout=2.0)
+            # destroy_node は試験本体で追加した timer も含めて破棄する。
+        # ponytail: ノード名はグラフに残るのでサービスで確認する。
+        assert observed_planner_service and wait_until(
+            lambda: not planner_client.service_is_ready()), (
+                "planner サービスを観測できないか、後片付け後も残っている")
+    finally:
+        try:
+            if planner_client is not None:
+                observer.destroy_client(planner_client)
+        finally:
+            observer.destroy_node()
 
 
 @pytest.fixture
