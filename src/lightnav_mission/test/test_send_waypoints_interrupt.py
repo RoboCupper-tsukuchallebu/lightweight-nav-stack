@@ -24,6 +24,17 @@ CANCEL_OBSERVE_TIMEOUT_S = 5.0
 EXECUTE_DEADLINE_S = 20.0
 
 
+# 親が SIGINT を無視していると子も継承し、Python は KeyboardInterrupt を送らなくなる。
+# CLI を起動する前に既定の挙動へ戻す (起動環境の正規化。CLI の挙動は変えない)。
+CHILD_LAUNCHER = """
+import runpy, signal, sys
+print("inherited SIGINT disposition:", signal.getsignal(signal.SIGINT), file=sys.stderr, flush=True)
+signal.signal(signal.SIGINT, signal.default_int_handler)
+sys.argv = ["send_waypoints"] + sys.argv[1:]
+runpy.run_module("lightnav_mission.send_waypoints", run_name="__main__")
+"""
+
+
 def test_sigint_cancels_goal_and_cli_exits_in_bounded_time(tmp_path):
     context = rclpy.Context()
     rclpy.init(context=context, domain_id=int(TEST_DOMAIN_ID))
@@ -61,7 +72,7 @@ def test_sigint_cancels_goal_and_cli_exits_in_bounded_time(tmp_path):
         "DYLD_LIBRARY_PATH": str(INSTALL_LIBRARY_DIRECTORY),
     }
     process = subprocess.Popen(
-        [sys.executable, "-m", "lightnav_mission.send_waypoints", str(waypoints_file)],
+        [sys.executable, "-c", CHILD_LAUNCHER, str(waypoints_file)],
         env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
     try:
         assert goal_running.wait(GOAL_START_TIMEOUT_S), "goal が実行開始しなかった"
