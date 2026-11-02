@@ -33,8 +33,9 @@ from lightnav_sim.sim_math import (
 )
 from lightnav_sim.sim_visualization import (
     build_markers,
+    map_world_transform,
     robot_transform,
-    static_transforms,
+    sensor_transforms,
 )
 
 CIRCLE_STRIDE = 3
@@ -103,12 +104,14 @@ class KinematicSimNode(Node):
         )
         self._marker_publisher = self.create_publisher(MarkerArray, MARKER_TOPIC, 10)
         self._is_tf_publishing = bool(self.get_parameter("publish_tf").value)
+        stamp = self.get_clock().now().to_msg()
+        # Sensor frames are always published; publish_tf only gates world->base_link and map->world.
+        static_transforms = sensor_transforms(stamp, self._sensor_offset)
         if self._is_tf_publishing:
             self._tf_broadcaster = TransformBroadcaster(self)
-            self._static_tf_broadcaster = StaticTransformBroadcaster(self)
-            self._static_tf_broadcaster.sendTransform(
-                static_transforms(self.get_clock().now().to_msg(), self._sensor_offset)
-            )
+            static_transforms.append(map_world_transform(stamp))
+        self._static_tf_broadcaster = StaticTransformBroadcaster(self)
+        self._static_tf_broadcaster.sendTransform(static_transforms)
         self._path_view_publisher = self.create_publisher(Path, PATH_VIEW_TOPIC, PATH_QOS)
         self.create_subscription(PathWithId, PATH_TOPIC, self._on_path, PATH_QOS)
         self.create_subscription(Twist, "/cmd_vel", self._on_cmd_vel, 10)

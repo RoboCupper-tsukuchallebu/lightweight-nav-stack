@@ -175,12 +175,12 @@ def test_tf_tree_is_published_by_default(make_harness):
     assert {"world", "lidar_3d", "laser"} <= static_children
 
 
-def test_publish_tf_false_disables_tf_but_keeps_markers(make_harness):
+def test_publish_tf_false_keeps_only_sensor_static_tf(make_harness):
     harness = make_harness({"publish_tf": False})
-    assert harness.spin_until(lambda: harness.markers)
+    assert harness.spin_until(lambda: harness.markers and len(harness.static_transforms) >= 2)
     harness.spin_for(0.3)
     assert harness.dynamic_transforms == []
-    assert harness.static_transforms == []
+    assert {t.child_frame_id for t in harness.static_transforms} == {"lidar_3d", "laser"}
 
 
 def test_markers_show_obstacles_and_vanish_after_clear(make_harness):

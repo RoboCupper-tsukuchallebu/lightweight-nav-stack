@@ -5,8 +5,9 @@ from builtin_interfaces.msg import Time
 from lightnav_sim.sim_math import Circle, Pose2D, Wall
 from lightnav_sim.sim_visualization import (
     build_markers,
+    map_world_transform,
     robot_transform,
-    static_transforms,
+    sensor_transforms,
     yaw_to_quaternion,
 )
 from visualization_msgs.msg import Marker
@@ -28,14 +29,20 @@ def test_robot_transform_places_base_link_on_the_ground():
     assert transform.transform.rotation.w == 1.0
 
 
-def test_static_transforms_use_sensor_offset_and_identity_map():
-    transforms = {t.child_frame_id: t for t in static_transforms(Time(), [0.1, 0.0, 0.7])}
-    assert set(transforms) == {"world", "lidar_3d", "laser"}
-    assert (transforms["world"].header.frame_id, transforms["world"].transform.translation.x) == ("map", 0.0)
-    for child in ("lidar_3d", "laser"):
-        assert transforms[child].header.frame_id == "base_link"
-        assert transforms[child].transform.translation.x == pytest.approx(0.1)
-        assert transforms[child].transform.translation.z == pytest.approx(0.7)
+def test_map_world_transform_is_identity():
+    transform = map_world_transform(Time())
+    assert (transform.header.frame_id, transform.child_frame_id) == ("map", "world")
+    assert transform.transform.translation.x == 0.0
+    assert transform.transform.rotation.w == 1.0
+
+
+def test_sensor_transforms_use_sensor_offset():
+    transforms = {t.child_frame_id: t for t in sensor_transforms(Time(), [0.1, 0.0, 0.7])}
+    assert set(transforms) == {"lidar_3d", "laser"}
+    for transform in transforms.values():
+        assert transform.header.frame_id == "base_link"
+        assert transform.transform.translation.x == pytest.approx(0.1)
+        assert transform.transform.translation.z == pytest.approx(0.7)
 
 
 def test_markers_describe_circle_wall_and_robot():

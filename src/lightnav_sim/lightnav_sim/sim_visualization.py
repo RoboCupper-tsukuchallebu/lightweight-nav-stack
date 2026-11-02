@@ -40,10 +40,14 @@ def make_transform(stamp, parent_frame_id, child_frame_id, translation_xyz, yaw=
     return transform
 
 
-def static_transforms(stamp, sensor_offset_xyz):
-    """map->world identity, and base_link->lidar_3d / laser at the sensor offset."""
+def map_world_transform(stamp):
+    """map->world identity."""
+    return make_transform(stamp, MAP_FRAME_ID, WORLD_FRAME_ID, (0.0, 0.0, 0.0))
+
+
+def sensor_transforms(stamp, sensor_offset_xyz):
+    """base_link->lidar_3d / laser at the sensor offset."""
     return [
-        make_transform(stamp, MAP_FRAME_ID, WORLD_FRAME_ID, (0.0, 0.0, 0.0)),
         make_transform(stamp, BASE_FRAME_ID, "lidar_3d", sensor_offset_xyz),
         make_transform(stamp, BASE_FRAME_ID, "laser", sensor_offset_xyz),
     ]
