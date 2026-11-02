@@ -1,0 +1,159 @@
+#pragma once
+
+// Synthetic corridor world for tests: walls around a polyline of axis-aligned legs.
+
+#include <Eigen/Geometry>
+#include <cmath>
+#include <functional>
+#include <limits>
+#include <vector>
+
+#include "lightnav_localization/deskew.hpp"
+
+namespace lightnav_localization::testing {
+
+struct WallSegment {
+  Eigen::Vector2d start;
+  Eigen::Vector2d end;
+};
+
+constexpr double kWallHeightM = 3.0;
+constexpr double kSensorHeightM = 1.0;
+constexpr double kCorridorHalfWidthM = 2.0;
+
+class SyntheticWorld {
+ public:
+  // `centerline` must have axis-aligned legs. Walls end flush at the course ends (closed by caps).
+  explicit SyntheticWorld(const std::vector<Eigen::Vector2d>& centerline) {
+    for (std::size_t leg = 0; leg + 1 < centerline.size(); ++leg) {
+      add_leg_walls(centerline, leg);
+    }
+    walls_.push_back({walls_front_cap_start(centerline), walls_front_cap_end(centerline)});
+    walls_.push_back({back_cap_start(centerline), back_cap_end(centerline)});
+  }
+
+  // Wall and floor surface samples at `spacing_m`, world frame (floor at z = 0).
+  PointList sample_map(double spacing_m) const {
+    PointList points;
+    for (const WallSegment& wall : walls_) {
+      const double length = (wall.end - wall.start).norm();
+      for (double along = 0.0; along <= length; along += spacing_m) {
+        const Eigen::Vector2d xy = wall.start + (wall.end - wall.start) * (along / length);
+        for (double height = 0.0; height <= kWallHeightM; height += spacing_m) {
+          points.emplace_back(xy.x(), xy.y(), height);
+        }
+      }
+    }
+    return points;
+  }
+
+  // Simulates one rotation. Each ray is cast from the true sensor pose at its own emission time and
+  // reported in the sensor frame at that time (the distortion a moving LiDAR really has).
+  // `stamp_at_scan_end` selects the time_offset convention: true -> offsets are negative (driver
+  // default), false -> offsets are positive (timestamp_first_packet: true).
+  std::vector<TimedPoint> synthesize_scan(const std::function<Eigen::Isometry3d(double)>& pose_at,
+                                          double scan_start_sec, double scan_duration_sec,
+                                          bool stamp_at_scan_end, int azimuth_steps = 900,
+                                          int ring_count = 16) const {
+    const double stamp = stamp_at_scan_end ? scan_start_sec + scan_duration_sec : scan_start_sec;
+    std::vector<TimedPoint> scan;
+    for (int step = 0; step < azimuth_steps; ++step) {
+      const double fraction = static_cast<double>(step) / azimuth_steps;
+      const double emission_time = scan_start_sec + fraction * scan_duration_sec;
+      const Eigen::Isometry3d pose = pose_at(emission_time);
+      const double azimuth = 2.0 * M_PI * fraction;
+      for (int ring = 0; ring < ring_count; ++ring) {
+        const double elevation = (-15.0 + 30.0 * ring / (ring_count - 1)) * M_PI / 180.0;
+        const Eigen::Vector3d direction(std::cos(elevation) * std::cos(azimuth),
+                                        std::cos(elevation) * std::sin(azimuth),
+                                        std::sin(elevation));
+        const double range = cast_ray(pose.translation(), pose.linear() * direction);
+        if (!std::isfinite(range)) continue;
+        scan.push_back({(range * direction).cast<float>(),
+                        static_cast<float>(emission_time - stamp)});
+      }
+    }
+    return scan;
+  }
+
+ private:
+  static Eigen::Vector2d normal_of(const std::vector<Eigen::Vector2d>& line, std::size_t leg) {
+    const Eigen::Vector2d direction = (line[leg + 1] - line[leg]).normalized();
+    return {-direction.y(), direction.x()};
+  }
+
+  // Wall endpoint on side `side` (+1 left, -1 right) at centerline vertex `vertex` of leg `leg`.
+  static Eigen::Vector2d wall_end_point(const std::vector<Eigen::Vector2d>& line, std::size_t leg,
+                                        bool at_leg_end, double side) {
+    const std::size_t vertex = at_leg_end ? leg + 1 : leg;
+    const bool is_corner = at_leg_end ? (leg + 2 < line.size()) : (leg > 0);
+    if (!is_corner) return line[vertex] + side * kCorridorHalfWidthM * normal_of(line, leg);
+    const std::size_t before = at_leg_end ? leg : leg - 1;
+    const Eigen::Vector2d normal_before = normal_of(line, before);
+    const Eigen::Vector2d normal_after = normal_of(line, before + 1);
+    const Eigen::Vector2d incoming = (line[before + 1] - line[before]).normalized();
+    const Eigen::Vector2d outgoing = (line[before + 2] - line[before + 1]).normalized();
+    const double turn_sign = incoming.x() * outgoing.y() - incoming.y() * outgoing.x() > 0 ? 1.0 : -1.0;
+    const double corner_sign = (side == turn_sign) ? 1.0 : -1.0;  // inner side is +1
+    return line[vertex] + corner_sign * turn_sign * kCorridorHalfWidthM * (normal_before + normal_after);
+  }
+
+  void add_leg_walls(const std::vector<Eigen::Vector2d>& line, std::size_t leg) {
+    for (const double side : {1.0, -1.0}) {
+      walls_.push_back({wall_end_point(line, leg, false, side), wall_end_point(line, leg, true, side)});
+    }
+  }
+
+  Eigen::Vector2d walls_front_cap_start(const std::vector<Eigen::Vector2d>& line) const {
+    return wall_end_point(line, 0, false, 1.0);
+  }
+  Eigen::Vector2d walls_front_cap_end(const std::vector<Eigen::Vector2d>& line) const {
+    return wall_end_point(line, 0, false, -1.0);
+  }
+  Eigen::Vector2d back_cap_start(const std::vector<Eigen::Vector2d>& line) const {
+    return wall_end_point(line, line.size() - 2, true, 1.0);
+  }
+  Eigen::Vector2d back_cap_end(const std::vector<Eigen::Vector2d>& line) const {
+    return wall_end_point(line, line.size() - 2, true, -1.0);
+  }
+
+  // Nearest hit distance of a ray against walls and floor; infinity if nothing is hit.
+  double cast_ray(const Eigen::Vector3d& origin, const Eigen::Vector3d& direction) const {
+    double nearest = std::numeric_limits<double>::infinity();
+    if (direction.z() < -1e-9) nearest = -origin.z() / direction.z();  // floor at z = 0
+    for (const WallSegment& wall : walls_) {
+      const Eigen::Vector2d edge = wall.end - wall.start;
+      const Eigen::Vector2d ray_xy = direction.head<2>();
+      const double denominator = ray_xy.x() * edge.y() - ray_xy.y() * edge.x();
+      if (std::abs(denominator) < 1e-12) continue;
+      const Eigen::Vector2d to_start = wall.start - origin.head<2>();
+      const double range = (to_start.x() * edge.y() - to_start.y() * edge.x()) / denominator;
+      const double edge_ratio = (to_start.x() * ray_xy.y() - to_start.y() * ray_xy.x()) / denominator;
+      const double hit_height = origin.z() + range * direction.z();
+      if (range > 0.0 && edge_ratio >= 0.0 && edge_ratio <= 1.0 && hit_height >= 0.0 &&
+          hit_height <= kWallHeightM) {
+        nearest = std::min(nearest, range);
+      }
+    }
+    return nearest < kMaxRangeM ? nearest : std::numeric_limits<double>::infinity();
+  }
+
+  static constexpr double kMaxRangeM = 60.0;
+  std::vector<WallSegment> walls_;
+};
+
+// Constant-speed, constant-yaw-rate motion starting at `start_xy` heading `start_yaw` at t = 0.
+inline Eigen::Isometry3d arc_pose(double time_sec, const Eigen::Vector2d& start_xy, double start_yaw,
+                                  double speed_mps, double yaw_rate_rps) {
+  Eigen::Isometry3d pose = Eigen::Isometry3d::Identity();
+  const double yaw = start_yaw + yaw_rate_rps * time_sec;
+  // Small-arc integration is exact enough here: heading changes <= 0.05 rad per scan.
+  const double mean_yaw = start_yaw + 0.5 * yaw_rate_rps * time_sec;
+  pose.translation() = Eigen::Vector3d(start_xy.x() + speed_mps * time_sec * std::cos(mean_yaw),
+                                       start_xy.y() + speed_mps * time_sec * std::sin(mean_yaw),
+                                       kSensorHeightM);
+  pose.linear() = Eigen::AngleAxisd(yaw, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+  return pose;
+}
+
+}  // namespace lightnav_localization::testing
