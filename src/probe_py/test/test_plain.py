@@ -4,6 +4,7 @@ def test_plain():
 
 def test_custom_service_type_loads():
     import rclpy
+
     from lightnav_msgs.srv import SetInitialPose
 
     rclpy.init()
