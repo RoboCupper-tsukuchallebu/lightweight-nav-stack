@@ -11,6 +11,8 @@ from sensor_msgs.msg import LaserScan, PointCloud2
 from sensor_msgs_py import point_cloud2
 from std_msgs.msg import Header
 from std_srvs.srv import SetBool, Trigger
+from tf2_ros import StaticTransformBroadcaster, TransformBroadcaster
+from visualization_msgs.msg import MarkerArray
 
 from lightnav_sim.sim_math import (
     Circle,
@@ -23,6 +25,11 @@ from lightnav_sim.sim_math import (
     scan_ranges,
     world_to_sensor,
 )
+from lightnav_sim.sim_visualization import (
+    build_markers,
+    robot_transform,
+    static_transforms,
+)
 
 CIRCLE_STRIDE = 3
 WALL_STRIDE = 4
@@ -30,6 +37,7 @@ POSITION_VARIANCE_M2 = 0.01
 CLOUD_AZIMUTH_COUNT = 360
 CLOUD_RANGE_MAX_M = 30.0
 SERVICE_PREFIX = "/lightnav/sim/"
+MARKER_TOPIC = "/lightnav/sim/markers"
 
 
 def _chunks(flat_values, stride, name):
@@ -50,7 +58,7 @@ class KinematicSimNode(Node):
         self.declare_parameter("cmd_timeout_s", 0.5)
         self.declare_parameter("odom_topic", "/sim/odom")
         self.declare_parameter("odom_frame_id", "world")
-        self.declare_parameter("sensor_offset_xyz", [0.1, 0.0, 0.3])
+        self.declare_parameter("sensor_offset_xyz", [0.1, 0.0, 0.7])
         # Flat arrays because ROS parameters cannot nest: [x, y, radius, ...] and [x1, y1, x2, y2, ...].
         self.declare_parameter("obstacles", Parameter.Type.DOUBLE_ARRAY)
         self.declare_parameter("walls", Parameter.Type.DOUBLE_ARRAY)
@@ -59,6 +67,7 @@ class KinematicSimNode(Node):
         self.declare_parameter("scan_beam_count", 360)
         self.declare_parameter("points_topic", "/velodyne_points")
         self.declare_parameter("scan_topic", "/scan")
+        self.declare_parameter("publish_tf", True)
 
         self._pose = Pose2D(*(self._number(n) for n in ("initial_x", "initial_y", "initial_yaw")))
         self._sensor_offset = tuple(self._number_array("sensor_offset_xyz"))
@@ -82,6 +91,14 @@ class KinematicSimNode(Node):
         self._scan_publisher = (
             self.create_publisher(LaserScan, scan_topic, qos_profile_sensor_data) if scan_topic else None
         )
+        self._marker_publisher = self.create_publisher(MarkerArray, MARKER_TOPIC, 10)
+        self._is_tf_publishing = bool(self.get_parameter("publish_tf").value)
+        if self._is_tf_publishing:
+            self._tf_broadcaster = TransformBroadcaster(self)
+            self._static_tf_broadcaster = StaticTransformBroadcaster(self)
+            self._static_tf_broadcaster.sendTransform(
+                static_transforms(self.get_clock().now().to_msg(), self._sensor_offset)
+            )
         self.create_subscription(Twist, "/cmd_vel", self._on_cmd_vel, 10)
         self.create_service(SetBool, SERVICE_PREFIX + "set_pose_publishing", self._on_set_pose_publishing)
         self.create_service(SetBool, SERVICE_PREFIX + "set_motion_enabled", self._on_set_motion_enabled)
@@ -140,6 +157,8 @@ class KinematicSimNode(Node):
         )
         if delta_s > 0.0:
             self._pose = integrate_unicycle(self._pose, self._linear_mps, self._angular_radps, delta_s)
+        if self._is_tf_publishing:
+            self._tf_broadcaster.sendTransform(robot_transform(self.get_clock().now().to_msg(), self._pose))
 
     def _header(self, frame_id):
         return Header(stamp=self.get_clock().now().to_msg(), frame_id=frame_id)
@@ -170,6 +189,9 @@ class KinematicSimNode(Node):
         return circles, walls
 
     def _publish_sensors(self):
+        self._marker_publisher.publish(
+            build_markers(self.get_clock().now().to_msg(), self._pose, self._circles, self._walls)
+        )
         circles, walls = self._obstacles_in_sensor_frame()
         height_m = self._sensor_offset[2]
         points = cloud_points(CLOUD_AZIMUTH_COUNT, circles, walls, height_m, self._slope_rad, CLOUD_RANGE_MAX_M)

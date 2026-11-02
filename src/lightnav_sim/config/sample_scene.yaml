@@ -1,0 +1,9 @@
+# Sample scene: obstacles are flat arrays [x, y, radius, ...] and [x1, y1, x2, y2, ...].
+# No path width is assumed; adjust per course.
+kinematic_sim_node:
+  ros__parameters:
+    initial_x: 0.0
+    initial_y: 0.0
+    initial_yaw: 0.0
+    obstacles: [6.0, 1.0, 0.5, 10.0, -1.5, 0.8]
+    walls: [3.0, 4.0, 14.0, 4.0, 3.0, -4.0, 14.0, -4.0]

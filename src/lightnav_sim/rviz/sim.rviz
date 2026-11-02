@@ -1,0 +1,64 @@
+Panels: []
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Enabled: true
+    - Class: rviz_default_plugins/PointCloud2
+      Name: Velodyne points
+      Enabled: true
+      Topic:
+        Value: /velodyne_points
+        Reliability Policy: Best Effort
+      Size (m): 0.03
+      Style: Points
+    - Class: rviz_default_plugins/LaserScan
+      Name: Scan
+      Enabled: true
+      Topic:
+        Value: /scan
+        Reliability Policy: Best Effort
+      Size (m): 0.05
+      Style: Spheres
+      Color: 255; 0; 0
+      Color Transformer: FlatColor
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Sim markers
+      Enabled: true
+      Topic:
+        Value: /lightnav/sim/markers
+    - Class: rviz_default_plugins/Odometry
+      Name: Odometry
+      Enabled: true
+      Topic:
+        Value: /sim/odom
+    - Class: rviz_default_plugins/Pose
+      Name: Localized pose (pose_adapter)
+      Enabled: true
+      Topic:
+        Value: /lightnav/pose
+    - Class: rviz_default_plugins/Map
+      Name: Local grid (obstacle_monitor)
+      Enabled: true
+      Topic:
+        Value: /lightnav/local_grid
+  Enabled: true
+  Global Options:
+    Fixed Frame: map
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/MoveCamera
+  Value: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 20
+      Pitch: 0.9
+      Yaw: 3.0
+    Saved: ~
+Window Geometry: {}

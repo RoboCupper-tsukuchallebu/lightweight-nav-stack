@@ -7,8 +7,10 @@ from lightnav_sim.kinematic_sim_node import KinematicSimNode
 from nav_msgs.msg import Odometry
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.parameter import Parameter
-from rclpy.qos import QoSProfile
+from rclpy.qos import DurabilityPolicy, QoSProfile
 from std_srvs.srv import SetBool, Trigger
+from tf2_msgs.msg import TFMessage
+from visualization_msgs.msg import Marker, MarkerArray
 
 SPIN_TIMEOUT_SECONDS = 3.0
 
@@ -28,6 +30,19 @@ class Harness:
         self.helper = rclpy.create_node("test_sim_helper")
         self.odometry = []
         self.helper.create_subscription(Odometry, "/sim/odom", self.odometry.append, QoSProfile(depth=10))
+        self.markers = []
+        self.dynamic_transforms = []
+        self.static_transforms = []
+        self.helper.create_subscription(MarkerArray, "/lightnav/sim/markers", self.markers.append, QoSProfile(depth=10))
+        self.helper.create_subscription(
+            TFMessage, "/tf", lambda m: self.dynamic_transforms.extend(m.transforms), QoSProfile(depth=10)
+        )
+        self.helper.create_subscription(
+            TFMessage,
+            "/tf_static",
+            lambda m: self.static_transforms.extend(m.transforms),
+            QoSProfile(depth=10, durability=DurabilityPolicy.TRANSIENT_LOCAL),
+        )
         self.command_publisher = self.helper.create_publisher(Twist, "/cmd_vel", QoSProfile(depth=10))
         self.executor = SingleThreadedExecutor()
         self.executor.add_node(self.sim)
@@ -92,7 +107,7 @@ def test_odometry_is_offset_in_world_frame(make_harness):
     message = harness.odometry[-1]
     assert message.header.frame_id == "world"
     assert message.pose.pose.position.x == pytest.approx(2.1)
-    assert message.pose.pose.position.z == pytest.approx(0.3)
+    assert message.pose.pose.position.z == pytest.approx(0.7)
 
 
 def test_streamed_command_moves_the_sim(make_harness):
@@ -146,3 +161,35 @@ def test_odometry_topic_parameter_is_honored(make_harness):
     harness = make_harness({"odom_frame_id": "odom_test"})
     assert harness.spin_until(lambda: harness.odometry)
     assert harness.odometry[-1].header.frame_id == "odom_test"
+
+
+def test_tf_tree_is_published_by_default(make_harness):
+    harness = make_harness({"initial_x": 2.0})
+    assert harness.spin_until(lambda: harness.dynamic_transforms and len(harness.static_transforms) >= 3)
+    dynamic = harness.dynamic_transforms[-1]
+    assert (dynamic.header.frame_id, dynamic.child_frame_id) == ("world", "base_link")
+    assert dynamic.transform.translation.x == pytest.approx(2.0)
+    static_children = {t.child_frame_id for t in harness.static_transforms}
+    assert {"world", "lidar_3d", "laser"} <= static_children
+
+
+def test_publish_tf_false_disables_tf_but_keeps_markers(make_harness):
+    harness = make_harness({"publish_tf": False})
+    assert harness.spin_until(lambda: harness.markers)
+    harness.spin_for(0.3)
+    assert harness.dynamic_transforms == []
+    assert harness.static_transforms == []
+
+
+def test_markers_show_obstacles_and_vanish_after_clear(make_harness):
+    harness = make_harness({"obstacles": [3.0, 0.0, 0.5], "walls": [0.0, 2.0, 4.0, 2.0]})
+    assert harness.spin_until(lambda: harness.markers)
+    namespaces = {m.ns for m in harness.markers[-1].markers if m.action == Marker.ADD}
+    assert {"obstacles", "walls", "robot"} <= namespaces
+    harness.call(Trigger, "/lightnav/sim/clear_obstacles")
+
+    def only_robot_left():
+        latest = {m.ns for m in harness.markers[-1].markers if m.action == Marker.ADD}
+        return latest == {"robot"}
+
+    assert harness.spin_until(only_robot_left)

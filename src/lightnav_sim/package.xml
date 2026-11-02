@@ -12,6 +12,13 @@
   <depend>nav_msgs</depend>
   <depend>sensor_msgs</depend>
   <depend>std_srvs</depend>
+  <depend>tf2_ros_py</depend>
+  <depend>visualization_msgs</depend>
+
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>rviz2</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
 
   <test_depend>python3-pytest</test_depend>
 

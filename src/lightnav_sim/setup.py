@@ -1,3 +1,5 @@
+import glob
+
 from setuptools import find_packages, setup
 
 PACKAGE_NAME = "lightnav_sim"
@@ -9,6 +11,9 @@ setup(
     data_files=[
         ("share/ament_index/resource_index/packages", ["resource/" + PACKAGE_NAME]),
         ("share/" + PACKAGE_NAME, ["package.xml"]),
+        ("share/" + PACKAGE_NAME + "/launch", glob.glob("launch/*.py")),
+        ("share/" + PACKAGE_NAME + "/config", glob.glob("config/*.yaml")),
+        ("share/" + PACKAGE_NAME + "/rviz", glob.glob("rviz/*.rviz")),
     ],
     install_requires=["setuptools"],
     zip_safe=True,
