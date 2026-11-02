@@ -1,5 +1,8 @@
 #include <gtest/gtest.h>
 
+#include <utility>
+#include <vector>
+
 #include <cstdio>
 #include <fstream>
 
@@ -51,4 +54,51 @@ TEST(PcdIo, rejects_unknown_fields) {
 
 TEST(PcdIo, rejects_missing_file) {
   EXPECT_THROW(lightnav_localization::read_pcd(temporary_path("does_not_exist.pcd")), std::runtime_error);
+}
+
+namespace {
+
+void write_text(const std::string& path, const std::string& text) { std::ofstream(path, std::ios::binary) << text; }
+
+const std::string kHeaderPrefix =
+    "VERSION 0.7\nFIELDS x y z\nSIZE 4 4 4\nTYPE F F F\nCOUNT 1 1 1\n";
+
+}  // namespace
+
+TEST(PcdIo, rejects_each_kind_of_broken_file) {
+  const std::string path = temporary_path("broken.pcd");
+  const std::vector<std::pair<std::string, std::string>> broken_files = {
+      {"no POINTS", kHeaderPrefix + "WIDTH 1\nHEIGHT 1\nDATA ascii\n1 2 3\n"},
+      {"non-numeric POINTS", kHeaderPrefix + "WIDTH 1\nHEIGHT 1\nPOINTS abc\nDATA ascii\n1 2 3\n"},
+      {"negative POINTS", kHeaderPrefix + "WIDTH 1\nHEIGHT 1\nPOINTS -1\nDATA ascii\n1 2 3\n"},
+      {"huge POINTS", kHeaderPrefix + "WIDTH 4000000000\nHEIGHT 1\nPOINTS 4000000000\nDATA binary\n"},
+      {"huge POINTS ascii", kHeaderPrefix + "WIDTH 4000000000\nHEIGHT 1\nPOINTS 4000000000\nDATA ascii\n1 2 3\n"},
+      {"POINTS smaller than data", kHeaderPrefix + "WIDTH 1\nHEIGHT 1\nPOINTS 1\nDATA ascii\n1 2 3\n4 5 6\n"},
+      {"POINTS larger than data", kHeaderPrefix + "WIDTH 2\nHEIGHT 1\nPOINTS 2\nDATA ascii\n1 2 3\n"},
+      {"bad COUNT", "VERSION 0.7\nFIELDS x y z\nSIZE 4 4 4\nTYPE F F F\nCOUNT 1 1 2\nWIDTH 1\nHEIGHT 1\nPOINTS 1\nDATA ascii\n1 2 3\n"},
+      {"WIDTH x HEIGHT mismatch", kHeaderPrefix + "WIDTH 3\nHEIGHT 1\nPOINTS 1\nDATA ascii\n1 2 3\n"},
+      {"NaN", kHeaderPrefix + "WIDTH 1\nHEIGHT 1\nPOINTS 1\nDATA ascii\nnan 2 3\n"},
+      {"non-numeric value", kHeaderPrefix + "WIDTH 1\nHEIGHT 1\nPOINTS 1\nDATA ascii\n1 abc 3\n"},
+  };
+  for (const auto& [description, text] : broken_files) {
+    write_text(path, text);
+    EXPECT_THROW(lightnav_localization::read_pcd(path), std::runtime_error) << description;
+  }
+}
+
+TEST(PcdIo, rejects_binary_size_mismatch_and_non_finite_values) {
+  const std::string path = temporary_path("binary_broken.pcd");
+  const std::string header = kHeaderPrefix + "WIDTH 1\nHEIGHT 1\nPOINTS 1\nDATA binary\n";
+  write_text(path, header + std::string(8, '\0'));  // truncated: 8 of 12 bytes
+  EXPECT_THROW(lightnav_localization::read_pcd(path), std::runtime_error);
+  write_text(path, header + std::string(16, '\0'));  // trailing bytes
+  EXPECT_THROW(lightnav_localization::read_pcd(path), std::runtime_error);
+  write_text(path, header + std::string(4, '\xff') + std::string(8, '\0'));  // float 0xffffffff is NaN
+  EXPECT_THROW(lightnav_localization::read_pcd(path), std::runtime_error);
+}
+
+TEST(PcdIo, write_to_an_unwritable_location_is_an_error) {
+  EXPECT_THROW(lightnav_localization::write_pcd(temporary_path("no_such_directory/map.pcd"), sample_points(),
+                                                PcdEncoding::kBinary),
+               std::runtime_error);
 }

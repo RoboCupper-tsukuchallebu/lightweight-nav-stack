@@ -3,6 +3,7 @@
 // Synthetic corridor world for tests: walls around a polyline of axis-aligned legs.
 
 #include <Eigen/Geometry>
+#include <algorithm>
 #include <cmath>
 #include <functional>
 #include <limits>
@@ -25,16 +26,17 @@ class SyntheticWorld {
  public:
   // `centerline` must have axis-aligned legs. Walls end flush at the course ends (closed by caps).
   explicit SyntheticWorld(const std::vector<Eigen::Vector2d>& centerline) {
+    centerline_ = centerline;
     for (std::size_t leg = 0; leg + 1 < centerline.size(); ++leg) {
       add_leg_walls(centerline, leg);
     }
-    walls_.push_back({walls_front_cap_start(centerline), walls_front_cap_end(centerline)});
+    walls_.push_back({front_cap_start(centerline), front_cap_end(centerline)});
     walls_.push_back({back_cap_start(centerline), back_cap_end(centerline)});
   }
 
   // Wall and floor surface samples at `spacing_m`, world frame (floor at z = 0).
   PointList sample_map(double spacing_m) const {
-    PointList points;
+    PointList points = sample_floor(spacing_m);
     for (const WallSegment& wall : walls_) {
       const double length = (wall.end - wall.start).norm();
       for (double along = 0.0; along <= length; along += spacing_m) {
@@ -77,6 +79,24 @@ class SyntheticWorld {
   }
 
  private:
+  PointList sample_floor(double spacing_m) const {
+    PointList points;
+    for (std::size_t leg = 0; leg + 1 < centerline_.size(); ++leg) {
+      const Eigen::Vector2d direction = (centerline_[leg + 1] - centerline_[leg]).normalized();
+      const Eigen::Vector2d normal(-direction.y(), direction.x());
+      const double length = (centerline_[leg + 1] - centerline_[leg]).norm();
+      const double begin = leg > 0 ? -kCorridorHalfWidthM : 0.0;
+      const double end = length + (leg + 2 < centerline_.size() ? kCorridorHalfWidthM : 0.0);
+      for (double along = begin; along <= end; along += spacing_m) {
+        for (double across = -kCorridorHalfWidthM; across <= kCorridorHalfWidthM; across += spacing_m) {
+          const Eigen::Vector2d xy = centerline_[leg] + along * direction + across * normal;
+          points.emplace_back(xy.x(), xy.y(), 0.0);
+        }
+      }
+    }
+    return points;
+  }
+
   static Eigen::Vector2d normal_of(const std::vector<Eigen::Vector2d>& line, std::size_t leg) {
     const Eigen::Vector2d direction = (line[leg + 1] - line[leg]).normalized();
     return {-direction.y(), direction.x()};
@@ -104,10 +124,10 @@ class SyntheticWorld {
     }
   }
 
-  Eigen::Vector2d walls_front_cap_start(const std::vector<Eigen::Vector2d>& line) const {
+  Eigen::Vector2d front_cap_start(const std::vector<Eigen::Vector2d>& line) const {
     return wall_end_point(line, 0, false, 1.0);
   }
-  Eigen::Vector2d walls_front_cap_end(const std::vector<Eigen::Vector2d>& line) const {
+  Eigen::Vector2d front_cap_end(const std::vector<Eigen::Vector2d>& line) const {
     return wall_end_point(line, 0, false, -1.0);
   }
   Eigen::Vector2d back_cap_start(const std::vector<Eigen::Vector2d>& line) const {
@@ -140,6 +160,7 @@ class SyntheticWorld {
 
   static constexpr double kMaxRangeM = 60.0;
   std::vector<WallSegment> walls_;
+  std::vector<Eigen::Vector2d> centerline_;
 };
 
 // Constant-speed, constant-yaw-rate motion starting at `start_xy` heading `start_yaw` at t = 0.

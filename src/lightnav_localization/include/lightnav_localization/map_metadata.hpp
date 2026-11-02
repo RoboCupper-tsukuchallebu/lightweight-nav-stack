@@ -17,8 +17,13 @@ struct MapMetadata {
 
 void write_map_metadata(const std::string& file_path, const MapMetadata& metadata);
 
-// A missing file is an error here; callers that allow "no map.yaml" must check existence first
-// and treat the map as having no GPS origin. Throws std::runtime_error.
+// Strict reader. A missing file, an unknown boolean spelling, trailing garbage in a number, an
+// out-of-range value or a latitude/longitude outside [-90, 90] / [-180, 180] throws
+// std::runtime_error.
 MapMetadata read_map_metadata(const std::string& file_path);
+
+// Same, except that a missing file yields default metadata (has_gps_origin = false), i.e. the map
+// works without GPS. A file that exists but is malformed still throws.
+MapMetadata read_map_metadata_or_no_origin(const std::string& file_path);
 
 }  // namespace lightnav_localization

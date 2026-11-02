@@ -1,7 +1,6 @@
 #include "lightnav_localization/matcher.hpp"
 
 #include <cmath>
-#include <memory>
 #include <small_gicp/ann/kdtree.hpp>
 #include <small_gicp/factors/gicp_factor.hpp>
 #include <small_gicp/points/point_cloud.hpp>
@@ -27,23 +26,35 @@ double rotation_angle_rad(const Eigen::Isometry3d& transform) {
 
 }  // namespace
 
-MatchResult match_scan(const PointList& target, const PointList& source,
+struct PreparedTarget::Implementation {
+  explicit Implementation(const PointList& points)
+      : cloud(make_cloud_with_covariances(points)), tree(cloud) {}
+  std::shared_ptr<small_gicp::PointCloud> cloud;
+  small_gicp::KdTree<small_gicp::PointCloud> tree;
+};
+
+PreparedTarget::PreparedTarget(const PointList& points) {
+  if (points.size() >= kMinimumPointCount) {
+    implementation_ = std::make_shared<const Implementation>(points);
+  }
+}
+
+MatchResult match_scan(const PreparedTarget& target, const PointList& source,
                        const Eigen::Isometry3d& prediction, const MatcherParameters& parameters) {
   MatchResult result;
-  if (target.size() < kMinimumPointCount || source.size() < kMinimumPointCount) return result;
+  if (!target.is_valid() || source.size() < kMinimumPointCount) return result;
 
-  const auto target_cloud = make_cloud_with_covariances(target);
   const auto source_cloud = make_cloud_with_covariances(source);
-  const small_gicp::KdTree<small_gicp::PointCloud> target_tree(target_cloud);
-
   small_gicp::Registration<small_gicp::GICPFactor, small_gicp::SerialReduction> registration;
   registration.rejector.max_dist_sq =
       parameters.max_correspondence_distance_m * parameters.max_correspondence_distance_m;
   registration.optimizer.max_iterations = parameters.max_iterations;
-  const auto raw = registration.align(*target_cloud, *source_cloud, target_tree, prediction);
+  const auto raw = registration.align(*target.implementation_->cloud, *source_cloud,
+                                      target.implementation_->tree, prediction);
 
   result.target_to_source = raw.T_target_source;
   result.converged = raw.converged;
+  result.iterations = raw.iterations;
   result.information = raw.H;
   result.inlier_ratio = static_cast<double>(raw.num_inliers) / static_cast<double>(source.size());
 

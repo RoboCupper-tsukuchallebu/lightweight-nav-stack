@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <cstdio>
 #include <random>
 
 #include "lightnav_localization/deskew.hpp"
@@ -8,19 +9,32 @@
 #include "lightnav_localization/matcher.hpp"
 #include "synthetic_world.hpp"
 
-using namespace lightnav_localization;
-using namespace lightnav_localization::testing;
-
 namespace {
 
-// Limits are the issue's CI limits (3x the acceptance limits): deskew 45 ms, downsample 60 ms,
-// scan-to-submap GICP 180 ms. Measured single-threaded.
-constexpr double kDeskewLimitMs = 45.0;
-constexpr double kDownsampleLimitMs = 60.0;
-constexpr double kMatchLimitMs = 180.0;
-constexpr int kPointCount = 69000;
-constexpr int kScanPointCount = 5000;
-constexpr int kSubmapPointCount = 50000;
+using lightnav_localization::deskew_scan;
+using lightnav_localization::downsample_voxel;
+using lightnav_localization::match_scan;
+using lightnav_localization::MatcherParameters;
+using lightnav_localization::PointList;
+using lightnav_localization::PoseBuffer;
+using lightnav_localization::PreparedTarget;
+using lightnav_localization::TimedPoint;
+using lightnav_localization::testing::arc_pose;
+using lightnav_localization::testing::SyntheticWorld;
+
+// Acceptance limits of the issue table are 15 / 20 / 60 / 60 ms (TBB, 4 threads); CI allows 3x.
+// This code is single-threaded, so the measured numbers are printed and the CI limits asserted.
+constexpr double kDeskewCiLimitMs = 45.0;
+constexpr double kDownsampleCiLimitMs = 60.0;
+constexpr double kPrepareTargetCiLimitMs = 180.0;
+constexpr double kMatchCiLimitMs = 180.0;
+constexpr int kLidarPointCount = 69000;
+constexpr int kMatchIterations = 20;
+constexpr double kScanVoxelM = 0.5;
+constexpr double kSubmapVoxelM = 0.25;
+// A 4 m corridor yields few points at 0.5 m; a finer voxel gives the table's ~5k source points.
+constexpr double kMatchScanVoxelM = 0.12;
+constexpr std::size_t kSubmapMaxPoints = 50000;
 
 template <typename Function>
 double milliseconds_of(Function&& function) {
@@ -31,37 +45,51 @@ double milliseconds_of(Function&& function) {
 
 }  // namespace
 
-TEST(Performance, deskew_downsample_and_match_stay_within_limits) {
+TEST(Performance, stages_stay_within_ci_limits) {
   std::mt19937 generator(42);
   std::uniform_real_distribution<float> coordinate(-30.0F, 30.0F);
   std::uniform_real_distribution<float> offset(-0.1F, 0.0F);
-  std::vector<TimedPoint> scan;
-  for (int index = 0; index < kPointCount; ++index) {
-    scan.push_back({{coordinate(generator), coordinate(generator), coordinate(generator) * 0.1F}, offset(generator)});
+  std::vector<TimedPoint> lidar_points;
+  for (int index = 0; index < kLidarPointCount; ++index) {
+    lidar_points.push_back({{coordinate(generator), coordinate(generator), coordinate(generator) * 0.1F}, offset(generator)});
   }
   PoseBuffer odometry;
   for (double time = -0.2; time <= 0.2; time += 0.02) odometry.add(time, arc_pose(time, {0, 0}, 0.0, 0.6, 0.4));
-
   std::optional<PointList> corrected;
   const double deskew_ms = milliseconds_of(
-      [&] { corrected = deskew_scan(scan, 0.0, odometry, Eigen::Isometry3d::Identity()); });
+      [&] { corrected = deskew_scan(lidar_points, 0.0, odometry, Eigen::Isometry3d::Identity()); });
   ASSERT_TRUE(corrected.has_value());
   PointList downsampled;
-  const double downsample_ms = milliseconds_of([&] { downsampled = downsample_voxel(*corrected, 0.5); });
-  // Issue sizes: about 5k scan points against a submap of up to 50k points.
-  const PointList source_scan(downsampled.begin(), downsampled.begin() + kScanPointCount);
-  const PointList target_submap(downsampled.begin(), downsampled.begin() + kSubmapPointCount);
-  MatchResult result;
-  const double match_ms = milliseconds_of([&] {
-    result = match_scan(target_submap, source_scan, Eigen::Isometry3d::Identity(), MatcherParameters{});
-  });
+  const double downsample_ms = milliseconds_of([&] { downsampled = downsample_voxel(*corrected, kScanVoxelM); });
 
-  RecordProperty("deskew_ms", std::to_string(deskew_ms));
-  RecordProperty("downsample_ms", std::to_string(downsample_ms));
-  RecordProperty("match_ms", std::to_string(match_ms));
-  std::printf("deskew %.1f ms, downsample %.1f ms (%zu pts), match %.1f ms\n", deskew_ms,
-              downsample_ms, downsampled.size(), match_ms);
-  EXPECT_LT(deskew_ms, kDeskewLimitMs);
-  EXPECT_LT(downsample_ms, kDownsampleLimitMs);
-  EXPECT_LT(match_ms, kMatchLimitMs);
+  // Real geometry for matching: a 100 m x 100 m L-shaped course; the scan is NOT a subset of the
+  // target and the prediction is off by 0.2 m / 0.02 rad.
+  const SyntheticWorld world({{0.0, 0.0}, {100.0, 0.0}, {100.0, 100.0}});
+  const PointList submap = downsample_voxel(world.sample_map(0.2), kSubmapVoxelM);
+  ASSERT_LE(submap.size(), kSubmapMaxPoints);
+  const Eigen::Isometry3d true_pose = arc_pose(0.0, {85.0, 0.0}, 0.0, 0.0, 0.0);
+  const auto scan = world.synthesize_scan([&](double) { return true_pose; }, 0.0, 0.1, true);
+  PointList source;
+  for (const TimedPoint& point : scan) source.push_back(point.position);
+  source = downsample_voxel(source, kMatchScanVoxelM);
+  Eigen::Isometry3d prediction = true_pose;
+  prediction.translation() += Eigen::Vector3d(0.2, 0.0, 0.0);
+  prediction.linear() = Eigen::AngleAxisd(0.02, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+  MatcherParameters parameters;
+  parameters.max_iterations = kMatchIterations;
+
+  PreparedTarget target;
+  const double prepare_ms = milliseconds_of([&] { target = PreparedTarget(submap); });
+  lightnav_localization::MatchResult result;
+  const double match_ms = milliseconds_of([&] { result = match_scan(target, source, prediction, parameters); });
+
+  std::printf("deskew %.1f ms (69k pts), downsample %.1f ms (%zu pts), prepare_target %.1f ms (%zu pts), "
+              "match %.1f ms (%zu source pts, %d iterations, inlier %.2f, converged %d)\n",
+              deskew_ms, downsample_ms, downsampled.size(), prepare_ms, submap.size(), match_ms,
+              source.size(), result.iterations, result.inlier_ratio, result.converged);
+  EXPECT_GT(result.iterations, 0);
+  EXPECT_LT(deskew_ms, kDeskewCiLimitMs);
+  EXPECT_LT(downsample_ms, kDownsampleCiLimitMs);
+  EXPECT_LT(prepare_ms, kPrepareTargetCiLimitMs);
+  EXPECT_LT(match_ms, kMatchCiLimitMs);
 }
