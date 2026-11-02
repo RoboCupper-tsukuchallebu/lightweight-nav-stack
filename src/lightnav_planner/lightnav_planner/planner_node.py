@@ -8,7 +8,11 @@ from nav_msgs.msg import Path
 from rclpy.lifecycle import Node, State, TransitionCallbackReturn
 
 from lightnav_msgs.srv import PlanPath
-from lightnav_planner.interpolation import PlanningError, plan_straight_path
+from lightnav_planner.interpolation import (
+    DEFAULT_MAX_PATH_POINTS,
+    PlanningError,
+    plan_straight_path,
+)
 
 SERVICE_NAME = "/lightnav/planner/plan_path"
 
@@ -18,15 +22,25 @@ class PlannerNode(Node):
         super().__init__("planner_node")
         self.declare_parameter("resolution_m", 0.2)
         self.declare_parameter("global_frame", "map")
+        self.declare_parameter("max_path_points", DEFAULT_MAX_PATH_POINTS)
         self._service = None
+        self._resolution_m = 0.0
+        self._global_frame = ""
+        self._max_path_points = DEFAULT_MAX_PATH_POINTS
 
     def on_configure(self, state: State) -> TransitionCallbackReturn:
         resolution_m = self.get_parameter("resolution_m").value
         if not (math.isfinite(resolution_m) and resolution_m > 0.0):
             self.get_logger().error(f"invalid resolution_m: {resolution_m}")
             return TransitionCallbackReturn.FAILURE
+        global_frame = self.get_parameter("global_frame").value
+        max_path_points = self.get_parameter("max_path_points").value
+        if not global_frame or max_path_points <= 0:
+            self.get_logger().error("global_frame must be non-empty and max_path_points positive")
+            return TransitionCallbackReturn.FAILURE
         self._resolution_m = resolution_m
-        self._global_frame = self.get_parameter("global_frame").value
+        self._global_frame = global_frame
+        self._max_path_points = max_path_points
         return TransitionCallbackReturn.SUCCESS
 
     def on_activate(self, state: State) -> TransitionCallbackReturn:
@@ -34,9 +48,17 @@ class PlannerNode(Node):
         return super().on_activate(state)
 
     def on_deactivate(self, state: State) -> TransitionCallbackReturn:
-        self.destroy_service(self._service)
-        self._service = None
+        self._destroy_service()
         return super().on_deactivate(state)
+
+    def on_shutdown(self, state: State) -> TransitionCallbackReturn:
+        self._destroy_service()
+        return TransitionCallbackReturn.SUCCESS
+
+    def _destroy_service(self) -> None:
+        if self._service is not None:
+            self.destroy_service(self._service)
+            self._service = None
 
     def _handle_plan_path(self, request, response):
         response.success = False
@@ -55,6 +77,7 @@ class PlannerNode(Node):
                 (start_position.x, start_position.y),
                 [(waypoint.x, waypoint.y) for waypoint in request.waypoints],
                 self._resolution_m,
+                self._max_path_points,
             )
         except PlanningError as error:
             response.message = str(error)

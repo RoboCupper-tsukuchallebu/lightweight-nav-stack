@@ -15,7 +15,7 @@ def test_resamples_at_resolution_and_hits_waypoint_exactly():
 
 def test_non_divisible_length_keeps_spacing_at_most_resolution():
     planned = plan_straight_path((0.0, 0.0), [(1.0, 0.0)], 0.3)
-    gaps = [math.dist(a, b) for a, b in zip(planned.points, planned.points[1:])]
+    gaps = [math.dist(previous, current) for previous, current in zip(planned.points, planned.points[1:])]
     assert max(gaps) <= 0.3 + 1e-9
     assert planned.points[-1] == (1.0, 0.0)
 
@@ -66,10 +66,22 @@ def test_invalid_resolution_rejected(bad):
         plan_straight_path((0.0, 0.0), [(1.0, 0.0)], bad)
 
 
-def test_long_path_processing_time_is_small():
-    import time
+def test_overflowing_distance_rejected():
+    with pytest.raises(PlanningError):
+        plan_straight_path((-1e308, 0.0), [(1e308, 0.0)], 0.2)
 
-    waypoints = [(float(index), 0.0) for index in range(1, 101)]
-    began = time.perf_counter()
-    plan_straight_path((0.0, 0.0), waypoints, 0.2)
-    print(f"100 waypoints / 100 m: {(time.perf_counter() - began) * 1000:.2f} ms")
+
+def test_tiny_resolution_rejected():
+    with pytest.raises(PlanningError):
+        plan_straight_path((0.0, 0.0), [(1.0, 0.0)], 1e-320)
+
+
+def test_excessive_finite_distance_rejected_before_allocation():
+    with pytest.raises(PlanningError):
+        plan_straight_path((0.0, 0.0), [(1e12, 0.0)], 0.2)
+
+
+def test_point_budget_boundary():
+    plan_straight_path((0.0, 0.0), [(1.0, 0.0)], 0.2, max_path_points=6)
+    with pytest.raises(PlanningError):
+        plan_straight_path((0.0, 0.0), [(1.0, 0.0)], 0.2, max_path_points=5)
