@@ -1,0 +1,8 @@
+pose_adapter_node:
+  ros__parameters:
+    odom_topic: /lightnav/localization/odom
+    output_topic: /lightnav/pose
+    expected_frame_id: map
+    body_to_base_xyz_rpy: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    map_from_odom_xy_yaw: [0.0, 0.0, 0.0]
+    max_position_variance_m2: 4.0
