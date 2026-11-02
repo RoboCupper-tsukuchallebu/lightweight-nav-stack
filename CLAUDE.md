@@ -27,6 +27,15 @@ pixi run lint    # ruff check src
 - 変数名を省略しない（`pos` ではなく `position` など）。
 - マージは人間が行う。force push・履歴書き換えをしない。
 
+## 合否の基準と Mac の差
+
+- 合否の基準は ubuntu の CI。Mac では Python とコンパイラが異なる（`-Werror` は gcc で落ちることがある）。
+
+## 独自 msg を使うノードの実行（macOS）
+
+- macOS の SIP が activation 経由の `DYLD_LIBRARY_PATH` を除去するため、独自 msg の typesupport を dlopen できない。ビルドは `--merge-install`（全ライブラリが `install/lib`）にし、`ros2` タスクと `test` タスクが `DYLD_LIBRARY_PATH=$PIXI_PROJECT_ROOT/install/lib` を env で渡す。
+- `pixi run ros2 run ...` / `pixi run ros2 launch ...` と `pixi run test` を使う。素の `pixi run python ノード.py` は Mac では失敗する。
+
 ## テストの書き方
 
 - ament_python: `setup.py` に `extras_require={"test": ["pytest"]}` を書き、`test/` に pytest 形式で置く（colcon が unittest 扱いにして 0 件で落ちるのを防ぐ）。launch_testing は `@pytest.mark.launch_test` で動く。pytest は 9 で launch_testing plugin が壊れるため `>=8,<9` にピン留め済み。
