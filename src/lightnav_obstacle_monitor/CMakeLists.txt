@@ -26,13 +26,21 @@ target_include_directories(obstacle_monitor_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
 target_link_libraries(obstacle_monitor_core PUBLIC Eigen3::Eigen)
-ament_target_dependencies(obstacle_monitor_core PUBLIC
-  sensor_msgs nav_msgs lightnav_msgs)
+# Headers only: ament_target_dependencies would also link the msgs' rosidl_generator_py
+# libraries, which need Python symbols that plain C++ executables do not have (dyld error).
+target_link_libraries(obstacle_monitor_core PUBLIC
+  sensor_msgs::sensor_msgs__rosidl_generator_cpp
+  nav_msgs::nav_msgs__rosidl_generator_cpp)
 
 add_library(obstacle_monitor_node_lib src/obstacle_monitor_node.cpp)
 target_link_libraries(obstacle_monitor_node_lib PUBLIC obstacle_monitor_core)
 ament_target_dependencies(obstacle_monitor_node_lib PUBLIC
   rclcpp rclcpp_lifecycle tf2 tf2_ros tf2_eigen)
+# Only the C++ typesupport of each message package is needed at run time.
+foreach(message_package sensor_msgs nav_msgs lightnav_msgs)
+  target_link_libraries(obstacle_monitor_node_lib PUBLIC
+    ${message_package}::${message_package}__rosidl_typesupport_cpp)
+endforeach()
 
 add_executable(obstacle_monitor_node src/main.cpp)
 target_link_libraries(obstacle_monitor_node obstacle_monitor_node_lib)

@@ -27,7 +27,7 @@ Eigen::Isometry3d sensorMount()
 }
 
 // Rings from -30.67 to +10.67 degrees; each ray hits the ground or a 0.5 m radius cylinder
-// whose axis is at (3.0, 0.0) in the base frame (about 0.5 m wide wall at 2.5 m).
+// whose axis is at (2.8, 0.0) in the base frame (about 0.5 m wide obstacle, nearest surface at 2.3 m).
 sensor_msgs::msg::PointCloud2 makeSyntheticFrame()
 {
   sensor_msgs::msg::PointCloud2 cloud;
@@ -37,7 +37,7 @@ sensor_msgs::msg::PointCloud2 makeSyntheticFrame()
   sensor_msgs::PointCloud2Iterator<float> iteratorX(cloud, "x");
   sensor_msgs::PointCloud2Iterator<float> iteratorY(cloud, "y");
   sensor_msgs::PointCloud2Iterator<float> iteratorZ(cloud, "z");
-  const double cylinderCenterX = 3.0 - 0.1;  // in the sensor frame
+  const double cylinderCenterX = 2.8 - 0.1;  // in the sensor frame
   const double cylinderRadius = 0.5;
   for (int ring = 0; ring < kRingCount; ++ring) {
     const double elevation = (-30.67 + ring * (41.34 / (kRingCount - 1))) * M_PI / 180.0;
@@ -95,7 +95,7 @@ TEST(FrameProcessorTest, SyntheticFrameDetectsCylinderInSlowZoneNotStopZone)
   const auto summary = processFrame(cloud, {}, gridMessage);
   EXPECT_EQ(summary.stopZoneCellCount, 0U);
   EXPECT_GE(summary.slowZoneCellCount, 2U);
-  EXPECT_NEAR(summary.nearestDistanceMeters, 2.5F, 0.3F);
+  EXPECT_NEAR(summary.nearestDistanceMeters, 2.3F, 0.3F);
   EXPECT_EQ(gridMessage.data.size(), 80U * 80U);
 }
 
