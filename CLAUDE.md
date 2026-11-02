@@ -11,7 +11,7 @@ pixi run lint    # ruff check src
 ```
 
 - 実機・bag 再生用: `pixi run -e hardware ...`、評価用: `pixi run -e eval ...`
-- 通常は `ROS_DOMAIN_ID=42`。`test` タスクだけ別ドメイン（43）と localhost 限定に上書きする。
+- 既定（activation）は `ROS_DOMAIN_ID=43`、`ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST`。`pixi shell` / `pixi run ...` すべてこの既定で、外から ROS_DOMAIN_ID を渡しても上書きされない（確認済み）。
 - pixi.lock は linux-64 と osx-arm64 でバージョンが異なる（例: Python 3.14 と 3.12）。Mac の試験結果は本番（Linux）の代わりにならない。
 - 初回ビルド前は `install/local_setup.sh` が無いため pixi が activation の警告を出すが、無視してよい。
 
@@ -22,7 +22,7 @@ pixi run lint    # ruff check src
 ## 禁止事項
 
 - 次の操作は人の承認なしに行わない: 駆動系トピックの publish（`/cmd_vel` など）、駆動系サービスの call（モーター有効化など）、ファーム書き込み、リポジトリ外への破壊的操作。
-- 実機を接続している PC（ドライバ起動中を含む）で試験する場合は、必ず `pixi run test`（`ROS_DOMAIN_ID=43`、`ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST`）を使う。実機のドメイン 42 で試験用ノードを動かさない。
+- 実機（`ROS_DOMAIN_ID=42`、SUBNET）に届くのは `pixi run ros2-robot ...` のみ。起動・publish・call は毎回人の承認が必須で、エージェントは使わない。試験は既定のまま `pixi run test` を使い、実機のドメイン 42 で試験用ノードを動かさない。
 - `nav2_*` への依存を入れない（CI が package.xml / CMakeLists.txt / pixi.toml を検査する）。
 - 変数名を省略しない（`pos` ではなく `position` など）。
 - マージは人間が行う。force push・履歴書き換えをしない。
@@ -33,7 +33,7 @@ pixi run lint    # ruff check src
 
 ## 独自 msg を使うノードの実行（macOS）
 
-- macOS の SIP が activation 経由の `DYLD_LIBRARY_PATH` を除去するため、独自 msg の typesupport を dlopen できない。ビルドは `--merge-install`（全ライブラリが `install/lib`）にし、`ros2` タスクと `test` タスクが `DYLD_LIBRARY_PATH=$PIXI_PROJECT_ROOT/install/lib` を env で渡す。
+- macOS の SIP が activation 経由の `DYLD_LIBRARY_PATH` を除去するため、独自 msg の typesupport を dlopen できない。ビルドは `--merge-install`（全ライブラリが `install/lib`）にし、`ros2` / `ros2-robot` / `test` タスクが `DYLD_LIBRARY_PATH=$PIXI_PROJECT_ROOT/install/lib` を env で渡す。
 - `pixi run ros2 run ...` / `pixi run ros2 launch ...` と `pixi run test` を使う。素の `pixi run python ノード.py` は Mac では失敗する。
 
 ## テストの書き方
