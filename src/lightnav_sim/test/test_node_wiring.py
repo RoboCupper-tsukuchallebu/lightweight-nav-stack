@@ -2,15 +2,17 @@ import time
 
 import pytest
 import rclpy
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import PoseStamped, Twist
 from lightnav_sim.kinematic_sim_node import KinematicSimNode
-from nav_msgs.msg import Odometry
+from nav_msgs.msg import Odometry, Path
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from std_srvs.srv import SetBool, Trigger
 from tf2_msgs.msg import TFMessage
 from visualization_msgs.msg import Marker, MarkerArray
+
+from lightnav_msgs.msg import PathWithId
 
 SPIN_TIMEOUT_SECONDS = 3.0
 
@@ -193,3 +195,20 @@ def test_markers_show_obstacles_and_vanish_after_clear(make_harness):
         return latest == {"robot"}
 
     assert harness.spin_until(only_robot_left)
+
+
+def test_path_with_id_is_republished_as_plain_path(make_harness):
+    harness = make_harness()
+    received = []
+    latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+    harness.helper.create_subscription(Path, "/lightnav/sim/path_view", received.append, latched)
+    publisher = harness.helper.create_publisher(PathWithId, "/lightnav/path", latched)
+    message = PathWithId(session_id=1, path_id=1)
+    message.path.header.frame_id = "map"
+    pose = PoseStamped()
+    pose.pose.position.x = 4.0
+    message.path.poses.append(pose)
+    publisher.publish(message)
+    assert harness.spin_until(lambda: received)
+    assert received[-1].header.frame_id == "map"
+    assert received[-1].poses[0].pose.position.x == 4.0

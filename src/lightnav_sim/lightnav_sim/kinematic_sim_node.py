@@ -3,10 +3,15 @@ import math
 
 import rclpy
 from geometry_msgs.msg import Twist
-from nav_msgs.msg import Odometry
+from nav_msgs.msg import Odometry, Path
 from rclpy.node import Node
 from rclpy.parameter import Parameter
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import (
+    DurabilityPolicy,
+    QoSProfile,
+    ReliabilityPolicy,
+    qos_profile_sensor_data,
+)
 from sensor_msgs.msg import LaserScan, PointCloud2
 from sensor_msgs_py import point_cloud2
 from std_msgs.msg import Header
@@ -14,6 +19,7 @@ from std_srvs.srv import SetBool, Trigger
 from tf2_ros import StaticTransformBroadcaster, TransformBroadcaster
 from visualization_msgs.msg import MarkerArray
 
+from lightnav_msgs.msg import PathWithId
 from lightnav_sim.sim_math import (
     Circle,
     Pose2D,
@@ -38,6 +44,10 @@ CLOUD_AZIMUTH_COUNT = 360
 CLOUD_RANGE_MAX_M = 30.0
 SERVICE_PREFIX = "/lightnav/sim/"
 MARKER_TOPIC = "/lightnav/sim/markers"
+PATH_TOPIC = "/lightnav/path"
+PATH_VIEW_TOPIC = "/lightnav/sim/path_view"
+# Same QoS as the mission publisher so a late-started RViz still gets the last path.
+PATH_QOS = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL)
 
 
 def _chunks(flat_values, stride, name):
@@ -99,6 +109,8 @@ class KinematicSimNode(Node):
             self._static_tf_broadcaster.sendTransform(
                 static_transforms(self.get_clock().now().to_msg(), self._sensor_offset)
             )
+        self._path_view_publisher = self.create_publisher(Path, PATH_VIEW_TOPIC, PATH_QOS)
+        self.create_subscription(PathWithId, PATH_TOPIC, self._on_path, PATH_QOS)
         self.create_subscription(Twist, "/cmd_vel", self._on_cmd_vel, 10)
         self.create_service(SetBool, SERVICE_PREFIX + "set_pose_publishing", self._on_set_pose_publishing)
         self.create_service(SetBool, SERVICE_PREFIX + "set_motion_enabled", self._on_set_motion_enabled)
@@ -125,6 +137,9 @@ class KinematicSimNode(Node):
         self._last_cmd_ns = self.get_clock().now().nanoseconds
         self._linear_mps = message.linear.x
         self._angular_radps = message.angular.z
+
+    def _on_path(self, message):
+        self._path_view_publisher.publish(message.path)
 
     def _on_set_pose_publishing(self, request, response):
         self._is_pose_publishing = request.data

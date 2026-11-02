@@ -31,11 +31,13 @@ Visualization Manager:
       Enabled: true
       Topic:
         Value: /lightnav/sim/markers
-    - Class: rviz_default_plugins/Odometry
-      Name: Odometry
+    - Class: rviz_default_plugins/Path
+      Name: Path (lightnav/path)
       Enabled: true
       Topic:
-        Value: /sim/odom
+        Value: /lightnav/sim/path_view
+        Reliability Policy: Reliable
+        Durability Policy: Transient Local
     - Class: rviz_default_plugins/Pose
       Name: Localized pose (pose_adapter)
       Enabled: true
