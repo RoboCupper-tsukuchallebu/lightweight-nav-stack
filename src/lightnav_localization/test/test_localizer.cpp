@@ -86,6 +86,9 @@ struct Scenario {
   bool use_spec_course = false;
   bool has_real_map_hole = false;  // remove map points inside the hole instead of faking a failed match
   double wheel_scale = 1.05;
+  bool has_ramp = false;  // 10 degree climb over 10 m (horizontal) starting at x = 5 m
+  double initial_offset_m = 0.0;  // start this far to the left of truth (needs a correction)
+  double large_correction_threshold_m = 1.0;
   int gps_outlier_every = 0;  // 20 m east jump on every n-th GPS fix
   double fail_optimization_at_sec = -1.0;  // injects a GTSAM failure once
   bool reinitialize_after_lost = false;
@@ -106,6 +109,11 @@ struct Report {
   bool is_tracking_at_end = false;
   double wheel_only_end_error_m = 0.0;
   bool published_after_reinitialize = false;
+  bool saw_large_correction = false;
+  double max_pitch_error_deg = 0.0;          // whole run, includes the ramp entry transient
+  double max_pitch_error_on_ramp_deg = 0.0;  // truth x in [7, 14] m: settled on the climb
+  double max_output_speed_mps = 0.0;
+  double final_position_error_m = 0.0;
   std::string last_error;
   double scan_ms_max = 0.0;
   double match_ms_max = 0.0;
@@ -114,11 +122,26 @@ struct Report {
 
 Report run(const Scenario& scenario) {
   const Course& course = scenario.use_spec_course ? kSpecCourse : kShortCourse;
-  const auto truth_at = [&course](double time) { return course.truth_at(time); };
-  const SyntheticWorld world(course.centerline());
+  SyntheticWorld world(course.centerline());
+  constexpr double kRampAngleRad = 10.0 * M_PI / 180.0;
+  if (scenario.has_ramp) world.set_ramp(5.0, 10.0, kRampAngleRad);
+  const auto truth_at = [&course, &world](double time) {
+    Eigen::Isometry3d pose = course.truth_at(time);
+    const double x = pose.translation().x();
+    const double yaw = std::atan2(pose.rotation()(1, 0), pose.rotation()(0, 0));
+    pose.translation().z() += world.floor_height(x);
+    if (world.is_on_ramp(x) && std::abs(yaw) < 0.1) {  // climbing along +x: nose up
+      // The pitch changes over ~1 s (0.6 m) at both ends of the ramp, as a vehicle does; a step of 10
+      // degrees would also exceed the 0.1 rad LiDAR odometry rotation gate by construction.
+      const double blend = std::min({1.0, (x - 5.0) / 0.6, (15.0 - x) / 0.6});
+      pose.linear() = pose.linear() * Eigen::AngleAxisd(-world.ramp_angle_rad() * blend, Eigen::Vector3d::UnitY()).toRotationMatrix();
+    }
+    return pose;
+  };
   const PointList full_map = world.sample_map(0.2);
   LocalizerParameters parameters;
   parameters.state.odom_only_max_distance_m = scenario.odom_only_max_distance_m;
+  parameters.corrector.large_correction_threshold_m = scenario.large_correction_threshold_m;
   Localizer* localizer_pointer = nullptr;
   PointList map = scenario.has_map ? full_map : PointList{};
   if (scenario.has_real_map_hole) {
@@ -160,7 +183,10 @@ Report run(const Scenario& scenario) {
       result.converged = true;
     });
   }
-  localizer.initialize(truth_at(0.0));
+  Eigen::Isometry3d initial_pose = truth_at(0.0);
+  initial_pose.translation().y() += scenario.initial_offset_m;
+  localizer.initialize(initial_pose);
+  std::optional<Eigen::Vector3d> previous_output_position;
 
   std::mt19937 random_generator(11);
   std::normal_distribution<double> noise(0.0, 1.0);
@@ -223,12 +249,25 @@ Report run(const Scenario& scenario) {
       continue;
     }
     
+    const double pitch_error_deg =
+        std::abs(std::asin(-output->map_to_base.rotation()(2, 0)) - std::asin(-truth.rotation()(2, 0))) * 180.0 / M_PI;
+    report.max_pitch_error_deg = std::max(report.max_pitch_error_deg, pitch_error_deg);
+    if (truth.translation().x() >= 7.0 && truth.translation().x() <= 14.0) {
+      report.max_pitch_error_on_ramp_deg = std::max(report.max_pitch_error_on_ramp_deg, pitch_error_deg);
+    }
+    report.saw_large_correction |= output->is_large_correction;
+    if (previous_output_position) {
+      report.max_output_speed_mps = std::max(
+          report.max_output_speed_mps, (output->map_to_base.translation() - *previous_output_position).norm() / kDt);
+    }
+    previous_output_position = output->map_to_base.translation();
     const double position_error = (output->map_to_base.translation() - truth.translation()).head<2>().norm();
     // Yaw only: the full rotation angle also contains roll/pitch noise (the 2 deg seen at 3 s in the
     // first version of this test was tilt, not yaw).
     const Eigen::Matrix3d rotation_error = truth.rotation().transpose() * output->map_to_base.rotation();
     const double yaw_error = std::abs(std::atan2(rotation_error(1, 0), rotation_error(0, 0))) * 180.0 / M_PI;
     report.max_position_error_m = std::max(report.max_position_error_m, position_error);
+    report.final_position_error_m = position_error;
     report.max_yaw_error_deg = std::max(report.max_yaw_error_deg, yaw_error);
     if (is_hole) report.max_error_in_hole_m = std::max(report.max_error_in_hole_m, position_error);
     report.saw_gps_only |= output->state == LocalizationState::kGpsOnly && is_hole;
@@ -256,6 +295,7 @@ TEST(Localizer, FusionStaysCloseToTruthWhileWheelOdometryDrifts) {
   // The Issue asks for < 0.2 m. Measured 0.268 m on the full 200 m course, so the bound is 0.3 m
   // until it is decided. Cause found (PR comment): purely along-track drift 36-51 m into a leg while
   // TRACKING, not turns, GPS gaps or slew. Known gap against the Issue's 0.2 m.
+  // Spec 0.2 m NOT met; awaiting the user's decision; cause: too little along-track constraint.
   EXPECT_LT(report.max_position_error_m, 0.3);
   EXPECT_LT(report.max_yaw_error_deg, 2.0);
   EXPECT_TRUE(report.is_tracking_at_end);
@@ -363,5 +403,37 @@ TEST(Localizer, GpsJumpsAreGatedInThePipeline) {
   const Report report = run(scenario);
   std::printf("D: max pos err %.3f m\n", report.max_position_error_m);
   EXPECT_LT(report.max_position_error_m, 0.3);
+  EXPECT_TRUE(report.is_tracking_at_end);
+}
+
+// Review medium 7 (I at pipeline level): start 0.9 m off truth; the map match pulls the pose in,
+// but the published pose may only move at wheel speed + the 0.2 m/s slew, and the pending
+// correction is flagged (threshold lowered to 0.5 m for the test) until it has been applied.
+TEST(Localizer, InitialOffsetIsSlewedNotJumped) {
+  Scenario scenario;
+  scenario.initial_offset_m = 0.9;
+  scenario.large_correction_threshold_m = 0.5;
+  const Report report = run(scenario);
+  std::printf("I: max output speed %.3f m/s, large=%d, final err %.3f m\n", report.max_output_speed_mps,
+              report.saw_large_correction, report.final_position_error_m);
+  EXPECT_LE(report.max_output_speed_mps, kSpeed * 1.01 + 0.2 + 0.05);
+  EXPECT_TRUE(report.saw_large_correction);
+  EXPECT_LT(report.final_position_error_m, 0.2);
+}
+
+// H at pipeline level: the wheel odometry is blind to the 10 degree climb (dz = pitch = 0, weak
+// constraint); lidar odometry and map matching must supply roll/pitch/z. Truth includes z and pitch.
+TEST(Localizer, ClimbsA10DegreeRamp) {
+  Scenario scenario;
+  scenario.has_ramp = true;
+  const Report report = run(scenario);
+  std::printf("H: max pos err %.3f m, pitch err on the settled climb %.2f deg, whole run %.2f deg\n",
+              report.max_position_error_m, report.max_pitch_error_on_ramp_deg, report.max_pitch_error_deg);
+  // Settled climb: within the Issue's +-2 deg. The ramp-entry transient (estimate lags ~1.5 s,
+  // up to ~7 deg, and leans ~2.6 deg early because the ramp is already visible ahead) is NOT
+  // within 2 deg: see the PR; only a loose bound is asserted for it.
+  EXPECT_LT(report.max_pitch_error_on_ramp_deg, 2.0);
+  EXPECT_LT(report.max_pitch_error_deg, 10.0);
+  EXPECT_LT(report.max_position_error_m, 0.2);
   EXPECT_TRUE(report.is_tracking_at_end);
 }

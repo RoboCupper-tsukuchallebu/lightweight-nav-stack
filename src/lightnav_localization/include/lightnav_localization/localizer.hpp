@@ -49,6 +49,10 @@ struct LocalizerOutput {
   double pending_correction_m = 0.0;
 };
 
+// Thread contract: every public method must be called from ONE thread (the node's executor, with a
+// mutually exclusive callback group). Internally one worker thread rebuilds the prior-map target
+// every 50 m; it only reads the immutable map and hands the result back through a future that the
+// calling thread collects, so no lock is needed and the 50 Hz path never waits for the rebuild.
 // ROS-free pipeline: deskew -> lidar odometry -> prior-map match -> GPS -> pose graph -> slew.
 class Localizer {
  public:

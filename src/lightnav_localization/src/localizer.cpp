@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <future>
 #include <map>
 #include <string>
 
@@ -37,6 +38,10 @@ struct PendingScan {
   double ready_stamp;
   std::vector<TimedPoint> scan;
 };
+struct MapTargetBuild {
+  PreparedTarget target;
+  Eigen::Vector2d center;
+};
 struct PendingGps {
   double stamp;
   GpsFix fix;
@@ -69,6 +74,7 @@ struct Localizer::Implementation {
   std::optional<GpsConverter> gps;
   PoseBuffer buffer;
   PreparedTarget map_target;
+  std::future<MapTargetBuild> pending_map_target;
   Eigen::Vector2d map_target_center = Eigen::Vector2d::Zero();
   bool has_map_target = false;
 
@@ -149,20 +155,40 @@ struct Localizer::Implementation {
     submap_rebuild_time_ms = elapsed_ms(start);
   }
 
+  static MapTargetBuild build_map_target(const PointList& all_points, const Eigen::Vector2d& center) {
+    PointList cropped;
+    for (const auto& point : all_points) {
+      if ((point.head<2>().cast<double>() - center).norm() <= kMapSubmapRadiusM) cropped.push_back(point);
+    }
+    return {PreparedTarget(cropped), center};
+  }
+
+  // The first target is built synchronously; later rebuilds (every 50 m) run on a worker thread so
+  // the 50 Hz output is not stalled, and the old target is used until the new one is ready.
   void ensure_map_target(const Eigen::Vector3d& center) {
     if (map_points.empty()) return;
-    if (has_map_target && (center.head<2>() - map_target_center).norm() < kMapSubmapRebuildDistanceM) {
-      return;
-    }
-    PointList cropped;
-    for (const auto& point : map_points) {
-      if ((point.head<2>().cast<double>() - center.head<2>()).norm() <= kMapSubmapRadiusM) {
-        cropped.push_back(point);
+    if (pending_map_target.valid() &&
+        pending_map_target.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+      MapTargetBuild built = pending_map_target.get();
+      if (built.target.is_valid()) {
+        map_target = built.target;
+        map_target_center = built.center;
+        has_map_target = true;
       }
     }
-    map_target = PreparedTarget(cropped);
-    map_target_center = center.head<2>();
-    has_map_target = map_target.is_valid();
+    if (!has_map_target) {
+      MapTargetBuild built = build_map_target(map_points, center.head<2>());
+      map_target = built.target;
+      map_target_center = built.center;
+      has_map_target = map_target.is_valid();
+      return;
+    }
+    if ((center.head<2>() - map_target_center).norm() < kMapSubmapRebuildDistanceM) return;
+    if (pending_map_target.valid()) return;  // already rebuilding
+    const Eigen::Vector2d rebuild_center = center.head<2>();
+    pending_map_target = std::async(std::launch::async, [this, rebuild_center] {
+      return build_map_target(map_points, rebuild_center);
+    });
   }
 
   void mark_absolute(double stamp) {
