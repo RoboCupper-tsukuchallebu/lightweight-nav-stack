@@ -1,7 +1,6 @@
 import math
 
 import pytest
-
 from lightnav_sim.sim_math import (
     Circle,
     Pose2D,
@@ -60,7 +59,7 @@ def test_circle_miss_returns_none():
 def test_wall_hit_distance_and_parallel_miss():
     wall = Wall(3.0, -1.5, 3.0, 1.5)
     assert cast_ray(0.0, 0.0, [], [wall], HEIGHT_M, 0.0, FAR_M) == pytest.approx(3.0)
-    assert cast_ray(math.pi / 2, 0.0, [], [Wall(0.0, 1.0, 5.0, 1.0)], HEIGHT_M, 0.0, FAR_M) is None
+    assert cast_ray(0.0, 0.0, [], [Wall(0.0, 1.0, 5.0, 1.0)], HEIGHT_M, 0.0, FAR_M) is None
 
 
 def test_flat_ground_distance():

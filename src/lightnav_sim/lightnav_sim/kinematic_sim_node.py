@@ -153,7 +153,7 @@ class KinematicSimNode(Node):
 
     def _obstacles_in_sensor_frame(self):
         offset_x, offset_y, _ = self._sensor_offset
-        to_sensor = lambda x, y: world_to_sensor(self._pose, offset_x, offset_y, x, y)  # noqa: E731
+        to_sensor = lambda x, y: world_to_sensor(self._pose, offset_x, offset_y, x, y)
         circles = [Circle(*to_sensor(c.x, c.y), c.radius) for c in self._circles]
         walls = [Wall(*to_sensor(w.x1, w.y1), *to_sensor(w.x2, w.y2)) for w in self._walls]
         return circles, walls
