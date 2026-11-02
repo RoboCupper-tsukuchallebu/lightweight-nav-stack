@@ -86,6 +86,7 @@ struct Scenario {
   bool use_spec_course = false;
   bool has_real_map_hole = false;  // remove map points inside the hole instead of faking a failed match
   double wheel_scale = 1.05;
+  int gps_outlier_every = 0;  // 20 m east jump on every n-th GPS fix
   double fail_optimization_at_sec = -1.0;  // injects a GTSAM failure once
   bool reinitialize_after_lost = false;
   int false_convergence_every = 0;
@@ -140,6 +141,7 @@ Report run(const Scenario& scenario) {
   (void)localizer_pointer;
   int match_counter = 0;
   double current_time_sec = 0.0;
+  int gps_counter = 0;
   if (scenario.false_convergence_every > 0 || (scenario.map_hole_end_sec > 0.0 && !scenario.has_real_map_hole)) {
     localizer.set_map_match_hook([&](MatchResult& result) {
       // Map hole: the matcher finds nothing to match against.
@@ -151,7 +153,9 @@ Report run(const Scenario& scenario) {
       if (scenario.false_convergence_every == 0) return;
       if (++match_counter % scenario.false_convergence_every != 0) return;
       // Walk the result along the corridor and claim a clean match (inlier ratio 0.9).
-      result.target_to_source.translation().x() += scenario.false_shift_m;
+      // Shift along the corridor axis of the current leg (truth heading), on either leg.
+      const Eigen::Vector3d heading = course.truth_at(current_time_sec).rotation().col(0);
+      result.target_to_source.translation() += scenario.false_shift_m * heading;
       result.inlier_ratio = 0.9;
       result.converged = true;
     });
@@ -190,7 +194,9 @@ Report run(const Scenario& scenario) {
     const bool is_gps_off = time_sec >= scenario.gps_off_begin_sec && time_sec <= scenario.gps_off_end_sec;
     if (is_gps_time && !is_gps_off) {
       const Eigen::Isometry3d gps_truth = truth_at(time_sec);
-      GpsFix fix = fix_at_enu(gps_truth.translation().x() + scenario.gps_noise_m * noise(random_generator) + scenario.gps_bias_east_m,
+      ++gps_counter;
+      const double jump = (scenario.gps_outlier_every > 0 && gps_counter % scenario.gps_outlier_every == 0) ? 20.0 : 0.0;
+      GpsFix fix = fix_at_enu(jump + gps_truth.translation().x() + scenario.gps_noise_m * noise(random_generator) + scenario.gps_bias_east_m,
                               gps_truth.translation().y() + scenario.gps_noise_m * noise(random_generator));
       if (scenario.gps_noise_m != 1.0) {
         fix.has_known_covariance = true;  // GST available: the receiver reports its own sigma
@@ -248,7 +254,8 @@ TEST(Localizer, FusionStaysCloseToTruthWhileWheelOdometryDrifts) {
               report.scan_ms_max, report.match_ms_max, report.rebuild_ms_max);
   EXPECT_GT(report.wheel_only_end_error_m, 2.0);  // the Issue's condition  // drift exists
   // The Issue asks for < 0.2 m. Measured 0.268 m on the full 200 m course, so the bound is 0.3 m
-  // until the cause (suspected: the in-place turns) is found. Open item in the PR.
+  // until it is decided. Cause found (PR comment): purely along-track drift 36-51 m into a leg while
+  // TRACKING, not turns, GPS gaps or slew. Known gap against the Issue's 0.2 m.
   EXPECT_LT(report.max_position_error_m, 0.3);
   EXPECT_LT(report.max_yaw_error_deg, 2.0);
   EXPECT_TRUE(report.is_tracking_at_end);
@@ -309,7 +316,8 @@ TEST(Localizer, RecoversFromOptimizationFailure) {
   Scenario scenario;
   scenario.fail_optimization_at_sec = 12.3;
   const Report report = run(scenario);
-  EXPECT_FALSE(report.last_error.empty());
+  EXPECT_NE(report.last_error.find("window restarted"), std::string::npos);
+  EXPECT_EQ(report.last_error.find("unknown node"), std::string::npos);  // no stale node index
   EXPECT_LT(report.max_position_error_m, 0.3);
   EXPECT_TRUE(report.is_tracking_at_end);
 }
@@ -345,4 +353,15 @@ TEST(Localizer, PollStateReportsStaleWheel) {
   localizer.initialize(Eigen::Isometry3d::Identity());
   localizer.on_wheel_odom(1.0, Eigen::Isometry3d::Identity());
   EXPECT_EQ(localizer.poll_state(1.5), LocalizationState::kInputStale);
+}
+
+// Review medium 7 (D at pipeline level): 20 m GPS jumps go through the Localizer's node insertion
+// and Mahalanobis gate; the pose must not move.
+TEST(Localizer, GpsJumpsAreGatedInThePipeline) {
+  Scenario scenario;
+  scenario.gps_outlier_every = 5;
+  const Report report = run(scenario);
+  std::printf("D: max pos err %.3f m\n", report.max_position_error_m);
+  EXPECT_LT(report.max_position_error_m, 0.3);
+  EXPECT_TRUE(report.is_tracking_at_end);
 }

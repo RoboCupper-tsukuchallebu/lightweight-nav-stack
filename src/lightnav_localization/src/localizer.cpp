@@ -102,6 +102,7 @@ struct Localizer::Implementation {
     if (const auto pose = graph->pose(index)) return pose_cache[index] = *pose;
     const auto cached = pose_cache.find(index);
     if (cached != pose_cache.end()) return cached->second;
+    last_error = "internal: pose requested for unknown node " + std::to_string(index);
     return pose_cache.empty() ? Eigen::Isometry3d::Identity() : pose_cache.rbegin()->second;
   }
 
