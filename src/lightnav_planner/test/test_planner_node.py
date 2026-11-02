@@ -1,9 +1,14 @@
+import json
 import math
+import os
+import subprocess
+import sys
 import time
+from pathlib import Path
 
 import pytest
 import rclpy
-from lightnav_planner.planner_node import SERVICE_NAME, PlannerNode
+from lightnav_planner.planner_node import PlannerNode
 from rclpy.lifecycle import TransitionCallbackReturn
 from rclpy.parameter import Parameter
 
@@ -91,37 +96,49 @@ def test_configure_fails_on_invalid_parameters(node, parameters):
     assert node._service is None
 
 
-@pytest.fixture
-def fake_services(node, monkeypatch):
-    """Track live services without needing rosidl type support at runtime."""
-    live_services = []
-
-    def fake_create_service(service_type, name, callback):
-        service = (name, callback)
-        live_services.append(service)
-        return service
-
-    monkeypatch.setattr(node, "create_service", fake_create_service)
-    monkeypatch.setattr(node, "destroy_service", live_services.remove)
-    return live_services
+PROBE_SCRIPT = Path(__file__).with_name("real_service_probe.py")
+PROBE_TIMEOUT_S = 60.0
 
 
-def test_service_exists_only_while_active(node, fake_services):
-    configure(node)
-    assert fake_services == []
-    node.trigger_activate()
-    assert [name for name, _ in fake_services] == [SERVICE_NAME]
-    node.trigger_deactivate()
-    assert fake_services == [] and node._service is None
-    node.trigger_activate()
-    assert len(fake_services) == 1
+def build_child_environment():
+    """macOS SIP strips DYLD_LIBRARY_PATH through colcon's shell, so rebuild it for the child.
+
+    Harmless on Linux, so both CI platforms run the identical test.
+    """
+    environment = dict(os.environ)
+    library_directories = [
+        os.path.join(prefix, "lib")
+        for prefix in os.environ.get("AMENT_PREFIX_PATH", "").split(os.pathsep)
+        if prefix
+    ]
+    existing = environment.get("DYLD_LIBRARY_PATH", "")
+    environment["DYLD_LIBRARY_PATH"] = os.pathsep.join(
+        library_directories + ([existing] if existing else [])
+    )
+    return environment
 
 
-def test_shutdown_from_active_removes_service(node, fake_services):
-    configure(node)
-    node.trigger_activate()
-    node.trigger_shutdown()
-    assert fake_services == [] and node._service is None
+def run_real_service_probe(exit_mode):
+    completed = subprocess.run(
+        [sys.executable, str(PROBE_SCRIPT), exit_mode],
+        check=False,
+        env=build_child_environment(),
+        capture_output=True,
+        text=True,
+        timeout=PROBE_TIMEOUT_S,
+    )
+    assert completed.returncode == 0, completed.stderr
+    return json.loads(completed.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.parametrize("exit_mode", ["deactivate", "shutdown"])
+def test_real_service_exists_only_while_active(exit_mode):
+    report = run_real_service_probe(exit_mode)
+    assert report["service_after_configure"] is False
+    assert report["service_after_activate"] is True
+    assert report["advertised_when_active"] is True
+    assert report["round_trip"] == {"answered": True, "success": True, "waypoint_indices": [5]}
+    assert report["service_after_exit_from_active"] is False
 
 
 def test_processing_time_including_path_assembly(node):
