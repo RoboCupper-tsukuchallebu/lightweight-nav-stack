@@ -93,15 +93,35 @@ protected:
     }
   }
 
+  // Waits for a condition instead of a fixed time; the limit only bounds a hang.
+  template<typename Predicate>
+  bool runUntil(
+    Predicate is_satisfied, const ObstacleStatus * status, const VelocityCommand * command,
+    double limit_s = 10.0)
+  {
+    const auto limit = std::chrono::steady_clock::now() +
+      std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+      std::chrono::duration<double>(limit_s));
+    while (std::chrono::steady_clock::now() < limit) {
+      run(kLoopPeriodSeconds, status, command);
+      if (is_satisfied()) {return true;}
+    }
+    return false;
+  }
+
+  bool hasNonZeroOutput() const
+  {
+    return !received_.empty() && received_.back().linear.x > 0.0;
+  }
+
   // Drives the gate until it outputs a non-zero velocity (positive control).
   void reachMotion()
   {
     activate();
     const ObstacleStatus status = healthyStatus();
     const VelocityCommand command = forwardCommand();
-    run(0.5, &status, &command);
-    ASSERT_FALSE(received_.empty());
-    ASSERT_GT(received_.back().linear.x, 0.0) << "positive control failed";
+    ASSERT_TRUE(runUntil([this] {return hasNonZeroOutput();}, &status, &command))
+      << "positive control failed";
     received_.clear();
   }
 
@@ -235,12 +255,16 @@ TEST_F(SafetyGateNodeTest, deactivateSendsOneZeroThenStaysSilent)
   reachMotion();
   const ObstacleStatus status = healthyStatus();
   const VelocityCommand command = forwardCommand();
-  run(0.1, &status, &command);
-  received_.clear();  // drop in-flight output published while still active
   ASSERT_EQ(gate_->deactivate().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE);
+  // Output published before the transition may still be in flight, so wait for the zero.
+  const auto is_zero_received = [this] {
+      return !received_.empty() && received_.back().linear.x == 0.0 &&
+             received_.back().angular.z == 0.0;
+    };
+  ASSERT_TRUE(runUntil(is_zero_received, &status, &command));
+  const size_t count_at_zero = received_.size();
   run(0.3, &status, &command);
-  ASSERT_EQ(received_.size(), 1U);
-  expectLastIsZero("deactivate");
+  EXPECT_EQ(received_.size(), count_at_zero) << "published after the deactivate zero";
 }
 
 TEST_F(SafetyGateNodeTest, reactivationDoesNotReuseOldInputs)
@@ -254,5 +278,95 @@ TEST_F(SafetyGateNodeTest, reactivationDoesNotReuseOldInputs)
   ASSERT_FALSE(received_.empty());
   for (const Twist & twist : received_) {
     EXPECT_EQ(twist.linear.x, 0.0);
+  }
+}
+
+TEST_F(SafetyGateNodeTest, linearAndAngularCommandsAreSaturatedAtVmaxAndWmax)
+{
+  activate();
+  const ObstacleStatus status = healthyStatus();
+  VelocityCommand command;
+  command.twist.linear.x = 5.0;    // v_max 0.8
+  command.twist.angular.z = -5.0;  // w_max 0.6
+  const auto is_at_limits = [this] {
+      return !received_.empty() && received_.back().linear.x == 0.8 &&
+             received_.back().angular.z == -0.6;
+    };
+  ASSERT_TRUE(runUntil(is_at_limits, &status, &command));
+  for (const Twist & twist : received_) {
+    EXPECT_LE(twist.linear.x, 0.8);
+    EXPECT_GE(twist.angular.z, -0.6);
+  }
+}
+
+TEST_F(SafetyGateNodeTest, accelerationIsRateLimitedPerPublishPeriod)
+{
+  activate();
+  const ObstacleStatus status = healthyStatus();
+  VelocityCommand command;
+  command.twist.linear.x = 0.6;
+  command.twist.angular.z = 0.4;
+  const auto is_at_target = [this] {
+      return !received_.empty() && received_.back().linear.x == 0.6 &&
+             received_.back().angular.z == 0.4;
+    };
+  ASSERT_TRUE(runUntil(is_at_target, &status, &command));
+  ASSERT_GT(received_.size(), 5U) << "target reached in one step: no rate limit";
+  constexpr double kPeriodSeconds = 0.05;  // publish_hz 20
+  constexpr double kTolerance = 1e-9;
+  double previous_linear = 0.0;
+  double previous_angular = 0.0;
+  for (const Twist & twist : received_) {
+    EXPECT_LE(twist.linear.x - previous_linear, 0.5 * kPeriodSeconds + kTolerance);
+    EXPECT_LE(twist.angular.z - previous_angular, 1.0 * kPeriodSeconds + kTolerance);
+    previous_linear = twist.linear.x;
+    previous_angular = twist.angular.z;
+  }
+}
+
+TEST_F(SafetyGateNodeTest, decelerationOfOneAxisIsRateLimitedWhileOtherAxisKeepsMoving)
+{
+  reachMotion();
+  const ObstacleStatus status = healthyStatus();
+  const VelocityCommand forward_command = forwardCommand();
+  VelocityCommand rotate_in_place;
+  rotate_in_place.twist.angular.z = 0.3;  // linear target 0, but the twist is not all zero
+  ASSERT_TRUE(runUntil(
+      [this] {return !received_.empty() && received_.back().linear.x == 0.3;}, &status,
+      &forward_command));
+  received_.clear();
+  ASSERT_TRUE(runUntil(
+      [this] {return !received_.empty() && received_.back().linear.x == 0.0;}, &status,
+      &rotate_in_place));
+  ASSERT_GT(received_.size(), 2U) << "0.3 m/s dropped to 0 at once: no rate limit";
+  constexpr double kPeriodSeconds = 0.05;
+  double previous_linear = -1.0;
+  for (const Twist & twist : received_) {
+    if (previous_linear >= 0.0) {
+      EXPECT_GE(twist.linear.x - previous_linear, -1.0 * kPeriodSeconds - 1e-9);
+    }
+    previous_linear = twist.linear.x;
+  }
+  EXPECT_GT(received_.back().angular.z, 0.0);
+}
+
+TEST_F(SafetyGateNodeTest, angularCommandMapsToAngularOutputWithSign)
+{
+  activate();
+  const ObstacleStatus status = healthyStatus();
+  for (const double angular_rps : {0.3, -0.3}) {
+    received_.clear();
+    VelocityCommand command;
+    command.twist.angular.z = angular_rps;
+    ASSERT_TRUE(runUntil(
+        [this, angular_rps] {
+          return !received_.empty() && received_.back().angular.z == angular_rps;
+        },
+        &status, &command));
+    for (const Twist & twist : received_) {
+      EXPECT_EQ(twist.linear.x, 0.0);
+      EXPECT_EQ(twist.angular.x, 0.0);
+      EXPECT_EQ(twist.angular.y, 0.0);
+    }
   }
 }
