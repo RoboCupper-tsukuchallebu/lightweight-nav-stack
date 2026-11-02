@@ -52,17 +52,26 @@ double distanceToSegment(const Point2D& point, const Point2D& start, const Point
   return distanceBetween(point, Point2D{start.x_m + ratio * segment_x_m, start.y_m + ratio * segment_y_m});
 }
 
+// Searches only path_points[first, last]; callers bound the window so a path
+// that doubles back is not matched against a far-away section.
 double distanceToPath(const Point2D& point, const std::vector<Point2D>& path_points,
-                      std::size_t closest_index) {
-  if (path_points.empty()) {
-    return std::numeric_limits<double>::infinity();
-  }
-  const std::size_t first = std::min(closest_index, path_points.size() - 1);
+                      std::size_t first, std::size_t last) {
   double nearest_m = distanceBetween(point, path_points[first]);
-  for (std::size_t index = first + 1; index < path_points.size(); ++index) {
+  for (std::size_t index = first + 1; index <= last; ++index) {
     nearest_m = std::min(nearest_m, distanceToSegment(point, path_points[index - 1], path_points[index]));
   }
   return nearest_m;
+}
+
+// Last index within distance_m of arc length ahead of first.
+std::size_t windowEnd(const std::vector<Point2D>& path_points, std::size_t first, double distance_m) {
+  std::size_t index = first;
+  double travelled_m = 0.0;
+  while (index + 1 < path_points.size() && travelled_m < distance_m) {
+    travelled_m += distanceBetween(path_points[index], path_points[index + 1]);
+    ++index;
+  }
+  return index;
 }
 
 // First path point at least distance_m of arc length ahead of closest_index
@@ -126,6 +135,9 @@ std::vector<ArcCandidate> evaluateArcCandidates(const LocalGrid& grid, const Pos
     return candidates;
   }
   const double curvature_limit = parameters.w_max_rps / parameters.v_avoid_mps;
+  const std::size_t first_index = std::min(closest_index, path_points.size() - 1);
+  const std::size_t last_index = windowEnd(
+      path_points, first_index, parameters.arc_length_m + 2.0 * parameters.max_path_deviation_m);
   const Point2D target = pathPointAhead(path_points, closest_index, parameters.arc_length_m);
   candidates.reserve(static_cast<std::size_t>(parameters.arc_candidate_count));
 
@@ -141,7 +153,9 @@ std::vector<ArcCandidate> evaluateArcCandidates(const LocalGrid& grid, const Pos
     for (double travelled_m = parameters.arc_step_m;
          travelled_m <= parameters.arc_length_m + 1e-9; travelled_m += parameters.arc_step_m) {
       const Point2D sample = arcPointInBody(candidate.curvature_per_m, travelled_m);
-      if (grid.isOccupiedInBody(sample.x_m, sample.y_m)) {
+      if (grid.isOccupiedInBody(sample.x_m, sample.y_m) ||
+          distanceToPath(toWorld(pose, sample), path_points, first_index, last_index) >
+              parameters.max_path_deviation_m) {
         candidate.is_feasible = false;
         break;
       }
@@ -149,10 +163,8 @@ std::vector<ArcCandidate> evaluateArcCandidates(const LocalGrid& grid, const Pos
     if (candidate.is_feasible) {
       const Point2D end_world =
           toWorld(pose, arcPointInBody(candidate.curvature_per_m, parameters.arc_length_m));
-      const double deviation_m = distanceToPath(end_world, path_points, closest_index);
-      if (deviation_m > parameters.max_path_deviation_m) {
-        candidate.is_feasible = false;
-      } else {
+      const double deviation_m = distanceToPath(end_world, path_points, first_index, last_index);
+      {
         const double end_yaw_rad = pose.yaw_rad + candidate.curvature_per_m * parameters.arc_length_m;
         const double bearing_rad = std::atan2(target.y_m - end_world.y_m, target.x_m - end_world.x_m);
         candidate.score = parameters.w_path * deviation_m +
@@ -174,6 +186,11 @@ std::optional<ArcCandidate> selectBestCandidate(const std::vector<ArcCandidate>&
     }
   }
   return best;
+}
+
+bool ArcAvoidLayer::isPathEndOccupied(const LocalGrid& grid, const AvoidContext& context) const {
+  const Point2D body_point = toBody(context.pose, context.path_points.back());
+  return grid.isOccupiedInBody(body_point.x_m, body_point.y_m);
 }
 
 ArcAvoidLayer::ArcAvoidLayer(const AvoidParameters& parameters) : parameters_(parameters) {}
@@ -216,6 +233,17 @@ LayerOutput ArcAvoidLayer::compute(const AvoidContext& context) {
     release_since_s_.reset();
   }
 
+  const bool is_at_path_end = context.remaining_distance_m < parameters_.goal_tolerance_m;
+  if (is_at_path_end && !isPathEndOccupied(grid, context)) {
+    reset();  // follow layer reports AT_PATH_END
+    return LayerOutput{};
+  }
+  if (context.is_stop_zone_occupied || !context.is_obstacle_status_fresh || is_at_path_end) {
+    return makeWaiting(context.now_s, context.is_obstacle_status_fresh
+                                          ? StopReason::kBlocked
+                                          : StopReason::kObstacleStale);
+  }
+
   const auto best = selectBestCandidate(evaluateArcCandidates(
       grid, context.pose, context.path_points, context.closest_index, previous_curvature_per_m_,
       parameters_));
@@ -224,16 +252,22 @@ LayerOutput ArcAvoidLayer::compute(const AvoidContext& context) {
   if (best.has_value()) {
     waiting_since_s_.reset();
     previous_curvature_per_m_ = best->curvature_per_m;
-    output.twist = Twist2D{parameters_.v_avoid_mps, parameters_.v_avoid_mps * best->curvature_per_m};
+    const double linear_mps = std::min(parameters_.v_avoid_mps,
+                                       parameters_.k_end_per_s * context.remaining_distance_m);
+    output.twist = Twist2D{linear_mps, linear_mps * best->curvature_per_m};
     output.reason = StopReason::kOk;
     return output;
   }
+  return makeWaiting(context.now_s, StopReason::kBlocked);
+}
+
+LayerOutput ArcAvoidLayer::makeWaiting(double now_s, StopReason reason) {
   if (!waiting_since_s_.has_value()) {
-    waiting_since_s_ = context.now_s;
+    waiting_since_s_ = now_s;
   }
-  output.reason = context.now_s - *waiting_since_s_ >= parameters_.stuck_timeout_s
-                      ? StopReason::kStuck
-                      : StopReason::kBlocked;
+  LayerOutput output;
+  output.is_asserted = true;
+  output.reason = now_s - *waiting_since_s_ >= parameters_.stuck_timeout_s ? StopReason::kStuck : reason;
   return output;
 }
 

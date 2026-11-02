@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <vector>
 
@@ -28,17 +29,19 @@ struct AvoidParameters {
   double v_avoid_mps{0.25};
   double w_max_rps{0.4};
   int arc_candidate_count{15};
-  double arc_length_m{2.0};
+  double arc_length_m{1.0};
   double arc_step_m{0.1};
   double max_path_deviation_m{1.5};
   double w_path{1.0};
   double w_heading{0.5};
   double w_smooth{0.2};
-  double avoid_trigger_m{1.5};
-  double avoid_release_m{2.0};
-  double rejoin_distance_m{0.3};
+  double avoid_trigger_m{2.5};
+  double avoid_release_m{3.0};
+  double rejoin_distance_m{0.5};
   double avoid_release_hold_s{1.0};
   double stuck_timeout_s{10.0};
+  double goal_tolerance_m{0.3};
+  double k_end_per_s{0.5};
 };
 
 struct ArcCandidate {
@@ -66,6 +69,9 @@ struct AvoidContext {
   bool is_grid_fresh{false};
   const LocalGrid* grid{nullptr};
   double now_s{0.0};
+  double remaining_distance_m{std::numeric_limits<double>::infinity()};
+  bool is_stop_zone_occupied{false};
+  bool is_obstacle_status_fresh{true};
 };
 
 // Priority 1 layer.
@@ -98,6 +104,8 @@ class ArcAvoidLayer final : public AvoidLayer {
 
  private:
   void reset();
+  bool isPathEndOccupied(const LocalGrid& grid, const AvoidContext& context) const;
+  LayerOutput makeWaiting(double now_s, StopReason reason);
 
   AvoidParameters parameters_;
   bool is_avoiding_{false};

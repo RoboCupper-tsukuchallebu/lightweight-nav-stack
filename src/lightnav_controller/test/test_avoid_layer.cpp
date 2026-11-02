@@ -1,9 +1,14 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <chrono>
+#include <iostream>
+#include <string>
 #include <cmath>
 
+#include "lightnav_controller/arbitrate.hpp"
 #include "lightnav_controller/avoid_layer.hpp"
+#include "lightnav_controller/follow_layer.hpp"
 
 using namespace lightnav_controller;
 
@@ -205,39 +210,153 @@ TEST(ArcAvoidLayer, FlickeringObstacleDoesNotChatterBetweenAvoidAndFollow) {
   EXPECT_TRUE(was_asserted);
 }
 
-TEST(ArcAvoidLayer, RejoinsPathAfterPassingObstacle) {
-  // Closed loop on a unicycle: obstacle 0.3 m off the path, radius 0.5 m.
-  AvoidParameters parameters;
-  ArcAvoidLayer layer{parameters};
-  const auto path = makeStraightPath();
-  Pose2D pose = kOrigin;
-  const Point2D obstacle{3.0, 0.3};
-  double max_deviation_m = 0.0;
-  bool did_avoid = false;
+namespace {
+
+struct ClosedLoopResult {
+  bool did_avoid{false};
+  bool did_enter_stop_zone{false};
+  bool did_report_stuck{false};
+  double max_deviation_m{0.0};
+  Pose2D final_pose;
+};
+
+// Unicycle at 20 Hz with the real follow layer and arbitrate. The grid is
+// built like the obstacle monitor: the disc obstacle is inflated by 0.5 m.
+// The gate is modelled as speed 0 while >= 3 raw cells lie in the stop zone
+// (x 0..1.0, |y| <= 0.4).
+ClosedLoopResult runClosedLoop(const AvoidParameters& parameters, const Point2D& obstacle_center) {
+  const double obstacle_radius_m = 0.5;
+  const double inflation_radius_m = 0.5;
   const double time_step_s = 0.05;
-  for (int step = 0; step < 1200 && pose.x_m < 8.0; ++step) {
+  const auto path = makeStraightPath();
+  FollowLayer follow_layer{FollowParameters{}};
+  follow_layer.tryAcceptPath(1, 1, path);
+  ArcAvoidLayer avoid_layer{parameters};
+  ClosedLoopResult result;
+  Pose2D pose = kOrigin;
+  for (int step = 0; step < 1600 && pose.x_m < 19.0; ++step) {
     LocalGrid grid = makeEmptyGrid();
-    const double relative_x_m = obstacle.x_m - pose.x_m;
-    const double relative_y_m = obstacle.y_m - pose.y_m;
-    const double body_x_m = std::cos(pose.yaw_rad) * relative_x_m + std::sin(pose.yaw_rad) * relative_y_m;
-    const double body_y_m = -std::sin(pose.yaw_rad) * relative_x_m + std::cos(pose.yaw_rad) * relative_y_m;
-    fillRectangle(grid, body_x_m - 0.5, body_x_m + 0.5, body_y_m - 0.5, body_y_m + 0.5);
-    LayerOutput output = layer.compute(AvoidContext{pose, path, static_cast<std::size_t>(std::max(0.0, pose.x_m * 10.0)),
-                                                    true, &grid, time_step_s * step});
-    if (!output.is_asserted) {
-      output.twist = Twist2D{0.5, -2.0 * pose.y_m - 1.0 * std::sin(pose.yaw_rad)};  // crude follow
-    } else {
-      did_avoid = true;
+    int stop_zone_cells = 0;
+    for (std::size_t row = 0; row < grid.height_cells; ++row) {
+      for (std::size_t column = 0; column < grid.width_cells; ++column) {
+        const double body_x_m = grid.origin_x_m + (static_cast<double>(column) + 0.5) * grid.resolution_m;
+        const double body_y_m = grid.origin_y_m + (static_cast<double>(row) + 0.5) * grid.resolution_m;
+        const double world_x_m = pose.x_m + std::cos(pose.yaw_rad) * body_x_m - std::sin(pose.yaw_rad) * body_y_m;
+        const double world_y_m = pose.y_m + std::sin(pose.yaw_rad) * body_x_m + std::cos(pose.yaw_rad) * body_y_m;
+        const double distance_m = std::hypot(world_x_m - obstacle_center.x_m, world_y_m - obstacle_center.y_m);
+        if (distance_m <= obstacle_radius_m + inflation_radius_m) {
+          grid.cells[row * grid.width_cells + column] = 100;
+        }
+        if (distance_m <= obstacle_radius_m && body_x_m >= 0.0 && body_x_m <= 1.0 && std::fabs(body_y_m) <= 0.4) {
+          ++stop_zone_cells;
+        }
+      }
     }
-    pose.yaw_rad += output.twist.angular_rps * time_step_s;
-    pose.x_m += std::cos(pose.yaw_rad) * output.twist.linear_mps * time_step_s;
-    pose.y_m += std::sin(pose.yaw_rad) * output.twist.linear_mps * time_step_s;
-    max_deviation_m = std::max(max_deviation_m, std::fabs(pose.y_m));
+    const bool is_stop_zone_occupied = stop_zone_cells >= 3;
+    FollowInputs follow_inputs;
+    follow_inputs.is_obstacle_status_fresh = true;
+    follow_inputs.is_stop_zone_occupied = is_stop_zone_occupied;
+    const FollowResult follow_result = follow_layer.compute(pose, follow_inputs);
+    const double now_s = time_step_s * step;
+    ArbitrationInput arbitration;
+    arbitration.follow = follow_result.output;
+    arbitration.avoid = avoid_layer.compute(AvoidContext{
+        pose, follow_layer.pathPoints(), follow_result.closest_index, true, &grid, now_s,
+        follow_result.remaining_distance_m, is_stop_zone_occupied, true});
+    arbitration.is_pose_fresh = true;
+    arbitration.is_grid_fresh = true;
+    const ArbitrationResult command = arbitrate(arbitration);
+    result.did_avoid = result.did_avoid || command.source_layer == Layer::kAvoid;
+    result.did_enter_stop_zone = result.did_enter_stop_zone || is_stop_zone_occupied;
+    result.did_report_stuck = result.did_report_stuck || command.reason == StopReason::kStuck;
+    if (command.reason == StopReason::kAtPathEnd) {
+      break;
+    }
+    const Twist2D twist = is_stop_zone_occupied ? Twist2D{} : command.twist;
+    pose.yaw_rad += twist.angular_rps * time_step_s;
+    pose.x_m += std::cos(pose.yaw_rad) * twist.linear_mps * time_step_s;
+    pose.y_m += std::sin(pose.yaw_rad) * twist.linear_mps * time_step_s;
+    result.max_deviation_m = std::max(result.max_deviation_m, std::fabs(pose.y_m));
   }
-  EXPECT_TRUE(did_avoid);
-  EXPECT_LE(max_deviation_m, parameters.max_path_deviation_m);
-  EXPECT_GE(pose.x_m, 8.0);
-  EXPECT_LT(std::fabs(pose.y_m), 0.3);
+  result.final_pose = pose;
+  return result;
+}
+
+}  // namespace
+
+// Acceptance H with the default parameters, inflation 0.5 and the gate model.
+TEST(ArcAvoidLayer, DetoursOffsetObstacleWithoutEnteringStopZoneAndRejoins) {
+  const AvoidParameters parameters;
+  const ClosedLoopResult result = runClosedLoop(parameters, Point2D{6.0, 0.3});
+  EXPECT_TRUE(result.did_avoid);
+  EXPECT_FALSE(result.did_enter_stop_zone);
+  EXPECT_FALSE(result.did_report_stuck);
+  EXPECT_LE(result.max_deviation_m, parameters.max_path_deviation_m);
+  EXPECT_GE(result.final_pose.x_m, 18.0);
+  EXPECT_LT(std::fabs(result.final_pose.y_m), 0.3);
+}
+
+TEST(ArcAvoidLayer, StopZoneOccupiedMakesLayerWaitAndEventuallyReportStuck) {
+  ArcAvoidLayer layer{AvoidParameters{}};
+  const auto path = makeStraightPath();
+  LocalGrid grid = makeEmptyGrid();
+  fillRectangle(grid, 1.0, 1.4, -0.3, 0.3);
+  AvoidContext context = makeContext(path, &grid, 0.0);
+  context.is_stop_zone_occupied = true;
+  LayerOutput output = layer.compute(context);
+  EXPECT_TRUE(output.is_asserted);
+  EXPECT_EQ(output.reason, StopReason::kBlocked);
+  EXPECT_DOUBLE_EQ(output.twist.linear_mps, 0.0);
+  context.now_s = 10.0;
+  EXPECT_EQ(layer.compute(context).reason, StopReason::kStuck);
+}
+
+TEST(ArcAvoidLayer, StaleObstacleStatusWaitsWithObstacleStaleReason) {
+  ArcAvoidLayer layer{AvoidParameters{}};
+  const auto path = makeStraightPath();
+  LocalGrid grid = makeEmptyGrid();
+  fillRectangle(grid, 1.0, 1.4, -0.3, 0.3);
+  AvoidContext context = makeContext(path, &grid, 0.0);
+  context.is_obstacle_status_fresh = false;
+  const LayerOutput output = layer.compute(context);
+  EXPECT_TRUE(output.is_asserted);
+  EXPECT_EQ(output.reason, StopReason::kObstacleStale);
+  EXPECT_DOUBLE_EQ(output.twist.linear_mps, 0.0);
+}
+
+TEST(ArcAvoidLayer, AtPathEndHandsOverUnlessEndIsOccupied) {
+  ArcAvoidLayer layer{AvoidParameters{}};
+  std::vector<Point2D> path;
+  for (int index = 0; index <= 10; ++index) {
+    path.push_back(Point2D{0.1 * index, 0.0});
+  }
+  LocalGrid grid = makeEmptyGrid();
+  fillRectangle(grid, 0.6, 0.8, -0.2, 0.2);
+  AvoidContext context = makeContext(path, &grid, 0.0, Pose2D{0.0, 0.0, 0.0});
+  context.remaining_distance_m = 1.0;
+  ASSERT_TRUE(layer.compute(context).is_asserted);  // avoiding
+  context.remaining_distance_m = 0.1;
+  context.grid = &grid;
+  fillRectangle(grid, 0.95, 1.05, -0.05, 0.05);  // end point (1.0, 0) occupied
+  LayerOutput output = layer.compute(context);
+  EXPECT_EQ(output.reason, StopReason::kBlocked);
+  EXPECT_DOUBLE_EQ(output.twist.linear_mps, 0.0);
+  const LocalGrid free_grid = makeEmptyGrid();
+  context.grid = &free_grid;
+  EXPECT_FALSE(layer.compute(context).is_asserted);
+}
+
+TEST(EvaluateArcCandidates, DeviationIsCheckedAlongTheArcNotOnlyAtTheEnd) {
+  // 1.4 m off the path heading away: the end point is within 1.5 m but a middle sample is not.
+  AvoidParameters parameters;
+  parameters.arc_length_m = 2.0;
+  const Pose2D pose{0.0, 1.4, 1.5708};
+  const auto candidates = evaluateArcCandidates(makeEmptyGrid(), pose, makeStraightPath(), 0, 0.0, parameters);
+  for (const ArcCandidate& candidate : candidates) {
+    if (candidate.curvature_per_m < -1.5) {
+      EXPECT_FALSE(candidate.is_feasible);
+    }
+  }
 }
 
 TEST(ArcAvoidLayer, CycleWithFifteenArcsOnEightyByEightyGridIsFast) {

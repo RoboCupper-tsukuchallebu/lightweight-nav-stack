@@ -52,15 +52,15 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
     declare_parameter("grid_timeout_s", 0.5);
     declare_parameter("v_avoid", 0.25);
     declare_parameter("arc_candidate_count", 15);
-    declare_parameter("arc_length_m", 2.0);
+    declare_parameter("arc_length_m", 1.0);
     declare_parameter("arc_step_m", 0.1);
     declare_parameter("max_path_deviation_m", 1.5);
     declare_parameter("w_path", 1.0);
     declare_parameter("w_heading", 0.5);
     declare_parameter("w_smooth", 0.2);
-    declare_parameter("avoid_trigger_m", 1.5);
-    declare_parameter("avoid_release_m", 2.0);
-    declare_parameter("rejoin_distance_m", 0.3);
+    declare_parameter("avoid_trigger_m", 2.5);
+    declare_parameter("avoid_release_m", 3.0);
+    declare_parameter("rejoin_distance_m", 0.5);
     declare_parameter("avoid_release_hold_s", 1.0);
     declare_parameter("stuck_timeout_s", 10.0);
   }
@@ -117,6 +117,8 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
     avoid_parameters.avoid_release_hold_s = get_parameter("avoid_release_hold_s").as_double();
     avoid_parameters.stuck_timeout_s = get_parameter("stuck_timeout_s").as_double();
     timeouts_.grid_timeout_s = get_parameter("grid_timeout_s").as_double();
+    avoid_parameters.goal_tolerance_m = follow_parameters.goal_tolerance_m;
+    avoid_parameters.k_end_per_s = follow_parameters.k_end_per_s;
     avoid_layer_ = std::make_unique<ArcAvoidLayer>(avoid_parameters);
     last_grid_.reset();
     last_pose_.reset();
@@ -203,6 +205,16 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
   };
 
   void onGrid(const nav_msgs::msg::OccupancyGrid& message) {
+    const auto& orientation = message.info.origin.orientation;
+    const bool is_unrotated = std::fabs(orientation.x) < 1e-6 && std::fabs(orientation.y) < 1e-6 &&
+                              std::fabs(orientation.z) < 1e-6 && std::fabs(orientation.w - 1.0) < 1e-6;
+    if (message.header.frame_id != "base_link" || !is_unrotated ||
+        !std::isfinite(message.info.resolution) || !std::isfinite(message.info.origin.position.x) ||
+        !std::isfinite(message.info.origin.position.y)) {
+      RCLCPP_WARN(get_logger(), "rejected local_grid: need frame base_link, unrotated finite origin");
+      last_grid_.reset();
+      return;
+    }
     LocalGrid grid;
     grid.width_cells = message.info.width;
     grid.height_cells = message.info.height;
@@ -270,7 +282,9 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
       arbitration_input.avoid = avoid_layer_->compute(AvoidContext{
           pose, follow_layer_->pathPoints(), follow_result.closest_index,
           arbitration_input.is_grid_fresh, is_grid_fresh ? &last_grid_->grid : nullptr,
-          current_time.seconds()});
+          current_time.seconds(),
+          follow_result.remaining_distance_m, follow_inputs.is_stop_zone_occupied,
+          follow_inputs.is_obstacle_status_fresh});
     }
     const ArbitrationResult result = arbitrate(arbitration_input);
     publish(result, follow_result);

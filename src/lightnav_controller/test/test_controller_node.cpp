@@ -3,6 +3,7 @@
 #include <chrono>
 #include <memory>
 #include <optional>
+#include <string>
 
 #include "lightnav_controller/controller_node.hpp"
 #include "nav_msgs/msg/occupancy_grid.hpp"
@@ -102,6 +103,8 @@ class ControllerNodeAvoidWiring : public ControllerNodeLifecycle {
 
   nav_msgs::msg::OccupancyGrid makeGrid(bool is_blocked) {
     nav_msgs::msg::OccupancyGrid grid;
+    grid.header.frame_id = frame_id_;
+    grid.info.origin.orientation.w = 1.0;
     grid.info.width = 80;
     grid.info.height = 80;
     grid.info.resolution = 0.1F;
@@ -134,6 +137,7 @@ class ControllerNodeAvoidWiring : public ControllerNodeLifecycle {
     }
   }
 
+  std::string frame_id_{"base_link"};
   std::shared_ptr<rclcpp::Node> helper_;
   rclcpp::executors::SingleThreadedExecutor executor_;
   rclcpp::Publisher<lightnav_msgs::msg::PathWithId>::SharedPtr path_publisher_;
@@ -156,4 +160,11 @@ TEST_F(ControllerNodeAvoidWiring, BlockedGridSwitchesToAvoidAndGridLossFallsBack
 
   spinFor(std::chrono::milliseconds(600), std::nullopt);  // grid stops: > grid_timeout_s
   EXPECT_EQ(last_status_->active_layer, lightnav_msgs::msg::FollowStatus::LAYER_FOLLOW);
+}
+
+TEST_F(ControllerNodeAvoidWiring, GridWithWrongFrameIsTreatedAsMissing) {
+  frame_id_ = "map";
+  spinFor(std::chrono::milliseconds(500), true);
+  ASSERT_TRUE(last_status_.has_value());
+  EXPECT_NE(last_status_->active_layer, lightnav_msgs::msg::FollowStatus::LAYER_AVOID);
 }
