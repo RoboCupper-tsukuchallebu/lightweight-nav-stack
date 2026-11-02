@@ -34,6 +34,13 @@ def wrap_angle(angle):
     return math.atan2(math.sin(angle), math.cos(angle))
 
 
+def apply_command_timeout(linear_mps, angular_radps, age_s, timeout_s):
+    """Zero the command when the last /cmd_vel is older than the timeout."""
+    if age_s > timeout_s:
+        return 0.0, 0.0
+    return linear_mps, angular_radps
+
+
 def integrate_unicycle(pose, linear_mps, angular_radps, delta_s):
     """Midpoint integration of a unicycle model. Returns a new Pose2D."""
     mid_yaw = pose.yaw + angular_radps * delta_s / 2.0

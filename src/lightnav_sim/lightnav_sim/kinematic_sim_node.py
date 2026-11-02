@@ -16,6 +16,7 @@ from lightnav_sim.sim_math import (
     Circle,
     Pose2D,
     Wall,
+    apply_command_timeout,
     cloud_points,
     integrate_unicycle,
     offset_point,
@@ -38,14 +39,15 @@ def _chunks(flat_values, stride, name):
 
 
 class KinematicSimNode(Node):
-    def __init__(self):
-        super().__init__("kinematic_sim_node")
+    def __init__(self, **node_kwargs):
+        super().__init__("kinematic_sim_node", **node_kwargs)
         self.declare_parameter("initial_x", 0.0)
         self.declare_parameter("initial_y", 0.0)
         self.declare_parameter("initial_yaw", 0.0)
         self.declare_parameter("integration_hz", 50.0)
         self.declare_parameter("odom_hz", 50.0)
         self.declare_parameter("sensor_hz", 10.0)
+        self.declare_parameter("cmd_timeout_s", 0.5)
         self.declare_parameter("odom_topic", "/sim/odom")
         self.declare_parameter("odom_frame_id", "world")
         self.declare_parameter("sensor_offset_xyz", [0.1, 0.0, 0.3])
@@ -67,6 +69,7 @@ class KinematicSimNode(Node):
         self._slope_rad = math.radians(self._number("ground_slope_deg"))
         self._linear_mps = 0.0
         self._angular_radps = 0.0
+        self._last_cmd_ns = self.get_clock().now().nanoseconds
         self._is_pose_publishing = True
         self._is_motion_enabled = True
         self._last_integration_ns = self.get_clock().now().nanoseconds
@@ -102,6 +105,7 @@ class KinematicSimNode(Node):
     def _on_cmd_vel(self, message):
         if not self._is_motion_enabled:
             return
+        self._last_cmd_ns = self.get_clock().now().nanoseconds
         self._linear_mps = message.linear.x
         self._angular_radps = message.angular.z
 
@@ -128,6 +132,12 @@ class KinematicSimNode(Node):
         now_ns = self.get_clock().now().nanoseconds
         delta_s = (now_ns - self._last_integration_ns) * 1e-9
         self._last_integration_ns = now_ns
+        self._linear_mps, self._angular_radps = apply_command_timeout(
+            self._linear_mps,
+            self._angular_radps,
+            (now_ns - self._last_cmd_ns) * 1e-9,
+            self._positive("cmd_timeout_s"),
+        )
         if delta_s > 0.0:
             self._pose = integrate_unicycle(self._pose, self._linear_mps, self._angular_radps, delta_s)
 

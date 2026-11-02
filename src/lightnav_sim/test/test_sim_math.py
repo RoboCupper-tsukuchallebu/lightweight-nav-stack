@@ -5,6 +5,7 @@ from lightnav_sim.sim_math import (
     Circle,
     Pose2D,
     Wall,
+    apply_command_timeout,
     cast_ray,
     cloud_points,
     integrate_unicycle,
@@ -103,3 +104,11 @@ def test_scan_sees_circle_ahead_and_inf_elsewhere():
     ranges = scan_ranges(4, [Circle(3.0, 0.0, 1.0)], [], 10.0)
     assert ranges[2] == pytest.approx(2.0)
     assert ranges[0] == math.inf
+
+
+def test_command_timeout_zeroes_stale_command():
+    assert apply_command_timeout(0.5, 0.2, 0.6, 0.5) == (0.0, 0.0)
+
+
+def test_command_timeout_keeps_fresh_command():
+    assert apply_command_timeout(0.5, 0.2, 0.4, 0.5) == (0.5, 0.2)
