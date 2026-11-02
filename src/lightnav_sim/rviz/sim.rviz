@@ -1,4 +1,6 @@
-Panels: []
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
 Visualization Manager:
   Class: ""
   Displays:
@@ -58,9 +60,18 @@ Visualization Manager:
   Value: true
   Views:
     Current:
-      Class: rviz_default_plugins/Orbit
-      Distance: 20
-      Pitch: 0.9
-      Yaw: 3.0
+      Angle: 0
+      Class: rviz_default_plugins/TopDownOrtho
+      Scale: 45
+      X: 7
+      Y: 0
     Saved: ~
-Window Geometry: {}
+Window Geometry:
+  Displays:
+    collapsed: false
+  Height: 900
+  Width: 1400
+  X: 80
+  Y: 60
+  Hide Left Dock: false
+  Hide Right Dock: true
