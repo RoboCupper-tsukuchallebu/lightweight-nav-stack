@@ -7,7 +7,7 @@ platforms = ["osx-arm64", "linux-64"]
 ros-jazzy-ros-base = "*"
 colcon-common-extensions = "*"
 setuptools = "*"
-pytest = "*"
+pytest = ">=8,<9"
 pyyaml = "*"
 numpy = "*"
 eigen = "*"
@@ -38,10 +38,16 @@ eval = ["eval"]
 [activation]
 # Skipped when install/ does not exist yet (before the first build).
 scripts = ["install/local_setup.sh"]
-env = { ROS_DOMAIN_ID = "42" }
+env = { ROS_DOMAIN_ID = "43", ROS_AUTOMATIC_DISCOVERY_RANGE = "LOCALHOST" }
 
 [tasks]
 # No --symlink-install: it fails with recent setuptools.
-build = "colcon build --base-paths src --cmake-args -DCMAKE_BUILD_TYPE=Release"
-test = { cmd = "colcon test --base-paths src --return-code-on-test-failure && colcon test-result --verbose", depends-on = ["build"] }
+build = "colcon build --merge-install --base-paths src --cmake-args -DCMAKE_BUILD_TYPE=Release -DPython3_FIND_STRATEGY=LOCATION -DPython3_ROOT_DIR=$CONDA_PREFIX -DPython3_FIND_FRAMEWORK=NEVER"
+# Default (activation) is domain 43, localhost only, so nothing reaches a real robot on domain 42.
+test = { cmd = "colcon test --merge-install --base-paths src --return-code-on-test-failure && colcon test-result --verbose", depends-on = ["build"], env = { DYLD_LIBRARY_PATH = "$PIXI_PROJECT_ROOT/install/lib" } }
 lint = "ruff check src"
+# macOS SIP strips DYLD_LIBRARY_PATH set by activation, so pass it as task env.
+# `pixi run ros2 run|launch ...` resolves to this task, so follow-up PRs need nothing special.
+ros2 = { cmd = "ros2", env = { DYLD_LIBRARY_PATH = "$PIXI_PROJECT_ROOT/install/lib" } }
+# The only way to reach a real robot (domain 42). Needs human approval every time; agents must not use it.
+ros2-robot = { cmd = "ros2", env = { ROS_DOMAIN_ID = "42", ROS_AUTOMATIC_DISCOVERY_RANGE = "SUBNET", DYLD_LIBRARY_PATH = "$PIXI_PROJECT_ROOT/install/lib" } }
