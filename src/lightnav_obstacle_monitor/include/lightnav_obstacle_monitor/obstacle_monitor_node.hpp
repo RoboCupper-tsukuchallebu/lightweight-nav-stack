@@ -34,6 +34,7 @@ public:
   CallbackReturn on_activate(const rclcpp_lifecycle::State &) override;
   CallbackReturn on_deactivate(const rclcpp_lifecycle::State &) override;
   CallbackReturn on_cleanup(const rclcpp_lifecycle::State &) override;
+  CallbackReturn on_shutdown(const rclcpp_lifecycle::State &) override;
 
 private:
   // Latest occupied cells of one sensor, with the time of the last successful update.
@@ -41,7 +42,7 @@ private:
   {
     std::vector<std::uint8_t> occupiedCells;
     std::optional<SteadyClock::time_point> lastUpdate;
-    std::optional<SteadyClock::time_point> lastTransform;
+    bool hasLastTransformFailed = false;
     std::string sensorFrame;
   };
 
@@ -51,9 +52,7 @@ private:
   std::optional<Eigen::Isometry3d> lookupBaseFromSensor(
     const std::string & sensorFrame, SensorState & state);
   void publishResult(SteadyClock::time_point frameStart, bool shouldUpdateHysteresis);
-  bool isFresh(
-    const std::optional<SteadyClock::time_point> & lastTime, double timeoutSeconds,
-    SteadyClock::time_point now) const;
+  void releaseActiveResources();
 
   ObstacleMonitorParameters parameters_;
   GridGeometry geometry_{};

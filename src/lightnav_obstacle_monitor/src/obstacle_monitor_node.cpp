@@ -1,11 +1,13 @@
 #include "lightnav_obstacle_monitor/obstacle_monitor_node.hpp"
 
 #include <exception>
+#include <limits>
 
 #include <tf2_eigen/tf2_eigen.hpp>
 #include <tf2_ros/transform_listener.h>
 
 #include "lightnav_obstacle_monitor/frame_processor.hpp"
+#include "lightnav_obstacle_monitor/freshness.hpp"
 #include "lightnav_obstacle_monitor/sensor_projection.hpp"
 
 namespace lightnav
@@ -121,11 +123,20 @@ ObstacleMonitorNode::CallbackReturn ObstacleMonitorNode::on_activate(const rclcp
   return CallbackReturn::SUCCESS;
 }
 
-ObstacleMonitorNode::CallbackReturn ObstacleMonitorNode::on_deactivate(const rclcpp_lifecycle::State &)
+void ObstacleMonitorNode::releaseActiveResources()
 {
   watchdogTimer_.reset();
-  statusPublisher_->on_deactivate();
-  gridPublisher_->on_deactivate();
+  if (statusPublisher_) {
+    statusPublisher_->on_deactivate();
+  }
+  if (gridPublisher_) {
+    gridPublisher_->on_deactivate();
+  }
+}
+
+ObstacleMonitorNode::CallbackReturn ObstacleMonitorNode::on_deactivate(const rclcpp_lifecycle::State &)
+{
+  releaseActiveResources();
   return CallbackReturn::SUCCESS;
 }
 
@@ -140,6 +151,14 @@ ObstacleMonitorNode::CallbackReturn ObstacleMonitorNode::on_cleanup(const rclcpp
   return CallbackReturn::SUCCESS;
 }
 
+ObstacleMonitorNode::CallbackReturn ObstacleMonitorNode::on_shutdown(const rclcpp_lifecycle::State &)
+{
+  releaseActiveResources();
+  pointsSubscription_.reset();
+  scanSubscription_.reset();
+  return CallbackReturn::SUCCESS;
+}
+
 std::optional<Eigen::Isometry3d> ObstacleMonitorNode::lookupBaseFromSensor(
   const std::string & sensorFrame, SensorState & state)
 {
@@ -147,9 +166,10 @@ std::optional<Eigen::Isometry3d> ObstacleMonitorNode::lookupBaseFromSensor(
   try {
     const auto transform =
       tfBuffer_->lookupTransform(baseFrame_, sensorFrame, tf2::TimePointZero);
-    state.lastTransform = SteadyClock::now();
+    state.hasLastTransformFailed = false;
     return tf2::transformToEigen(transform);
   } catch (const tf2::TransformException & exception) {
+    state.hasLastTransformFailed = true;
     RCLCPP_WARN_THROTTLE(
       get_logger(), *get_clock(), 2000, "TF %s -> %s unavailable: %s", sensorFrame.c_str(),
       baseFrame_.c_str(), exception.what());
@@ -204,13 +224,6 @@ void ObstacleMonitorNode::handleWatchdog()
   }
 }
 
-bool ObstacleMonitorNode::isFresh(
-  const std::optional<SteadyClock::time_point> & lastTime, double timeoutSeconds,
-  SteadyClock::time_point now) const
-{
-  return lastTime && secondsSince(*lastTime, now) <= timeoutSeconds;
-}
-
 void ObstacleMonitorNode::publishResult(
   SteadyClock::time_point frameStart, bool shouldUpdateHysteresis)
 {
@@ -218,6 +231,11 @@ void ObstacleMonitorNode::publishResult(
     return;
   }
   const auto now = SteadyClock::now();
+  const double nowSeconds = std::chrono::duration<double>(now.time_since_epoch()).count();
+  const auto toSeconds = [](const std::optional<SteadyClock::time_point> & time) {
+      return time ? std::optional<double>(
+        std::chrono::duration<double>(time->time_since_epoch()).count()) : std::nullopt;
+    };
   lightnav_msgs::msg::ObstacleStatus status;
   std::vector<std::uint8_t> occupiedCells;
   const auto collect = [&](const char * name, const std::string & topic, const SensorState & state,
@@ -225,43 +243,40 @@ void ObstacleMonitorNode::publishResult(
       if (topic.empty()) {
         return;
       }
-      const bool isDataFresh = isFresh(state.lastUpdate, timeoutSeconds, now);
-      const bool isTransformFresh = isFresh(state.lastTransform, tfTimeoutSeconds_ + timeoutSeconds, now);
-      if (!isTransformFresh && !state.sensorFrame.empty()) {
-        status.stale_sources.push_back("tf:" + state.sensorFrame);
+      const auto staleSources = findStaleSources(
+        name, state.sensorFrame, toSeconds(state.lastUpdate), state.hasLastTransformFailed,
+        nowSeconds, timeoutSeconds);
+      status.stale_sources.insert(
+        status.stale_sources.end(), staleSources.begin(), staleSources.end());
+      if (staleSources.empty()) {
+        occupiedCells = combineOccupiedCells(occupiedCells, state.occupiedCells);
       }
-      if (!isDataFresh) {
-        status.stale_sources.push_back(name);
-        return;
-      }
-      occupiedCells = combineOccupiedCells(occupiedCells, state.occupiedCells);
     };
   collect("points", pointsTopic_, pointsState_, pointsTimeoutSeconds_);
   collect("scan", scanTopic_, scanState_, scanTimeoutSeconds_);
   status.is_input_stale = !status.stale_sources.empty();
-
-  if (occupiedCells.empty()) {
-    occupiedCells.assign(geometry_.cellCount(), 0);
-  }
-  const auto summary = summarizeOccupiedCells(occupiedCells, geometry_, parameters_);
-  const double nowSeconds = std::chrono::duration<double>(now.time_since_epoch()).count();
-  if (shouldUpdateHysteresis && !status.is_input_stale) {
-    stopHysteresis_->update(summary.stopZoneCellCount, nowSeconds);
-    slowHysteresis_->update(summary.slowZoneCellCount, nowSeconds);
-  }
   status.header.stamp = get_clock()->now();
   status.header.frame_id = baseFrame_;
+  status.nearest_distance_m = std::numeric_limits<float>::infinity();
+
+  if (!status.is_input_stale) {
+    const auto summary = summarizeOccupiedCells(occupiedCells, geometry_, parameters_);
+    if (shouldUpdateHysteresis) {
+      stopHysteresis_->update(summary.stopZoneCellCount, nowSeconds);
+      slowHysteresis_->update(summary.slowZoneCellCount, nowSeconds);
+    }
+    status.stop_zone_cell_count = summary.stopZoneCellCount;
+    status.slow_zone_cell_count = summary.slowZoneCellCount;
+    status.nearest_distance_m = summary.nearestDistanceMeters;
+    auto gridMessage = buildOccupancyGridMessage(summary.inflatedCells, geometry_, baseFrame_);
+    gridMessage.header.stamp = status.header.stamp;
+    gridPublisher_->publish(gridMessage);
+  }
+  // While an input is stale no grid is published, so the controller's grid timeout fires.
   status.is_stop_zone_occupied = stopHysteresis_->isOccupied();
   status.is_slow_zone_occupied = slowHysteresis_->isOccupied();
-  status.stop_zone_cell_count = summary.stopZoneCellCount;
-  status.slow_zone_cell_count = summary.slowZoneCellCount;
-  status.nearest_distance_m = summary.nearestDistanceMeters;
-
-  auto gridMessage = buildOccupancyGridMessage(summary.inflatedCells, geometry_, baseFrame_);
-  gridMessage.header.stamp = status.header.stamp;
   status.processing_time_ms =
     std::chrono::duration<float, std::milli>(SteadyClock::now() - frameStart).count();
-  gridPublisher_->publish(gridMessage);
   statusPublisher_->publish(status);
   lastPublish_ = now;
 }

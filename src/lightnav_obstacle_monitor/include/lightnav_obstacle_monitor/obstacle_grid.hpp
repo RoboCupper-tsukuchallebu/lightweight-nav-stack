@@ -75,7 +75,7 @@ std::vector<std::uint8_t> inflateOccupiedCells(
   const std::vector<std::uint8_t> & occupiedCells, const GridGeometry & geometry,
   double radiusMeters);
 
-// Number of occupied cells with 0 <= x <= xMeters and |y| <= yHalfMeters (base frame).
+// Number of occupied cells overlapping the zone 0 <= x <= xMeters, |y| <= yHalfMeters (base frame).
 std::uint32_t countOccupiedCellsInZone(
   const std::vector<std::uint8_t> & occupiedCells, const GridGeometry & geometry,
   double xMeters, double yHalfMeters);

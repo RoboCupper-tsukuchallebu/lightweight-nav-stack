@@ -132,9 +132,14 @@ std::uint32_t countOccupiedCellsInZone(
     if (occupiedCells[index] == 0) {
       continue;
     }
+    // A cell counts when it overlaps the zone even partly (safe side).
+    constexpr double kEpsilonMeters = 1e-9;
+    const double halfCell = geometry.cellSizeMeters / 2.0;
     const double x = geometry.cellCenterX(index);
     const double y = geometry.cellCenterY(index);
-    if (x >= 0.0 && x <= xMeters && std::abs(y) <= yHalfMeters) {
+    const bool overlapsX = x + halfCell > kEpsilonMeters && x - halfCell < xMeters - kEpsilonMeters;
+    const bool overlapsY = std::abs(y) - halfCell < yHalfMeters - kEpsilonMeters;
+    if (overlapsX && overlapsY) {
       ++count;
     }
   }

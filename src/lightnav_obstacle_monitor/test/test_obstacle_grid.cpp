@@ -154,6 +154,16 @@ TEST(ZoneTest, CountsCellsInsideTheZoneOnly)
   EXPECT_EQ(countOccupiedCellsInZone(occupied, geometry, 2.5, 0.6), 3U);
 }
 
+TEST(ZoneTest, PartlyOverlappingCellCountsAsInside)
+{
+  const auto geometry = GridGeometry::fromParameters({});
+  std::vector<std::uint8_t> occupied(geometry.cellCount(), 0);
+  // Cell y in [0.4, 0.5) overlaps a zone with half width 0.43 although its center is at 0.45.
+  occupied[*geometry.cellIndex(0.55, 0.45)] = 1;
+  EXPECT_EQ(countOccupiedCellsInZone(occupied, geometry, 1.0, 0.43), 1U);
+  EXPECT_EQ(countOccupiedCellsInZone(occupied, geometry, 1.0, 0.4), 0U);
+}
+
 TEST(ZoneTest, NearestDistanceIsInfiniteWithoutObstacles)
 {
   const auto geometry = GridGeometry::fromParameters({});

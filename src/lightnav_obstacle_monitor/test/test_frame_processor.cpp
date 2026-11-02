@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
-#include <random>
+#include <functional>
+#include <iostream>
+#include <limits>
 
 #include <sensor_msgs/point_cloud2_iterator.hpp>
 
@@ -27,7 +29,7 @@ Eigen::Isometry3d sensorMount()
 }
 
 // Rings from -30.67 to +10.67 degrees; each ray hits the ground or a 0.5 m radius cylinder
-// whose axis is at (2.8, 0.0) in the base frame (about 0.5 m wide obstacle, nearest surface at 2.3 m).
+// whose axis is at (2.8, 0.0) in the base frame (1 m wide obstacle, nearest surface at 2.3 m).
 sensor_msgs::msg::PointCloud2 makeSyntheticFrame()
 {
   sensor_msgs::msg::PointCloud2 cloud;
@@ -51,12 +53,12 @@ sensor_msgs::msg::PointCloud2 makeSyntheticFrame()
         range = std::min(range, -kSensorHeightMeters / direction.z());
       }
       // Ray / vertical cylinder intersection in the xy plane (cylinder height 1.0 m).
-      const double a = direction.x() * direction.x() + direction.y() * direction.y();
-      const double b = -2.0 * cylinderCenterX * direction.x();
-      const double c = cylinderCenterX * cylinderCenterX - cylinderRadius * cylinderRadius;
-      const double discriminant = b * b - 4.0 * a * c;
-      if (discriminant >= 0.0 && a > 1e-9) {
-        const double hitRange = (-b - std::sqrt(discriminant)) / (2.0 * a);
+      const double quadraticA = direction.x() * direction.x() + direction.y() * direction.y();
+      const double quadraticB = -2.0 * cylinderCenterX * direction.x();
+      const double quadraticC = cylinderCenterX * cylinderCenterX - cylinderRadius * cylinderRadius;
+      const double discriminant = quadraticB * quadraticB - 4.0 * quadraticA * quadraticC;
+      if (discriminant >= 0.0 && quadraticA > 1e-9) {
+        const double hitRange = (-quadraticB - std::sqrt(discriminant)) / (2.0 * quadraticA);
         const bool isBelowTop = kSensorHeightMeters + hitRange * direction.z() <= 1.0;
         if (hitRange > 0.0 && isBelowTop) {
           range = std::min(range, hitRange);
@@ -109,6 +111,62 @@ TEST(FrameProcessorTest, CloudWithoutXyzFieldsThrows)
   const ObstacleMonitorParameters parameters;
   ObstacleGrid grid(GridGeometry::fromParameters(parameters), parameters);
   EXPECT_THROW(projectPointCloud(cloud, sensorMount(), grid), std::runtime_error);
+}
+
+namespace
+{
+void expectInvalidCloudIsRejected(const std::function<void(sensor_msgs::msg::PointCloud2 &)> & breakCloud)
+{
+  auto cloud = makeSyntheticFrame();
+  breakCloud(cloud);
+  const ObstacleMonitorParameters parameters;
+  ObstacleGrid grid(GridGeometry::fromParameters(parameters), parameters);
+  EXPECT_THROW(projectPointCloud(cloud, sensorMount(), grid), std::runtime_error);
+}
+}  // namespace
+
+TEST(FrameProcessorTest, ZeroPointStepIsRejected)
+{
+  expectInvalidCloudIsRejected([](auto & cloud) {cloud.point_step = 0;});
+}
+
+TEST(FrameProcessorTest, DataSizeNotMatchingWidthIsRejected)
+{
+  expectInvalidCloudIsRejected([](auto & cloud) {cloud.data.pop_back();});
+}
+
+TEST(FrameProcessorTest, RowStepNotMatchingIsRejected)
+{
+  expectInvalidCloudIsRejected([](auto & cloud) {cloud.row_step += 4;});
+}
+
+TEST(FrameProcessorTest, FieldBeyondPointStepIsRejected)
+{
+  expectInvalidCloudIsRejected([](auto & cloud) {cloud.fields[2].offset = cloud.point_step;});
+}
+
+TEST(FrameProcessorTest, NonFloatFieldIsRejected)
+{
+  expectInvalidCloudIsRejected(
+    [](auto & cloud) {cloud.fields[0].datatype = sensor_msgs::msg::PointField::FLOAT64;});
+}
+
+TEST(FrameProcessorTest, BigEndianCloudIsRejected)
+{
+  expectInvalidCloudIsRejected([](auto & cloud) {cloud.is_bigendian = true;});
+}
+
+TEST(FrameProcessorTest, EmptyCloudIsAcceptedAndAddsNothing)
+{
+  sensor_msgs::msg::PointCloud2 cloud;
+  sensor_msgs::PointCloud2Modifier modifier(cloud);
+  modifier.setPointCloud2FieldsByString(1, "xyz");
+  modifier.resize(0);
+  const ObstacleMonitorParameters parameters;
+  ObstacleGrid grid(GridGeometry::fromParameters(parameters), parameters);
+  projectPointCloud(cloud, sensorMount(), grid);
+  const auto occupied = grid.occupiedCells();
+  EXPECT_EQ(std::count(occupied.begin(), occupied.end(), 1), 0);
 }
 
 TEST(FrameProcessorTest, LaserScanWithinUseRangeOccupiesAndFarReturnIsIgnored)

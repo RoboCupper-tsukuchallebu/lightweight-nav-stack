@@ -13,7 +13,7 @@
 
 合成点群（32 リング x 2160 方位 = 69,120 点、HDL-32E 相当、地面 + 円柱障害物）1 フレームについて、
 TF 適用・投影・占有判定・膨張・zone 集計・`OccupancyGrid` 構築までの 200 回計測
-（ROS の通信を除く純ロジック部分、`test_frame_processor`、Release ビルド）。
+（TF lookup・受信・publish を含まない純ロジック部分、`test_frame_processor`、Release ビルド）。
 
 | 環境 | 中央値 | p99 |
 |---|---|---|
@@ -21,3 +21,6 @@ TF 適用・投影・占有判定・膨張・zone 集計・`OccupancyGrid` 構�
 
 目標（中央値 10 ms 未満、p99 20 ms 未満）を満たす。試験の失敗閾値は CI 向けに 100 ms。
 ノード経由の受信から publish までの時間は `ObstacleStatus.processing_time_ms` に毎フレーム載る。
+
+注意: 3D の検出は「セル内の高低差」なので、近距離で最下リングが低い障害物の上を越える場合は検出できない（盲域）。この扱いは仕様側で確認中。
+入力が途絶している間は `/lightnav/local_grid` を publish しない（controller の `grid_timeout_s` を発火させるため）。status だけを 10 Hz で出し続ける。

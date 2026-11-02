@@ -10,7 +10,8 @@ namespace lightnav
 {
 
 // Transforms every finite point with the sensor-to-base transform and adds it to the grid.
-// Throws std::runtime_error when the cloud has no float32 x/y/z fields.
+// Throws std::runtime_error when the layout is invalid (point_step, data size, endianness,
+// float32 x/y/z fields inside point_step).
 void projectPointCloud(
   const sensor_msgs::msg::PointCloud2 & cloud, const Eigen::Isometry3d & baseFromSensor,
   ObstacleGrid & grid);
