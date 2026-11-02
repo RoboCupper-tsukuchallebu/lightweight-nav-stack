@@ -31,10 +31,11 @@ constexpr double kMatchCiLimitMs = 180.0;
 constexpr int kLidarPointCount = 69000;
 constexpr int kMatchIterations = 20;
 constexpr double kScanVoxelM = 0.5;
-constexpr double kSubmapVoxelM = 0.25;
-// A 4 m corridor yields few points at 0.5 m; a finer voxel gives the table's ~5k source points.
-constexpr double kMatchScanVoxelM = 0.12;
-constexpr std::size_t kSubmapMaxPoints = 50000;
+constexpr double kMapSpacingM = 0.2;
+// A 4 m corridor yields few points at 0.5 m; a 0.10 m voxel gives the table's ~5k source points.
+constexpr double kMatchScanVoxelM = 0.10;
+constexpr std::size_t kSubmapMinPoints = 50000;  // measured: 52,020
+constexpr std::size_t kSourceMinPoints = 5000;   // measured: 5,281
 
 template <typename Function>
 double milliseconds_of(Function&& function) {
@@ -65,18 +66,21 @@ TEST(Performance, stages_stay_within_ci_limits) {
   // Real geometry for matching: a 100 m x 100 m L-shaped course; the scan is NOT a subset of the
   // target and the prediction is off by 0.2 m / 0.02 rad.
   const SyntheticWorld world({{0.0, 0.0}, {100.0, 0.0}, {100.0, 100.0}});
-  const PointList submap = downsample_voxel(world.sample_map(0.2), kSubmapVoxelM);
-  ASSERT_LE(submap.size(), kSubmapMaxPoints);
+  const PointList submap = world.sample_map(kMapSpacingM);  // used as is, no downsampling
+  ASSERT_GE(submap.size(), kSubmapMinPoints);
   const Eigen::Isometry3d true_pose = arc_pose(0.0, {85.0, 0.0}, 0.0, 0.0, 0.0);
   const auto scan = world.synthesize_scan([&](double) { return true_pose; }, 0.0, 0.1, true);
   PointList source;
   for (const TimedPoint& point : scan) source.push_back(point.position);
   source = downsample_voxel(source, kMatchScanVoxelM);
+  ASSERT_GE(source.size(), kSourceMinPoints);
   Eigen::Isometry3d prediction = true_pose;
   prediction.translation() += Eigen::Vector3d(0.2, 0.0, 0.0);
   prediction.linear() = Eigen::AngleAxisd(0.02, Eigen::Vector3d::UnitZ()).toRotationMatrix();
   MatcherParameters parameters;
   parameters.max_iterations = kMatchIterations;
+  // The worst case in iterations is measured separately (see the PR): this scene converges in few
+  // iterations, so `match` below is not the 20-iteration worst case.
 
   PreparedTarget target;
   const double prepare_ms = milliseconds_of([&] { target = PreparedTarget(submap); });
