@@ -10,6 +10,7 @@ find_package(lightnav_msgs REQUIRED)
 
 add_library(lightnav_controller_core
   src/follow_layer.cpp
+  src/avoid_layer.cpp
   src/arbitrate.cpp
   src/freshness.cpp)
 target_include_directories(lightnav_controller_core PUBLIC
@@ -46,7 +47,7 @@ if(BUILD_TESTING)
   # conda gtest headers in the pixi env, so link the installed GTest instead.
   find_package(ament_cmake_test REQUIRED)
   find_package(GTest REQUIRED)
-  foreach(test_name test_follow_layer test_arbitrate test_freshness)
+  foreach(test_name test_follow_layer test_avoid_layer test_arbitrate test_freshness)
     add_executable(${test_name} test/${test_name}.cpp)
     target_link_libraries(${test_name} lightnav_controller_core GTest::gtest GTest::gtest_main)
     target_compile_options(${test_name} PRIVATE -Wall -Wextra -Werror)

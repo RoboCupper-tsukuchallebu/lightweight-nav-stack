@@ -59,3 +59,18 @@ TEST(Arbitrate, ReportsNoPathWhenFollowGivesNoReason) {
   EXPECT_TRUE(result.is_hard_stop);
   EXPECT_EQ(result.reason, StopReason::kNoPath);
 }
+
+TEST(Arbitrate, WaitingAvoidLayerHoldsStillAndReportsItsReason) {
+  for (const StopReason reason : {StopReason::kBlocked, StopReason::kStuck}) {
+    ArbitrationInput input;
+    input.avoid = LayerOutput{true, Twist2D{}, reason};
+    input.follow = asserted(0.5);
+    input.is_pose_fresh = true;
+    input.is_grid_fresh = true;
+    const ArbitrationResult result = arbitrate(input);
+    EXPECT_TRUE(result.is_hard_stop);
+    EXPECT_EQ(result.reason, reason);
+    EXPECT_EQ(result.source_layer, Layer::kAvoid);
+    EXPECT_DOUBLE_EQ(result.twist.linear_mps, 0.0);
+  }
+}

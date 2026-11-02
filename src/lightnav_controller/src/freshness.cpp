@@ -18,6 +18,7 @@ Freshness evaluateFreshness(const InputAges& ages, const FreshnessTimeouts& time
   freshness.is_obstacle_status_fresh =
       !ages.is_obstacle_status_input_stale &&
       isWithinTimeout(ages.obstacle_status_age_s, timeouts.obstacle_status_timeout_s);
+  freshness.is_grid_fresh = isWithinTimeout(ages.grid_age_s, timeouts.grid_timeout_s);
   return freshness;
 }
 
