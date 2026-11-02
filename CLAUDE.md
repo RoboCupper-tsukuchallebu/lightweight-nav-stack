@@ -40,3 +40,4 @@ pixi run lint    # ruff check src
 
 - ament_python: `setup.py` に `extras_require={"test": ["pytest"]}` を書き、`test/` に pytest 形式で置く（colcon が unittest 扱いにして 0 件で落ちるのを防ぐ）。launch_testing は `@pytest.mark.launch_test` で動く。pytest は 9 で launch_testing plugin が壊れるため `>=8,<9` にピン留め済み。
 - C++ の gtest: `ament_add_gtest` は ROS の gtest ソースと conda の gtest 1.18 ヘッダが食い違いビルド不能。`find_package(GTest REQUIRED)` + `add_executable` + `GTest::gtest_main` + `ament_add_test(... --gtest_output=xml:${AMENT_TEST_RESULTS_DIR}/${PROJECT_NAME}/<name>.gtest.xml GENERATE_RESULT_FOR_RETURN_CODE_ZERO)` を使う。
+- C++ ノードが Python に依存する場合は `find_package(Python3 REQUIRED COMPONENTS Development)` + `Python3::Python` と書くだけでよい（`pixi run build` が `Python3_FIND_STRATEGY=LOCATION` / `Python3_ROOT_DIR` / `Python3_FIND_FRAMEWORK=NEVER` を渡し、Homebrew の Python に繋がるのを防ぐ。パッケージ側で指定しない）。
