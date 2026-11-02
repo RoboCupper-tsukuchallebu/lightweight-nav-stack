@@ -10,7 +10,7 @@ import time
 
 import rclpy
 import yaml
-from rclpy.action import ActionServer, CancelResponse
+from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.executors import MultiThreadedExecutor
 
 import lightnav_msgs
@@ -22,48 +22,51 @@ GOAL_START_TIMEOUT_S = 15.0
 PROCESS_EXIT_TIMEOUT_S = 10.0
 CANCEL_OBSERVE_TIMEOUT_S = 5.0
 EXECUTE_DEADLINE_S = 20.0
+SLOW_ACCEPT_DELAY_S = 1.0
 
 
-# 親が SIGINT を無視していると子も継承し、Python は KeyboardInterrupt を送らなくなる。
-# CLI を起動する前に既定の挙動へ戻す (起動環境の正規化。CLI の挙動は変えない)。
-CHILD_LAUNCHER = """
-import runpy, signal, sys
-print("inherited SIGINT disposition:", signal.getsignal(signal.SIGINT), file=sys.stderr, flush=True)
-signal.signal(signal.SIGINT, signal.default_int_handler)
-sys.argv = ["send_waypoints"] + sys.argv[1:]
-runpy.run_module("lightnav_mission.send_waypoints", run_name="__main__")
-"""
+class FakeFollowWaypointsServer:
+    """goal 受理を accept_delay_s だけ遅らせ、cancel が届くまで走り続ける偽サーバ。"""
 
+    def __init__(self, context, accept_delay_s):
+        self.node = rclpy.create_node("fake_follow_waypoints_server", context=context)
+        self.accept_delay_s = accept_delay_s
+        self.goal_received = threading.Event()
+        self.goal_running = threading.Event()
+        self.cancel_observed = threading.Event()
+        ActionServer(
+            self.node, FollowWaypoints, "/lightnav/mission/follow_waypoints",
+            goal_callback=self._on_goal, execute_callback=self._execute,
+            cancel_callback=lambda _handle: CancelResponse.ACCEPT)
+        self.executor = MultiThreadedExecutor(num_threads=4, context=context)
+        self.executor.add_node(self.node)
+        self.spin_thread = threading.Thread(target=self.executor.spin, daemon=True)
+        self.spin_thread.start()
 
-def test_sigint_cancels_goal_and_cli_exits_in_bounded_time(tmp_path):
-    context = rclpy.Context()
-    rclpy.init(context=context, domain_id=int(TEST_DOMAIN_ID))
-    server_node = rclpy.create_node("fake_follow_waypoints_server", context=context)
-    cancel_observed = threading.Event()
-    goal_running = threading.Event()
+    def _on_goal(self, _goal_request):
+        self.goal_received.set()
+        time.sleep(self.accept_delay_s)
+        return GoalResponse.ACCEPT
 
-    def execute(goal_handle):
-        goal_running.set()
+    def _execute(self, goal_handle):
+        self.goal_running.set()
         deadline = time.monotonic() + EXECUTE_DEADLINE_S
         while not goal_handle.is_cancel_requested and time.monotonic() < deadline:
-            threading.Event().wait(0.02)
+            time.sleep(0.02)
         if not goal_handle.is_cancel_requested:
             goal_handle.abort()  # cancel が届かなかった場合も有限時間で終わる
             return FollowWaypoints.Result()
-        cancel_observed.set()
+        self.cancel_observed.set()
         goal_handle.canceled()
         return FollowWaypoints.Result()
 
-    ActionServer(
-        server_node, FollowWaypoints, "/lightnav/mission/follow_waypoints",
-        execute_callback=execute, cancel_callback=lambda _handle: CancelResponse.ACCEPT)
-    executor = MultiThreadedExecutor(num_threads=4, context=context)
-    executor.add_node(server_node)
-    spin_thread = threading.Thread(target=executor.spin, daemon=True)
-    spin_thread.start()
+    def shutdown(self):
+        self.executor.shutdown()
+        self.spin_thread.join(timeout=2.0)
+        self.node.destroy_node()
 
-    waypoints_file = tmp_path / "waypoints.yaml"
-    waypoints_file.write_text(yaml.safe_dump({"waypoints": [{"x": 1.0, "y": 0.0}]}))
+
+def _start_cli(waypoints_file):
     environment = {
         **os.environ,
         "ROS_DOMAIN_ID": TEST_DOMAIN_ID,
@@ -71,11 +74,21 @@ def test_sigint_cancels_goal_and_cli_exits_in_bounded_time(tmp_path):
         # macOS の SIP は子プロセスへ DYLD_LIBRARY_PATH を渡さないので、msg の dylib の場所を明示する
         "DYLD_LIBRARY_PATH": str(INSTALL_LIBRARY_DIRECTORY),
     }
-    process = subprocess.Popen(
-        [sys.executable, "-c", CHILD_LAUNCHER, str(waypoints_file)],
+    return subprocess.Popen(
+        [sys.executable, "-m", "lightnav_mission.send_waypoints", str(waypoints_file)],
         env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+
+
+def _interrupt_and_check(tmp_path, accept_delay_s, interrupt_after):
+    """interrupt_after(server) を待ってから SIGINT を送り、cancel が届くことを確かめる。"""
+    context = rclpy.Context()
+    rclpy.init(context=context, domain_id=int(TEST_DOMAIN_ID))
+    server = FakeFollowWaypointsServer(context, accept_delay_s)
+    waypoints_file = tmp_path / "waypoints.yaml"
+    waypoints_file.write_text(yaml.safe_dump({"waypoints": [{"x": 1.0, "y": 0.0}]}))
+    process = _start_cli(waypoints_file)
     try:
-        assert goal_running.wait(GOAL_START_TIMEOUT_S), "goal が実行開始しなかった"
+        assert interrupt_after(server).wait(GOAL_START_TIMEOUT_S), "goal が届かなかった"
         process.send_signal(signal.SIGINT)
         try:
             exit_code = process.wait(timeout=PROCESS_EXIT_TIMEOUT_S)
@@ -84,14 +97,20 @@ def test_sigint_cancels_goal_and_cli_exits_in_bounded_time(tmp_path):
             raise AssertionError("CLI が SIGINT 後に終了しなかった: " + process.communicate()[1])
         standard_error = process.stderr.read()
         assert exit_code == 1, standard_error
-        assert cancel_observed.wait(CANCEL_OBSERVE_TIMEOUT_S), standard_error
+        assert server.cancel_observed.wait(CANCEL_OBSERVE_TIMEOUT_S), standard_error
         assert "goal を cancel した" in standard_error
     finally:
         if process.poll() is None:
             process.kill()
             process.wait()
         process.stderr.close()
-        executor.shutdown()
-        spin_thread.join(timeout=2.0)
-        server_node.destroy_node()
+        server.shutdown()
         context.try_shutdown()
+
+
+def test_sigint_while_goal_is_running_cancels_goal(tmp_path):
+    _interrupt_and_check(tmp_path, 0.0, lambda server: server.goal_running)
+
+
+def test_sigint_while_goal_acceptance_is_pending_still_cancels_goal(tmp_path):
+    _interrupt_and_check(tmp_path, SLOW_ACCEPT_DELAY_S, lambda server: server.goal_received)
