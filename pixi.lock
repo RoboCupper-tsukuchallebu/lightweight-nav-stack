@@ -232,7 +232,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/pyflakes-4.1.0-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/pygments-2.21.0-pyhcf101f3_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/pyparsing-3.3.3-pyh5ded981_0.conda
-      - conda: https://prefix.dev/conda-forge/noarch/pytest-9.2.0-pyhc364b38_1.conda
+      - conda: https://prefix.dev/conda-forge/noarch/pytest-8.4.2-pyhcf101f3_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/pytest-cov-7.1.0-pyhcf101f3_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/pytest-repeat-0.9.4-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/pytest-rerunfailures-16.6.1-pyhd8ed1ab_0.conda
@@ -720,7 +720,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/pyflakes-4.1.0-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/pygments-2.21.0-pyhcf101f3_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/pyparsing-3.3.3-pyh5ded981_0.conda
-      - conda: https://prefix.dev/conda-forge/noarch/pytest-9.2.0-pyhc364b38_1.conda
+      - conda: https://prefix.dev/conda-forge/noarch/pytest-8.4.2-pyhcf101f3_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/pytest-cov-7.1.0-pyhcf101f3_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/pytest-repeat-0.9.4-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/pytest-rerunfailures-16.6.1-pyhd8ed1ab_0.conda
@@ -1284,7 +1284,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/pyparsing-3.3.3-pyh5ded981_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/pyside6-6.11.3-py314h574d94f_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/pysocks-1.7.1-pyha55dd90_7.conda
-      - conda: https://prefix.dev/conda-forge/noarch/pytest-9.2.0-pyhc364b38_1.conda
+      - conda: https://prefix.dev/conda-forge/noarch/pytest-8.4.2-pyhcf101f3_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/pytest-cov-7.1.0-pyhcf101f3_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/pytest-repeat-0.9.4-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/pytest-rerunfailures-16.6.1-pyhd8ed1ab_0.conda
@@ -1863,7 +1863,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/pygments-2.21.0-pyhcf101f3_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/pyparsing-3.3.3-pyh5ded981_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/pysocks-1.7.1-pyha55dd90_7.conda
-      - conda: https://prefix.dev/conda-forge/noarch/pytest-9.2.0-pyhc364b38_1.conda
+      - conda: https://prefix.dev/conda-forge/noarch/pytest-8.4.2-pyhcf101f3_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/pytest-cov-7.1.0-pyhcf101f3_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/pytest-repeat-0.9.4-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/pytest-rerunfailures-16.6.1-pyhd8ed1ab_0.conda
@@ -2491,7 +2491,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/pygments-2.21.0-pyhcf101f3_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/pyparsing-3.3.3-pyh5ded981_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/pyserial-3.5-pyhcf101f3_2.conda
-      - conda: https://prefix.dev/conda-forge/noarch/pytest-9.2.0-pyhc364b38_1.conda
+      - conda: https://prefix.dev/conda-forge/noarch/pytest-8.4.2-pyhcf101f3_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/pytest-cov-7.1.0-pyhcf101f3_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/pytest-repeat-0.9.4-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/pytest-rerunfailures-16.6.1-pyhd8ed1ab_0.conda
@@ -3110,7 +3110,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/pygments-2.21.0-pyhcf101f3_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/pyparsing-3.3.3-pyh5ded981_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/pyserial-3.5-pyhcf101f3_2.conda
-      - conda: https://prefix.dev/conda-forge/noarch/pytest-9.2.0-pyhc364b38_1.conda
+      - conda: https://prefix.dev/conda-forge/noarch/pytest-8.4.2-pyhcf101f3_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/pytest-cov-7.1.0-pyhcf101f3_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/pytest-repeat-0.9.4-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/pytest-rerunfailures-16.6.1-pyhd8ed1ab_0.conda
@@ -11703,25 +11703,25 @@ packages:
   license_family: BSD
   size: 21085
   timestamp: 1733217331982
-- conda: https://prefix.dev/conda-forge/noarch/pytest-9.2.0-pyhc364b38_1.conda
-  sha256: a9cf3571e80a4e86992502068eb1d29a109e88345c39babf03b10450895056af
-  md5: f0cfded84ced11a9dfb3790c4c1c0b63
+- conda: https://prefix.dev/conda-forge/noarch/pytest-8.4.2-pyhcf101f3_1.conda
+  sha256: 39f41a52eb6f927caf5cd42a2ff98a09bb850ce9758b432869374b6253826962
+  md5: da0c42269086f5170e2b296878ec13a6
   depends:
-  - colorama
+  - pygments >=2.7.2
   - python >=3.10
+  - iniconfig >=1
+  - packaging >=20
+  - pluggy >=1.5,<2
+  - tomli >=1
+  - colorama >=0.4
   - exceptiongroup >=1
-  - iniconfig >=2
-  - packaging >=24
-  - pluggy >=1.6,<2
-  - pygments >=2.15
-  - tomli >=2
   - python
   constrains:
   - pytest-faulthandler >=2
   license: MIT
   license_family: MIT
-  size: 326683
-  timestamp: 1793214631903
+  size: 294852
+  timestamp: 1762354779909
 - conda: https://prefix.dev/conda-forge/noarch/pytest-cov-7.1.0-pyhcf101f3_0.conda
   sha256: 44e42919397bd00bfaa47358a6ca93d4c21493a8c18600176212ec21a8d25ca5
   md5: 67d1790eefa81ed305b89d8e314c7923
