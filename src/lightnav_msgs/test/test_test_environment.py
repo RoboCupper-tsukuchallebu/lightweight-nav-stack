@@ -1,7 +1,8 @@
 import os
 
-from lightnav_msgs.srv import PlanPath
 import rclpy
+
+from lightnav_msgs.srv import PlanPath
 
 
 def test_runs_on_isolated_test_domain():
