@@ -31,6 +31,14 @@ def test_rotation_and_translation_compose_in_order():
     assert (pose.x, pose.y, pose.yaw) == pytest.approx((1.0, 3.0, math.pi / 2))
 
 
+def test_base_offset_is_applied_in_body_frame_after_rotation():
+    # body at (5, 0) facing +y (yaw 90 deg); base is 0.1 m behind body along body x
+    odom_from_body = transform.homogeneous(transform.rotation_from_rpy(0, 0, math.pi / 2), (5.0, 0.0, 0.0))
+    body_to_base = transform.body_to_base_matrix([-0.1, 0.0, 0.0, 0.0, 0.0, 0.0])
+    pose = project(odom_from_body=odom_from_body, body_to_base=body_to_base)
+    assert (pose.x, pose.y, pose.yaw) == pytest.approx((5.0, -0.1, math.pi / 2))
+
+
 def test_yaw_extracted_from_quaternion_with_roll_and_pitch():
     rotation = transform.rotation_from_rpy(0.2, -0.1, 1.0)
     pose = project(odom_from_body=transform.homogeneous(rotation, (0, 0, 0)))

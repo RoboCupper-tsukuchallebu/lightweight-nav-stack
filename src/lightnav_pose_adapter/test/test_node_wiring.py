@@ -115,18 +115,28 @@ def test_parameters_apply_map_from_odom_offset(make_harness):
     assert harness.received[0].pose.position.x == pytest.approx(11.0)
 
 
-def test_inactive_node_publishes_nothing(make_harness):
+def test_inactive_node_is_silent_until_activated(make_harness):
     harness = make_harness()
     harness.adapter.trigger_configure()
-    harness.publisher.publish(build_odometry())
-    harness.spin_briefly()
+    # wait for the connection (positive control for the silence below)
+    assert harness.spin_until(
+        lambda: harness.publisher.get_subscription_count() > 0
+        and harness.adapter.count_publishers("/lightnav/localization/odom") > 0
+    )
+    for _ in range(5):
+        harness.publisher.publish(build_odometry())
+        harness.spin_briefly()
     assert harness.received == []
+    harness.adapter.trigger_activate()
+    assert publish_until_received(harness, build_odometry(), 1)
 
 
-def test_frame_mismatch_and_high_variance_and_nan_are_dropped(make_harness):
+def test_invalid_inputs_are_dropped_and_valid_one_passes(make_harness):
     harness = make_harness()
     activate(harness)
-    harness.spin_briefly()  # let discovery finish
+    assert harness.spin_until(
+        lambda: harness.publisher.get_subscription_count() > 0
+    )
     for bad in (
         build_odometry(frame_id="odom"),
         build_odometry(variance=9.0),
@@ -135,6 +145,11 @@ def test_frame_mismatch_and_high_variance_and_nan_are_dropped(make_harness):
         harness.publisher.publish(bad)
     harness.spin_briefly()
     assert harness.received == []
+    harness.publisher.publish(build_odometry(x=3.0))
+    assert harness.spin_until(lambda: len(harness.received) >= 1)
+    harness.spin_briefly()
+    assert len(harness.received) == 1
+    assert harness.received[0].pose.position.x == pytest.approx(3.0)
 
 
 def test_invalid_parameter_fails_configure(make_harness):
