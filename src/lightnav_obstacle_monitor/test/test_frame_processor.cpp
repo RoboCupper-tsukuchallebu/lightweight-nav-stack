@@ -19,7 +19,7 @@ namespace
 {
 constexpr int kRingCount = 32;
 constexpr int kAzimuthCount = 2160;  // 32 * 2160 = 69,120 points, like one HDL-32E frame
-constexpr double kSensorHeightMeters = 1.0;
+constexpr double kSensorHeightMeters = 0.7;
 
 Eigen::Isometry3d sensorMount()
 {
