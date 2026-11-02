@@ -1,0 +1,4 @@
+geometry_msgs/PoseWithCovarianceStamped pose   # frame map。orientation が単位元で covariance[35] < 0 なら yaw 未指定
+---
+bool accepted
+string message

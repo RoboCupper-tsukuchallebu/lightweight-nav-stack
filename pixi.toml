@@ -1,0 +1,47 @@
+[workspace]
+name = "lightweight-nav-stack"
+channels = ["https://prefix.dev/robostack-jazzy", "https://prefix.dev/conda-forge"]
+platforms = ["osx-arm64", "linux-64"]
+
+[dependencies]
+ros-jazzy-ros-base = "*"
+colcon-common-extensions = "*"
+setuptools = "*"
+pytest = "*"
+pyyaml = "*"
+numpy = "*"
+eigen = "*"
+cmake = "*"
+compilers = "*"
+ninja = "*"
+make = "*"
+pkg-config = "*"
+ruff = "*"
+# Dependencies for lightnav_localization (issue 2)
+ros-jazzy-gtsam = "*"
+tbb-devel = "*"
+geographiclib-cpp = "*"
+
+[feature.hardware.dependencies]
+ros-jazzy-velodyne = "*"
+ros-jazzy-nmea-navsat-driver = "*"
+
+[feature.eval.dependencies]
+rosbags = "*"
+evo = "*"
+matplotlib = "*"
+
+[environments]
+hardware = ["hardware"]
+eval = ["eval"]
+
+[activation]
+# Skipped when install/ does not exist yet (before the first build).
+scripts = ["install/local_setup.sh"]
+env = { ROS_DOMAIN_ID = "42" }
+
+[tasks]
+# No --symlink-install: it fails with recent setuptools.
+build = "colcon build --base-paths src --cmake-args -DCMAKE_BUILD_TYPE=Release"
+test = { cmd = "colcon test --base-paths src --return-code-on-test-failure && colcon test-result --verbose", depends-on = ["build"] }
+lint = "ruff check src"

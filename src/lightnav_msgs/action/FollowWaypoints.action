@@ -1,0 +1,17 @@
+Waypoint[] waypoints
+uint32 start_index
+---
+bool success
+string message
+uint32 reached_count
+---
+string state                     # IDLE / PLANNING / FOLLOWING / PAUSED
+uint32 current_waypoint_index
+float32 distance_to_waypoint_m
+uint32 path_id
+uint8 follow_state
+uint8 active_layer
+bool is_blocked
+bool is_stuck
+bool is_not_moving
+uint8 localization_state         # LocalizationStatus.state の写し（購読が無ければ 255）
