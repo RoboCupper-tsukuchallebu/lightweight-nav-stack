@@ -2,11 +2,12 @@
 
 import argparse
 import math
+import os
 import sys
 
 import rclpy
-import yaml
 from geometry_msgs.msg import PoseStamped
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 
 from lightnav_mission.waypoint_files import (
@@ -14,6 +15,7 @@ from lightnav_mission.waypoint_files import (
     build_waypoints_document,
     samples_to_records,
     select_recorded_samples,
+    write_yaml_with_fallback,
 )
 
 
@@ -40,18 +42,36 @@ class PoseRecorder(Node):
             self.samples.append(sample)
 
 
-def main(argv=None) -> int:
+def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--pose-topic", default="/lightnav/pose")
     parser.add_argument("--spacing-m", type=float, default=2.0)
     parser.add_argument("--output", default="waypoints_raw.yaml")
-    arguments = parser.parse_args(argv)
+    parser.add_argument("--overwrite", action="store_true", help="既存の出力を上書きする")
+    return parser
+
+
+def validate_arguments(arguments) -> str:
+    """走行前に検証する。問題があれば理由、無ければ空文字。"""
+    if not math.isfinite(arguments.spacing_m) or arguments.spacing_m <= 0.0:
+        return "--spacing-m は正の有限値でなければならない"
+    if os.path.exists(arguments.output) and not arguments.overwrite:
+        return f"{arguments.output} が既にある（上書きは --overwrite）"
+    return ""
+
+
+def main(argv=None) -> int:
+    arguments = build_argument_parser().parse_args(argv)
+    problem = validate_arguments(arguments)
+    if problem:
+        print(problem, file=sys.stderr)
+        return 1
 
     rclpy.init()
     recorder = PoseRecorder(arguments.pose_topic)
     try:
         rclpy.spin(recorder)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     selected = select_recorded_samples(recorder.samples, arguments.spacing_m)
     recorder.destroy_node()
@@ -61,10 +81,11 @@ def main(argv=None) -> int:
         print("姿勢を受信できなかったため書き出さない", file=sys.stderr)
         return 1
     document = build_waypoints_document(samples_to_records(selected), recorded_with="online")
-    with open(arguments.output, "w", encoding="utf-8") as file:
-        yaml.safe_dump(document, file, sort_keys=False)
-    print(f"{len(selected)} 点を {arguments.output} に書き出した")
-    return 0
+    written_path = write_yaml_with_fallback(arguments.output, document)
+    if written_path != arguments.output:
+        print(f"{arguments.output} に書けず退避した: {written_path}", file=sys.stderr)
+    print(f"{len(selected)} 点を {written_path} に書き出した")
+    return 0 if written_path == arguments.output else 1
 
 
 if __name__ == "__main__":

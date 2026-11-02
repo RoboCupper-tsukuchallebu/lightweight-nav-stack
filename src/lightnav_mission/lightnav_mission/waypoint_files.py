@@ -3,6 +3,8 @@
 import bisect
 import csv
 import math
+import os
+import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 
@@ -97,7 +99,7 @@ def load_waypoints_file(path: str) -> list[WaypointRecord]:
     try:
         with open(path, encoding="utf-8") as file:
             document = yaml.safe_load(file)
-    except (OSError, yaml.YAMLError) as error:
+    except (OSError, ValueError, yaml.YAMLError) as error:
         raise WaypointFileError(f"{path} を読めない: {error}") from error
     return parse_waypoints_document(document)
 
@@ -166,10 +168,12 @@ def load_trajectory_csv(path: str) -> list[TrajectoryRow]:
                 )
                 for raw in reader
             ]
-    except (OSError, ValueError, csv.Error) as error:
+    except (OSError, ValueError, TypeError, csv.Error) as error:
         if isinstance(error, WaypointFileError):
             raise
         raise WaypointFileError(f"{path} を読めない: {error}") from error
+    if not rows:
+        raise WaypointFileError("trajectory.csv にデータ行が無い")
     if any(not math.isfinite(value) for row in rows for value in (row.stamp_sec, row.x, row.y, row.yaw)):
         raise WaypointFileError("trajectory.csv に非有限値がある")
     return sorted(rows, key=lambda row: row.stamp_sec)
@@ -205,6 +209,7 @@ def refine_waypoint(
     max_correction_m: float,
     max_gap_s: float,
 ) -> WaypointRecord:
+    record = replace(record, flagged=None, correction_m=None)  # 入力の古い結果を引き継がない
     if record.stamp is None:
         return replace(record, flagged=FLAG_NO_TRAJECTORY)
     refined_pose = interpolate_trajectory(rows, record.stamp, max_gap_s)
@@ -223,3 +228,31 @@ def refine_waypoints(
     max_gap_s: float = 2.0,
 ) -> list[WaypointRecord]:
     return [refine_waypoint(record, rows, max_correction_m, max_gap_s) for record in records]
+
+
+# ---- 書き出し ----
+
+def write_yaml_atomically(path: str, document: dict) -> None:
+    """同一ディレクトリの一時ファイルに書いてから os.replace する（中断しても部分ファイルが残らない）。"""
+    directory = os.path.dirname(os.path.abspath(path))
+    file_descriptor, temporary_path = tempfile.mkstemp(dir=directory, suffix=".tmp")
+    try:
+        with os.fdopen(file_descriptor, "w", encoding="utf-8") as file:
+            yaml.safe_dump(document, file, sort_keys=False)
+        os.replace(temporary_path, path)
+    except BaseException:
+        if os.path.exists(temporary_path):
+            os.unlink(temporary_path)
+        raise
+
+
+def write_yaml_with_fallback(path: str, document: dict) -> str:
+    """path に書けなければ一時ディレクトリへ退避する。実際に書いた場所を返す。"""
+    try:
+        write_yaml_atomically(path, document)
+        return path
+    except OSError:
+        fallback_directory = tempfile.mkdtemp(prefix="lightnav_waypoints_")
+        fallback_path = os.path.join(fallback_directory, os.path.basename(path))
+        write_yaml_atomically(fallback_path, document)
+        return fallback_path

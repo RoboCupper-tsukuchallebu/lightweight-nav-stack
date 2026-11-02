@@ -8,14 +8,13 @@ import math
 import os
 import sys
 
-import yaml
-
 from lightnav_mission.waypoint_files import (
     WaypointFileError,
     build_waypoints_document,
     load_trajectory_csv,
     load_waypoints_file,
     refine_waypoints,
+    write_yaml_atomically,
 )
 
 EXIT_OK = 0
@@ -71,8 +70,11 @@ def main(argv=None) -> int:
         source_raw=arguments.raw,
         source_trajectory=arguments.trajectory,
     )
-    with open(arguments.output, "w", encoding="utf-8") as file:
-        yaml.safe_dump(document, file, sort_keys=False)
+    try:
+        write_yaml_atomically(arguments.output, document)
+    except OSError as error:
+        print(f"書き出せない: {error}", file=sys.stderr)
+        return EXIT_INVALID_INPUT
     flagged_count = sum(1 for record in refined if record.flagged)
     if flagged_count:
         print(f"{flagged_count} 点が flagged（要確認）", file=sys.stderr)
