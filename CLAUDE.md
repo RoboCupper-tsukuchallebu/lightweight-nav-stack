@@ -35,7 +35,7 @@ pixi run lint    # ruff check src
 ## 独自 msg を使うノードの実行（macOS）
 
 - macOS の SIP は /bin/sh・/usr/bin/env などを通ると `DYLD_*` を落とす。`pixi run test` では colcon が試験を `/bin/sh -c ". hook && env -0"` で作った環境で起動するため、`DYLD_LIBRARY_PATH` が pytest に届かない（実測）。
-- 対策（パッケージ側の conftest や回避は不要）: (1) `pixi run build` が `CMAKE_INSTALL_RPATH=install/lib` を埋め込み、生成ライブラリの import は DYLD 無しで解決する。(2) typesupport の dlopen は起動時の `DYLD_LIBRARY_PATH` が必要なので、test タスクが `LIGHTNAV_DYLD_LIBRARY_PATH` で渡し、pytest プラグインが macOS でだけ DYLD 付きで pytest を再起動する。
+- 対策（パッケージ側の conftest や回避は不要）: dlopen は起動時の `DYLD_LIBRARY_PATH` が必要なので、test タスクが `LIGHTNAV_DYLD_LIBRARY_PATH` で渡し、pytest プラグインが macOS でだけ DYLD 付きで pytest を再起動する。
 - ビルドは `--merge-install`（全ライブラリが `install/lib`）。`ros2` / `ros2-robot` タスクは従来どおり env で `DYLD_LIBRARY_PATH` を渡す。
 - `pixi run ros2 run ...` / `pixi run ros2 launch ...` と `pixi run test` を使う。素の `pixi run python ノード.py` は Mac では失敗する。
 

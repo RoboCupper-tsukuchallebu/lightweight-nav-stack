@@ -1,6 +1,6 @@
 """pytest plugin loaded by `pixi run test` (PYTEST_PLUGINS).
 
-1. Refuses to run on ROS domain 42 (real robot) or 43 (GUI / default domain).
+1. Aborts unless ROS_DOMAIN_ID is exactly "44" (never the robot's 42 or the GUI's 43).
 2. Restores DYLD_LIBRARY_PATH on macOS. colcon starts tests through /bin/sh and
    /usr/bin/env, where SIP strips every DYLD_* variable, so the task passes the
    value under LIGHTNAV_DYLD_LIBRARY_PATH and pytest is restarted with it here.
@@ -10,22 +10,37 @@ import sys
 
 import pytest
 
-FORBIDDEN_ROS_DOMAIN_IDS = ("42", "43")
+TEST_ROS_DOMAIN_ID = "44"
 SIP_SAFE_VARIABLE = "LIGHTNAV_DYLD_LIBRARY_PATH"
+RESTARTED_MARKER = "LIGHTNAV_PYTEST_RESTARTED"
+
+
+def check_domain(domain_id):
+    if domain_id != TEST_ROS_DOMAIN_ID:
+        raise pytest.UsageError(
+            f"ROS_DOMAIN_ID={domain_id!r} is not allowed for tests (must be "
+            f"{TEST_ROS_DOMAIN_ID!r}). Run through `pixi run test`."
+        )
+
+
+def restart_with_dyld(environment, library_path):
+    """Return the environment to restart with, or None if no restart is needed."""
+    if library_path in environment.get("DYLD_LIBRARY_PATH", ""):
+        return None
+    if environment.get(RESTARTED_MARKER):
+        raise pytest.UsageError(
+            "DYLD_LIBRARY_PATH is still missing after restarting pytest; "
+            "refusing to restart again."
+        )
+    return {**environment, "DYLD_LIBRARY_PATH": library_path, RESTARTED_MARKER: "1"}
 
 
 def pytest_configure(config):
-    domain_id = os.environ.get("ROS_DOMAIN_ID")
-    if domain_id is None or domain_id in FORBIDDEN_ROS_DOMAIN_IDS:
-        raise pytest.UsageError(
-            f"ROS_DOMAIN_ID={domain_id!r} is not allowed for tests. "
-            "Run through `pixi run test` (domain 44, LOCALHOST)."
-        )
+    check_domain(os.environ.get("ROS_DOMAIN_ID"))
     library_path = os.environ.get(SIP_SAFE_VARIABLE)
-    if sys.platform == "darwin" and library_path and library_path not in os.environ.get(
-        "DYLD_LIBRARY_PATH", ""
-    ):
-        # dyld reads DYLD_LIBRARY_PATH only at process start, so restart this
-        # (non-SIP) interpreter with it. Setting os.environ later has no effect.
-        restarted_environment = {**os.environ, "DYLD_LIBRARY_PATH": library_path}
+    if sys.platform != "darwin" or not library_path:
+        return
+    restarted_environment = restart_with_dyld(os.environ, library_path)
+    if restarted_environment is not None:
+        # dyld reads DYLD_LIBRARY_PATH only at process start.
         os.execve(sys.executable, sys.orig_argv, restarted_environment)

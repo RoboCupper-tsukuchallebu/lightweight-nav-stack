@@ -24,6 +24,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 if(BUILD_TESTING)
   find_package(ament_cmake_pytest REQUIRED)
   ament_add_pytest_test(test_test_environment test/test_test_environment.py)
+  ament_add_pytest_test(test_plugin_aborts test/test_plugin_aborts.py)
 endif()
 
 ament_package()
