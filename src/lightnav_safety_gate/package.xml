@@ -13,10 +13,10 @@
   <depend>rclcpp_lifecycle</depend>
   <depend>geometry_msgs</depend>
   <depend>lightnav_msgs</depend>
+  <depend>lifecycle_msgs</depend>
 
   <test_depend>ament_cmake_test</test_depend>
   <test_depend>gtest</test_depend>
-  <test_depend>ament_lint_auto</test_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

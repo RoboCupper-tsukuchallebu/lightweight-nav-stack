@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iterator>
 
 namespace lightnav_safety_gate
 {
@@ -19,9 +20,6 @@ double limitAxis(
   double previous, double target, double acceleration_max, double deceleration_max,
   double period_s)
 {
-  if (target == 0.0) {
-    return 0.0;
-  }
   const bool is_reversing = (previous * target) < 0.0;
   const bool is_speeding_up = !is_reversing && (std::abs(target) > std::abs(previous));
   const double step_limit = (is_speeding_up ? acceleration_max : deceleration_max) * period_s;
@@ -60,6 +58,10 @@ PlanarVelocity limitRate(
   const PlanarVelocity & previous_output, const PlanarVelocity & target,
   const SafetyGateLimits & limits, double period_s)
 {
+  // Only a stop of the whole twist bypasses the limit; one zero axis is still rate limited.
+  if (target.linear_mps == 0.0 && target.angular_rps == 0.0) {
+    return PlanarVelocity{};
+  }
   return {
     limitAxis(
       previous_output.linear_mps, target.linear_mps, limits.acceleration_max_mps2,

@@ -47,7 +47,8 @@ bool shouldEmergencyStop(const EmergencyStopInputs & inputs, const EmergencyStop
 
 PlanarVelocity saturate(const PlanarVelocity & command, const SafetyGateLimits & limits);
 
-// Rate limiting applies only to non-zero targets; a zero target is returned immediately.
+// Rate limiting applies unless the whole target is zero, which is returned immediately.
+// A target with one zero axis (e.g. rotate in place) is still rate limited per axis.
 // A sign reversal first decelerates toward zero.
 PlanarVelocity limitRate(
   const PlanarVelocity & previous_output, const PlanarVelocity & target,

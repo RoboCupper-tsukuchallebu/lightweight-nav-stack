@@ -51,18 +51,18 @@ TEST(EmergencyStop, everySingleFaultStops)
     void (* apply)(EmergencyStopInputs &);
   };
   const Case cases[] = {
-    {"not active", [](EmergencyStopInputs & i) {i.is_active = false;}},
-    {"no obstacle status yet", [](EmergencyStopInputs & i) {i.has_obstacle_status = false;}},
-    {"obstacle status timed out", [](EmergencyStopInputs & i) {i.obstacle_status_age_s = 0.6;}},
-    {"obstacle status age NaN", [](EmergencyStopInputs & i) {i.obstacle_status_age_s = kNaN;}},
-    {"obstacle status age negative", [](EmergencyStopInputs & i) {i.obstacle_status_age_s = -1.0;}},
-    {"stop zone occupied", [](EmergencyStopInputs & i) {i.is_stop_zone_occupied = true;}},
-    {"input stale", [](EmergencyStopInputs & i) {i.is_input_stale = true;}},
-    {"no command yet", [](EmergencyStopInputs & i) {i.has_command = false;}},
-    {"command timed out", [](EmergencyStopInputs & i) {i.command_age_s = 0.4;}},
-    {"command age NaN", [](EmergencyStopInputs & i) {i.command_age_s = kNaN;}},
-    {"command age infinite", [](EmergencyStopInputs & i) {i.command_age_s = kInfinity;}},
-    {"hard stop", [](EmergencyStopInputs & i) {i.is_hard_stop = true;}},
+    {"not active", [](EmergencyStopInputs & inputs) {inputs.is_active = false;}},
+    {"no obstacle status yet", [](EmergencyStopInputs & inputs) {inputs.has_obstacle_status = false;}},
+    {"obstacle status timed out", [](EmergencyStopInputs & inputs) {inputs.obstacle_status_age_s = 0.6;}},
+    {"obstacle status age NaN", [](EmergencyStopInputs & inputs) {inputs.obstacle_status_age_s = kNaN;}},
+    {"obstacle status age negative", [](EmergencyStopInputs & inputs) {inputs.obstacle_status_age_s = -1.0;}},
+    {"stop zone occupied", [](EmergencyStopInputs & inputs) {inputs.is_stop_zone_occupied = true;}},
+    {"input stale", [](EmergencyStopInputs & inputs) {inputs.is_input_stale = true;}},
+    {"no command yet", [](EmergencyStopInputs & inputs) {inputs.has_command = false;}},
+    {"command timed out", [](EmergencyStopInputs & inputs) {inputs.command_age_s = 0.4;}},
+    {"command age NaN", [](EmergencyStopInputs & inputs) {inputs.command_age_s = kNaN;}},
+    {"command age infinite", [](EmergencyStopInputs & inputs) {inputs.command_age_s = kInfinity;}},
+    {"hard stop", [](EmergencyStopInputs & inputs) {inputs.is_hard_stop = true;}},
   };
   for (const Case & test_case : cases) {
     EmergencyStopInputs inputs = healthyInputs();
@@ -188,4 +188,30 @@ TEST(Limits, validationRejectsNonPositiveAndNonFinite)
   limits = defaultLimits();
   limits.angular_max_rps = kInfinity;
   EXPECT_FALSE(areLimitsValid(limits));
+}
+
+TEST(LimitRate, oneZeroAxisIsStillRateLimited)
+{
+  // Transition to rotate in place: linear target 0, angular target non-zero.
+  const PlanarVelocity result = limitRate({0.6, 0.0}, {0.0, 0.3}, defaultLimits(), kPeriodSeconds);
+  EXPECT_NEAR(result.linear_mps, 0.6 - 1.0 * kPeriodSeconds, 1e-12);
+  EXPECT_NEAR(result.angular_rps, 1.0 * kPeriodSeconds, 1e-12);
+  const PlanarVelocity opposite = limitRate({0.0, 0.4}, {0.5, 0.0}, defaultLimits(), kPeriodSeconds);
+  EXPECT_NEAR(opposite.angular_rps, 0.4 - 2.0 * kPeriodSeconds, 1e-12);
+}
+
+TEST(LimitRate, rampDoesNotReachTargetOneStepEarly)
+{
+  PlanarVelocity output{0.0, 0.0};
+  for (int step = 0; step < 23; ++step) {
+    output = limitRate(output, {0.6, 0.0}, defaultLimits(), kPeriodSeconds);
+  }
+  EXPECT_LT(output.linear_mps, 0.6 - 1e-6);
+}
+
+TEST(EmergencyStop, negativeAgesStop)
+{
+  EmergencyStopInputs inputs = healthyInputs();
+  inputs.command_age_s = -0.001;
+  EXPECT_TRUE(shouldEmergencyStop(inputs, defaultTimeouts()));
 }
