@@ -2,6 +2,8 @@
 
 #include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <vector>
 
 #include "lightnav_controller/arbitrate.hpp"
 #include "lightnav_controller/avoid_layer.hpp"
@@ -126,7 +128,61 @@ TEST(FollowLayer, NearestSearchOnlyMovesForwardWithinWindow) {
   // Jumping back does not move the index backwards.
   EXPECT_EQ(layer.compute(Pose2D{1.0, 0.0, 0.0}, freshInputs()).closest_index, 30u);
   // A pose beyond search_window_m (5 m) ahead is clamped to the window.
-  EXPECT_LE(layer.compute(Pose2D{15.0, 0.0, 0.0}, freshInputs()).closest_index, 80u);
+  const std::size_t clamped_index =
+      layer.compute(Pose2D{15.0, 0.0, 0.0}, freshInputs()).closest_index;
+  EXPECT_GE(clamped_index, 79u);
+  EXPECT_LE(clamped_index, 80u);
+}
+
+// Straight path along +x (0.25 m steps: exact in binary so the lookahead point is x=1.0), defaults: lookahead 1.0, v_max 0.6, w_max 0.4, w_rotate 0.3.
+TEST(PurePursuit, RightOfPathWithPositiveYawTurnsLeftWithExactCurvature) {
+  FollowLayer layer{FollowParameters{}};
+  layer.tryAcceptPath(1, 1, straightPath(20.0, 0.25));
+  // Target (1,0). Body frame: forward=cos(0.3), lateral=-sin(0.3), L^2=1.
+  const double expected_curvature = 2.0 * -std::sin(0.3);
+  const FollowResult result = layer.compute(Pose2D{0.0, 0.0, 0.3}, freshInputs());
+  ASSERT_TRUE(result.output.is_asserted);
+  EXPECT_NEAR(result.output.twist.linear_mps, 0.6, 1e-9);
+  EXPECT_NEAR(result.output.twist.angular_rps, 0.6 * expected_curvature, 1e-9);
+}
+
+TEST(PurePursuit, NegativeYawMirrorsTheSign) {
+  FollowLayer layer{FollowParameters{}};
+  layer.tryAcceptPath(1, 1, straightPath(20.0, 0.25));
+  const FollowResult result = layer.compute(Pose2D{0.0, 0.0, -0.3}, freshInputs());
+  ASSERT_TRUE(result.output.is_asserted);
+  EXPECT_NEAR(result.output.twist.angular_rps, 0.6 * 2.0 * std::sin(0.3), 1e-9);
+}
+
+TEST(PurePursuit, RotateInPlaceTurnsTowardTheTargetSide) {
+  FollowLayer layer{FollowParameters{}};
+  layer.tryAcceptPath(1, 1, straightPath(20.0, 0.25));
+  // Facing +y with the target at +x: target is on the right -> negative.
+  const FollowResult facing_left = layer.compute(Pose2D{0.0, 0.0, M_PI / 2.0}, freshInputs());
+  EXPECT_DOUBLE_EQ(facing_left.output.twist.linear_mps, 0.0);
+  EXPECT_DOUBLE_EQ(facing_left.output.twist.angular_rps, -0.3);
+  // Facing -y: target is on the left -> positive.
+  const FollowResult facing_right = layer.compute(Pose2D{0.0, 0.0, -M_PI / 2.0}, freshInputs());
+  EXPECT_DOUBLE_EQ(facing_right.output.twist.angular_rps, 0.3);
+}
+
+TEST(PurePursuit, CurvatureLimitsSpeedAndMatchesFormula) {
+  FollowLayer layer{FollowParameters{}};
+  layer.tryAcceptPath(1, 1, straightPath(20.0, 0.25));
+  // 0.5 m left of the path: target (1,0) -> lateral=-0.5, L^2=1.25, kappa=-0.8.
+  const FollowResult result = layer.compute(Pose2D{0.0, 0.5, 0.0}, freshInputs());
+  EXPECT_NEAR(result.output.twist.linear_mps, 0.4 / 0.8, 1e-9);  // w_max/|kappa|
+  EXPECT_NEAR(result.output.twist.angular_rps, -0.4, 1e-9);
+}
+
+TEST(PurePursuit, MinimumSpeedFloorAppliesAndAngularRateIsClamped) {
+  FollowParameters parameters;
+  parameters.v_min_mps = 0.55;  // above the curvature limit 0.5 for kappa=-0.8
+  FollowLayer layer{parameters};
+  layer.tryAcceptPath(1, 1, straightPath(20.0, 0.25));
+  const FollowResult result = layer.compute(Pose2D{0.0, 0.5, 0.0}, freshInputs());
+  EXPECT_NEAR(result.output.twist.linear_mps, 0.55, 1e-9);
+  EXPECT_NEAR(result.output.twist.angular_rps, -0.4, 1e-9);  // 0.55*-0.8 = -0.44 clamped
 }
 
 TEST(NullAvoidLayer, NeverAsserts) {
