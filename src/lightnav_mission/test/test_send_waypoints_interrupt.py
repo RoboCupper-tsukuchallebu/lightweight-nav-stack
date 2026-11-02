@@ -84,7 +84,7 @@ def test_sigint_cancels_goal_and_cli_exits_in_bounded_time(tmp_path):
             raise AssertionError("CLI が SIGINT 後に終了しなかった: " + process.communicate()[1])
         standard_error = process.stderr.read()
         assert exit_code == 1, standard_error
-        assert cancel_observed.wait(CANCEL_OBSERVE_TIMEOUT_S)
+        assert cancel_observed.wait(CANCEL_OBSERVE_TIMEOUT_S), standard_error
         assert "goal を cancel した" in standard_error
     finally:
         if process.poll() is None:

@@ -67,9 +67,14 @@ def main(argv=None) -> int:
             rclpy.spin_until_future_complete(node, result_future, executor=executor)
         except KeyboardInterrupt:
             # Ctrl-C ではロボットを走らせたまま終わらず、goal を cancel する
+            # 中断された executor は内部状態が壊れ得るので、cancel 用に作り直して回す
+            executor.shutdown()
+            cancel_executor = SingleThreadedExecutor(context=context)
+            cancel_executor.add_node(node)
             cancel_future = goal_handle.cancel_goal_async()
             rclpy.spin_until_future_complete(
-                node, cancel_future, executor=executor, timeout_sec=CANCEL_WAIT_S)
+                node, cancel_future, executor=cancel_executor, timeout_sec=CANCEL_WAIT_S)
+            cancel_executor.shutdown()
             if cancel_future.done():
                 print("Ctrl-C: goal を cancel した", file=sys.stderr)
             else:
