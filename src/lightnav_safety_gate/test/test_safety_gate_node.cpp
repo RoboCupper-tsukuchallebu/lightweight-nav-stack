@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <limits>
@@ -24,6 +25,7 @@ using std::chrono::milliseconds;
 // Kept away from the default domain 42 so a running stack is never touched.
 constexpr size_t kTestDomainId = 47;
 constexpr double kLoopPeriodSeconds = 0.02;
+constexpr double kCruiseSpeedMps = 0.3;  // forwardCommand() default
 const double kNaN = std::numeric_limits<double>::quiet_NaN();
 
 ObstacleStatus healthyStatus()
@@ -120,9 +122,15 @@ protected:
     activate();
     const ObstacleStatus status = healthyStatus();
     const VelocityCommand command = forwardCommand();
-    ASSERT_TRUE(runUntil([this] {return hasNonZeroOutput();}, &status, &command))
+    ASSERT_TRUE(runUntil(
+        [this] {return !received_.empty() && received_.back().linear.x == kCruiseSpeedMps;},
+        &status, &command))
       << "positive control failed";
     received_.clear();
+    // At least one cruise sample after the clear, so the first zero always has a predecessor.
+    ASSERT_TRUE(runUntil(
+        [this] {return !received_.empty() && received_.back().linear.x == kCruiseSpeedMps;},
+        &status, &command));
   }
 
   void expectLastIsZero(const char * label)
@@ -130,6 +138,13 @@ protected:
     ASSERT_FALSE(received_.empty()) << label;
     EXPECT_EQ(received_.back().linear.x, 0.0) << label;
     EXPECT_EQ(received_.back().angular.z, 0.0) << label;
+    // The stop must be a jump from cruise speed to 0, not a ramp.
+    size_t first_zero_index = 0;
+    while (first_zero_index < received_.size() && received_[first_zero_index].linear.x != 0.0) {
+      ++first_zero_index;
+    }
+    ASSERT_GT(first_zero_index, 0U) << label << ": no cruise sample before the first zero";
+    EXPECT_EQ(received_[first_zero_index - 1].linear.x, kCruiseSpeedMps) << label;
   }
 
   void expectAllZero()
@@ -265,6 +280,10 @@ TEST_F(SafetyGateNodeTest, deactivateSendsOneZeroThenStaysSilent)
   const size_t count_at_zero = received_.size();
   run(0.3, &status, &command);
   EXPECT_EQ(received_.size(), count_at_zero) << "published after the deactivate zero";
+  const auto zero_count = std::count_if(
+    received_.begin(), received_.end(),
+    [](const Twist & twist) {return twist.linear.x == 0.0 && twist.angular.z == 0.0;});
+  EXPECT_EQ(zero_count, 1) << "deactivate must publish exactly one zero";
 }
 
 TEST_F(SafetyGateNodeTest, reactivationDoesNotReuseOldInputs)
