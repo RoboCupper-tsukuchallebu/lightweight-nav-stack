@@ -49,3 +49,18 @@ TEST(PoseBuffer, rejects_outside_empty_and_nan_stamps) {
   EXPECT_FALSE(buffer.interpolate(2.01).has_value());
   EXPECT_FALSE(buffer.interpolate(std::numeric_limits<double>::quiet_NaN()).has_value());
 }
+
+TEST(PoseBufferPruning, DropsOldPosesButKeepsInterpolationAtTheCutoff) {
+  lightnav_localization::PoseBuffer buffer;
+  for (int second = 0; second <= 10; ++second) {
+    Eigen::Isometry3d pose = Eigen::Isometry3d::Identity();
+    pose.translation().x() = second;
+    buffer.add(second, pose);
+  }
+  buffer.prune_before(5.5);
+  EXPECT_EQ(buffer.size(), 6u);  // 5..10
+  EXPECT_NEAR(buffer.interpolate(5.5)->translation().x(), 5.5, 1e-9);
+  EXPECT_FALSE(buffer.interpolate(4.0).has_value());
+  EXPECT_TRUE(buffer.covers(10.0));
+  EXPECT_FALSE(buffer.covers(10.1));  // scan end stamp not yet covered: caller waits
+}
