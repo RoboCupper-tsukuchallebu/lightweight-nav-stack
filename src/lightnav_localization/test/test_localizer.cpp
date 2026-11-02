@@ -270,7 +270,8 @@ Report run(const Scenario& scenario) {
     report.saw_large_correction |= output->is_large_correction;
     if (previous_output_position) {
       report.max_output_speed_mps = std::max(
-          report.max_output_speed_mps, (output->map_to_base.translation() - *previous_output_position).norm() / kDt);
+          report.max_output_speed_mps,
+          (output->map_to_base.translation() - *previous_output_position).head<2>().norm() / kDt);  // z is not slewed
     }
     previous_output_position = output->map_to_base.translation();
     const double position_error = (output->map_to_base.translation() - truth.translation()).head<2>().norm();
