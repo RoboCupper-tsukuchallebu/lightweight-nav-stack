@@ -11,6 +11,7 @@ pixi run lint    # ruff check src
 ```
 
 - 実機・bag 再生用: `pixi run -e hardware ...`、評価用: `pixi run -e eval ...`
+- 試験（`pixi run test`）は `ROS_DOMAIN_ID=44`、`LOCALHOST` で走る（タスクの env が activation の env に勝つ。pixi 0.59 で実測）。GUI（43）と実機（42）に混ざらない。`tools/pytest_plugins/lightnav_test_environment.py` が pytest 起動時に 42 / 43 なら中止し、`lightnav_msgs` の試験が 44 を検証する。
 - 既定（activation）は `ROS_DOMAIN_ID=43`、`ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST`。`pixi shell` / `pixi run ...` すべてこの既定で、外から ROS_DOMAIN_ID を渡しても上書きされない（確認済み）。
 - pixi.lock は linux-64 と osx-arm64 でバージョンが異なる（例: Python 3.14 と 3.12）。Mac の試験結果は本番（Linux）の代わりにならない。
 - 初回ビルド前は `install/local_setup.sh` が無いため pixi が activation の警告を出すが、無視してよい。
@@ -33,7 +34,9 @@ pixi run lint    # ruff check src
 
 ## 独自 msg を使うノードの実行（macOS）
 
-- macOS の SIP が activation 経由の `DYLD_LIBRARY_PATH` を除去するため、独自 msg の typesupport を dlopen できない。ビルドは `--merge-install`（全ライブラリが `install/lib`）にし、`ros2` / `ros2-robot` / `test` タスクが `DYLD_LIBRARY_PATH=$PIXI_PROJECT_ROOT/install/lib` を env で渡す。
+- macOS の SIP は /bin/sh・/usr/bin/env などを通ると `DYLD_*` を落とす。`pixi run test` では colcon が試験を `/bin/sh -c ". hook && env -0"` で作った環境で起動するため、`DYLD_LIBRARY_PATH` が pytest に届かない（実測）。
+- 対策（パッケージ側の conftest や回避は不要）: (1) `pixi run build` が `CMAKE_INSTALL_RPATH=install/lib` を埋め込み、生成ライブラリの import は DYLD 無しで解決する。(2) typesupport の dlopen は起動時の `DYLD_LIBRARY_PATH` が必要なので、test タスクが `LIGHTNAV_DYLD_LIBRARY_PATH` で渡し、pytest プラグインが macOS でだけ DYLD 付きで pytest を再起動する。
+- ビルドは `--merge-install`（全ライブラリが `install/lib`）。`ros2` / `ros2-robot` タスクは従来どおり env で `DYLD_LIBRARY_PATH` を渡す。
 - `pixi run ros2 run ...` / `pixi run ros2 launch ...` と `pixi run test` を使う。素の `pixi run python ノード.py` は Mac では失敗する。
 
 ## テストの書き方
