@@ -11,7 +11,8 @@ pixi run lint    # ruff check src
 ```
 
 - 実機・bag 再生用: `pixi run -e hardware ...`、評価用: `pixi run -e eval ...`
-- `ROS_DOMAIN_ID=42`。CI は `ROS_LOCALHOST_ONLY=1`。
+- 通常は `ROS_DOMAIN_ID=42`。`test` タスクだけ別ドメイン（43）と localhost 限定に上書きする。
+- pixi.lock は linux-64 と osx-arm64 でバージョンが異なる（例: Python 3.14 と 3.12）。Mac の試験結果は本番（Linux）の代わりにならない。
 - 初回ビルド前は `install/local_setup.sh` が無いため pixi が activation の警告を出すが、無視してよい。
 
 ## パッケージ配置
@@ -20,7 +21,8 @@ pixi run lint    # ruff check src
 
 ## 禁止事項
 
-- 実機を駆動する publish（`/cmd_vel` など）やモーター有効化を、人の承認なしに行わない。
+- 次の操作は人の承認なしに行わない: 駆動系トピックの publish（`/cmd_vel` など）、駆動系サービスの call（モーター有効化など）、ファーム書き込み、リポジトリ外への破壊的操作。
+- 実機を接続している PC（ドライバ起動中を含む）で試験する場合は、必ず `pixi run test`（`ROS_DOMAIN_ID=43`、`ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST`）を使う。実機のドメイン 42 で試験用ノードを動かさない。
 - `nav2_*` への依存を入れない（CI が package.xml / CMakeLists.txt / pixi.toml を検査する）。
 - 変数名を省略しない（`pos` ではなく `position` など）。
 - マージは人間が行う。force push・履歴書き換えをしない。

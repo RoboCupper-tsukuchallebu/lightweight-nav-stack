@@ -43,5 +43,6 @@ env = { ROS_DOMAIN_ID = "42" }
 [tasks]
 # No --symlink-install: it fails with recent setuptools.
 build = "colcon build --base-paths src --cmake-args -DCMAKE_BUILD_TYPE=Release"
-test = { cmd = "colcon test --base-paths src --return-code-on-test-failure && colcon test-result --verbose", depends-on = ["build"] }
+# Tests run on a separate domain, localhost only, so they never reach a real robot on domain 42.
+test = { cmd = "colcon test --base-paths src --return-code-on-test-failure && colcon test-result --verbose", depends-on = ["build"], env = { ROS_DOMAIN_ID = "43", ROS_AUTOMATIC_DISCOVERY_RANGE = "LOCALHOST" } }
 lint = "ruff check src"
