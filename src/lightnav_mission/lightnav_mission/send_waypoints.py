@@ -5,6 +5,8 @@ import sys
 
 import rclpy
 from rclpy.action import ActionClient
+from rclpy.executors import SingleThreadedExecutor
+from rclpy.signals import SignalHandlerOptions
 
 from lightnav_mission.waypoint_files import WaypointFileError, load_waypoints_file
 from lightnav_msgs.action import FollowWaypoints
@@ -32,8 +34,12 @@ def main(argv=None) -> int:
         print("start-index が範囲外", file=sys.stderr)
         return EXIT_FAILED
 
-    rclpy.init()
-    node = rclpy.create_node("send_waypoints")
+    # 既定のシグナルハンドラは SIGINT で context を shutdown し、cancel が送れなくなる
+    context = rclpy.Context()
+    rclpy.init(context=context, signal_handler_options=SignalHandlerOptions.NO)
+    node = rclpy.create_node("send_waypoints", context=context)
+    executor = SingleThreadedExecutor(context=context)
+    executor.add_node(node)
     client = ActionClient(node, FollowWaypoints, arguments.action_name)
     try:
         if not client.wait_for_server(timeout_sec=SERVER_WAIT_S):
@@ -51,18 +57,19 @@ def main(argv=None) -> int:
                 f" dist={message.feedback.distance_to_waypoint_m:.2f}"
             ),
         )
-        rclpy.spin_until_future_complete(node, send_future)
+        rclpy.spin_until_future_complete(node, send_future, executor=executor)
         goal_handle = send_future.result()
         if not goal_handle.accepted:
             print("goal が reject された", file=sys.stderr)
             return EXIT_FAILED
         result_future = goal_handle.get_result_async()
         try:
-            rclpy.spin_until_future_complete(node, result_future)
+            rclpy.spin_until_future_complete(node, result_future, executor=executor)
         except KeyboardInterrupt:
             # Ctrl-C ではロボットを走らせたまま終わらず、goal を cancel する
             cancel_future = goal_handle.cancel_goal_async()
-            rclpy.spin_until_future_complete(node, cancel_future, timeout_sec=CANCEL_WAIT_S)
+            rclpy.spin_until_future_complete(
+                node, cancel_future, executor=executor, timeout_sec=CANCEL_WAIT_S)
             if cancel_future.done():
                 print("Ctrl-C: goal を cancel した", file=sys.stderr)
             else:
@@ -74,9 +81,9 @@ def main(argv=None) -> int:
     except KeyboardInterrupt:
         return EXIT_FAILED
     finally:
+        executor.shutdown()
         node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+        context.try_shutdown()
 
 
 if __name__ == "__main__":

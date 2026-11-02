@@ -7,11 +7,14 @@ import time
 import pytest
 import rclpy
 from geometry_msgs.msg import PoseStamped
+from lifecycle_msgs.msg import Transition
+from lifecycle_msgs.srv import ChangeState
 from lightnav_mission.mission_node import MissionNode
 from nav_msgs.msg import Path
 from rclpy.action import ActionClient
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
+from rclpy.lifecycle import TransitionCallbackReturn
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
@@ -45,6 +48,7 @@ class Harness(Node):
         self.planner_requests = []
         self.received_paths = []
         self.pose_x = 0.0
+        self.is_pose_published = True
         self.create_service(PlanPath, "/lightnav/planner/plan_path", self._plan, callback_group=group)
         self.create_subscription(
             PathWithId, "/lightnav/path", self.received_paths.append,
@@ -59,8 +63,13 @@ class Harness(Node):
         self.action_client = ActionClient(
             self, FollowWaypoints, "/lightnav/mission/follow_waypoints", callback_group=group)
         self.pause_client = self.create_client(Trigger, "/lightnav/mission/pause", callback_group=group)
+        self.resume_client = self.create_client(Trigger, "/lightnav/mission/resume", callback_group=group)
+        self.change_state_client = self.create_client(
+            ChangeState, "/lightnav_mission/change_state", callback_group=group)
 
     def _publish_pose(self):
+        if not self.is_pose_published:
+            return
         message = PoseStamped()
         message.header.frame_id = "map"
         message.pose.position.x = self.pose_x
@@ -110,7 +119,7 @@ class Harness(Node):
 
 
 @pytest.fixture
-def rig():
+def unconfigured_rig():
     if not rclpy.ok():
         rclpy.init()
     overrides = [
@@ -124,14 +133,20 @@ def rig():
     executor.add_node(harness)
     thread = threading.Thread(target=executor.spin, daemon=True)
     thread.start()
-    mission.trigger_configure()
-    mission.trigger_activate()
-    assert harness.action_client.wait_for_server(timeout_sec=5.0)
     yield mission, harness
     with contextlib.suppress(Exception):  # 試験内で deactivate 済みなら失敗するので無視
         mission.trigger_deactivate()
     executor.shutdown()
     thread.join(timeout=2.0)
+
+
+@pytest.fixture
+def rig(unconfigured_rig):
+    mission, harness = unconfigured_rig
+    mission.trigger_configure()
+    mission.trigger_activate()
+    assert harness.action_client.wait_for_server(timeout_sec=5.0)
+    return mission, harness
 
 
 def call_trigger(harness, client):
@@ -239,3 +254,71 @@ def test_large_correction_replans_only_on_rising_edge(rig):
     time.sleep(0.5)
     assert mission._was_large_correction, 'status not received'
     assert len(harness.planner_requests) == 2, (mission._state, mission._is_large_correction_pending)
+
+
+def change_state(harness, transition_id):
+    request = ChangeState.Request()
+    request.transition.id = transition_id
+    future = harness.change_state_client.call_async(request)
+    assert wait_until(future.done)
+    return future.result().success
+
+
+def test_lifecycle_transitions_work_through_change_state_service(unconfigured_rig):
+    _mission, harness = unconfigured_rig
+    assert harness.change_state_client.wait_for_service(timeout_sec=5.0)
+    assert change_state(harness, Transition.TRANSITION_CONFIGURE)
+    assert change_state(harness, Transition.TRANSITION_ACTIVATE)
+    assert harness.action_client.wait_for_server(timeout_sec=5.0)
+
+
+def test_reconfigure_after_cleanup_succeeds(rig):
+    mission, harness = rig
+    for trigger in (mission.trigger_deactivate, mission.trigger_cleanup,
+                    mission.trigger_configure, mission.trigger_activate):
+        assert trigger() == TransitionCallbackReturn.SUCCESS
+    assert harness.action_client.wait_for_server(timeout_sec=5.0)
+    assert harness.result_of(harness.send_goal([0.0])).result.success
+
+
+def test_preempt_stops_old_path_and_accepts_pause_while_planning(rig):
+    _mission, harness = rig
+    harness.send_goal([50.0])
+    assert wait_until(lambda: harness.non_empty_paths())
+    gate = threading.Event()
+    harness.planner_behaviors[1] = {"wait": gate}
+    harness.send_goal([60.0])
+    assert wait_until(lambda: len(harness.planner_requests) == 2)
+    assert wait_until(lambda: harness.received_paths[-1].path.poses == [])
+    assert call_trigger(harness, harness.pause_client).success
+    gate.set()
+
+
+def test_pause_right_after_resume_is_honoured(rig):
+    mission, harness = rig
+    harness.send_goal([50.0])
+    assert wait_until(lambda: harness.non_empty_paths())
+    assert call_trigger(harness, harness.pause_client).success
+    assert wait_until(lambda: mission._state.value == "PAUSED")
+    assert call_trigger(harness, harness.resume_client).success
+    assert call_trigger(harness, harness.pause_client).success
+    time.sleep(1.0)
+    assert mission._state.value == "PAUSED"
+    assert harness.received_paths[-1].path.poses == []
+
+
+def test_large_correction_with_lost_pose_defers_instead_of_aborting(rig):
+    mission, harness = rig
+    harness.send_goal([50.0])
+    assert wait_until(lambda: harness.non_empty_paths())
+    harness.create_timer(
+        0.2, lambda: harness.publish_follow_status(mission._session_id, mission._path_id))
+    harness.is_pose_published = False
+    time.sleep(0.8)
+    message = LocalizationStatus()
+    message.is_large_correction = True
+    harness.localization_publisher.publish(message)
+    time.sleep(3.0)  # plan_timeout_s (2 s) を超えて待つ
+    assert mission._state.value != "IDLE"
+    harness.is_pose_published = True
+    assert wait_until(lambda: len(harness.planner_requests) == 2)

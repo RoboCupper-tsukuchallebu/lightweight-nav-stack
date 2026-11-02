@@ -82,8 +82,8 @@ class MissionNode(LifecycleNode):
         self._latest_follow_status: FollowStatus | None = None
         self._localization_state = LOCALIZATION_STATE_UNKNOWN
         self._is_large_correction_pending = False
-        self._parameters = {}
-        self._services, self._subscriptions = [], []
+        self._mission_parameters = {}
+        self._mission_services, self._mission_subscriptions = [], []
         self._follow_status_time_s = 0.0
         self._was_large_correction = False
         for name, default in PARAMETER_DEFAULTS.items():
@@ -93,11 +93,11 @@ class MissionNode(LifecycleNode):
     # ---- lifecycle ----
 
     def on_configure(self, previous_state) -> TransitionCallbackReturn:
-        self._parameters = {name: self.get_parameter(name).value for name in PARAMETER_DEFAULTS}
+        self._mission_parameters = {name: self.get_parameter(name).value for name in PARAMETER_DEFAULTS}
         if (
-            any(self._parameters[name] <= 0 for name in POSITIVE_PARAMETERS)
-            or any(self._parameters[name] < 0 for name in NON_NEGATIVE_PARAMETERS)
-            or not self._parameters["pose_topic"]
+            any(self._mission_parameters[name] <= 0 for name in POSITIVE_PARAMETERS)
+            or any(self._mission_parameters[name] < 0 for name in NON_NEGATIVE_PARAMETERS)
+            or not self._mission_parameters["pose_topic"]
         ):
             self.get_logger().error("パラメータ不正")
             return TransitionCallbackReturn.FAILURE
@@ -113,21 +113,21 @@ class MissionNode(LifecycleNode):
         )
         self._path_publisher = self.create_lifecycle_publisher(
             PathWithId, "/lightnav/path", path_qos)
-        self._subscriptions.append(self.create_subscription(
-            PoseStamped, self._parameters["pose_topic"], self._on_pose, 10,
+        self._mission_subscriptions.append(self.create_subscription(
+            PoseStamped, self._mission_parameters["pose_topic"], self._on_pose, 10,
             callback_group=group))
-        self._subscriptions.append(self.create_subscription(
+        self._mission_subscriptions.append(self.create_subscription(
             FollowStatus, "/lightnav/follow_status", self._on_follow_status, 10,
             callback_group=group))
-        if self._parameters["localization_status_topic"]:
-            self._subscriptions.append(self.create_subscription(
-                LocalizationStatus, self._parameters["localization_status_topic"],
+        if self._mission_parameters["localization_status_topic"]:
+            self._mission_subscriptions.append(self.create_subscription(
+                LocalizationStatus, self._mission_parameters["localization_status_topic"],
                 self._on_localization_status, status_qos, callback_group=group))
         self._plan_client = self.create_client(
             PlanPath, "/lightnav/planner/plan_path", callback_group=group)
-        self._services.append(self.create_service(
+        self._mission_services.append(self.create_service(
             Trigger, "/lightnav/mission/pause", self._on_pause, callback_group=group))
-        self._services.append(self.create_service(
+        self._mission_services.append(self.create_service(
             Trigger, "/lightnav/mission/resume", self._on_resume, callback_group=group))
         self._action_server = ActionServer(
             self, FollowWaypoints, "/lightnav/mission/follow_waypoints",
@@ -148,13 +148,13 @@ class MissionNode(LifecycleNode):
 
     def on_cleanup(self, previous_state) -> TransitionCallbackReturn:
         self._action_server.destroy()
-        for service in self._services:
+        for service in list(self._mission_services):
             self.destroy_service(service)
-        for subscription in self._subscriptions:
+        for subscription in list(self._mission_subscriptions):
             self.destroy_subscription(subscription)
         self.destroy_client(self._plan_client)
         self.destroy_publisher(self._path_publisher)
-        self._services, self._subscriptions = [], []
+        self._mission_services, self._mission_subscriptions = [], []
         return TransitionCallbackReturn.SUCCESS
 
     # ---- 入力 ----
@@ -180,11 +180,12 @@ class MissionNode(LifecycleNode):
         self._was_large_correction = message.is_large_correction
 
     def _on_pause(self, request, response):
-        # PAUSED 中の再送は成功扱いの no-op（フラグに触らない）
-        if self._state is MissionState.FOLLOWING:
+        # PAUSED 中の再送や resume 直後の pause でも要求を立てる（再開させない）
+        response.success = self._state in (
+            MissionState.FOLLOWING, MissionState.PLANNING, MissionState.PAUSED)
+        if response.success:
             self._is_pause_requested = True
-        response.success = self._state in (MissionState.FOLLOWING, MissionState.PAUSED)
-        response.message = "" if response.success else "FOLLOWING 中のみ pause できる"
+        response.message = "" if response.success else "実行中の goal が無い"
         return response
 
     def _on_resume(self, request, response):
@@ -279,18 +280,22 @@ class MissionNode(LifecycleNode):
     def _is_pose_fresh(self) -> bool:
         return (
             self._latest_pose is not None
-            and self._now_s() - self._latest_pose_time_s <= self._parameters["pose_timeout_s"]
+            and self._now_s() - self._latest_pose_time_s <= self._mission_parameters["pose_timeout_s"]
         )
 
     def _begin_plan(self, waypoints, index) -> "PendingPlan":
         """計画要求を作る。応答待ちは tick ごとに _poll_plan で行い、スレッドをブロックしない。"""
         return PendingPlan(
             waypoints=waypoints, index=index,
-            deadline_s=self._now_s() + self._parameters["plan_timeout_s"])
+            deadline_s=self._now_s() + self._mission_parameters["plan_timeout_s"])
 
     def _poll_plan(self, pending: "PendingPlan"):
         """戻り値: ("waiting"|"failed"|"done", 理由, 経路, 経路 index 列)。"""
         if pending.future is None:
+            if not self._is_pose_fresh():
+                # 姿勢途絶中は計画を保留する（abort しない）。復帰後に改めて期限を数える
+                pending.deadline_s = self._now_s() + self._mission_parameters["plan_timeout_s"]
+                return "waiting", "", None, None
             if self._now_s() > pending.deadline_s:
                 return "failed", "姿勢またはPlanPathサービスが得られずタイムアウト", None, None
             if not (self._is_pose_fresh() and self._plan_client.service_is_ready()):
@@ -327,11 +332,17 @@ class MissionNode(LifecycleNode):
     def _run_goal(self, goal_handle, generation):
         waypoints = list(goal_handle.request.waypoints)
         index = goal_handle.request.start_index
-        parameters = self._parameters
+        parameters = self._mission_parameters
         with self._generation_lock:
-            self._is_pause_requested = False
-            self._is_large_correction_pending = False
-            self._state = next_state(self._state, MissionEvent.GOAL_ACCEPTED)
+            is_superseded = not self._is_current(generation)
+            if not is_superseded:
+                if self._state is not MissionState.IDLE:
+                    self._publish_path_locked()  # preempt: 古い経路で走らせたまま計画を待たない
+                self._is_pause_requested = False
+                self._is_large_correction_pending = False
+                self._state = next_state(self._state, MissionEvent.GOAL_ACCEPTED)
+        if is_superseded:
+            return self._finish(goal_handle, generation, False, "開始前に打ち切られた", index)
         pending = self._begin_plan(waypoints, index)
         path_indices, plan_offset = None, index
         tracker = NoMotionTracker()

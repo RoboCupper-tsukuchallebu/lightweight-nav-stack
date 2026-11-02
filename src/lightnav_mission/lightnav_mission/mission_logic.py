@@ -33,6 +33,7 @@ _TRANSITIONS = {
     (MissionState.PLANNING, MissionEvent.PLAN_SUCCEEDED): MissionState.FOLLOWING,
     (MissionState.PLANNING, MissionEvent.PLAN_FAILED): MissionState.IDLE,
     (MissionState.FOLLOWING, MissionEvent.PAUSE): MissionState.PAUSED,
+    (MissionState.PLANNING, MissionEvent.PAUSE): MissionState.PAUSED,
     (MissionState.PAUSED, MissionEvent.RESUME): MissionState.PLANNING,
     (MissionState.FOLLOWING, MissionEvent.FINAL_REACHED): MissionState.IDLE,
 }
