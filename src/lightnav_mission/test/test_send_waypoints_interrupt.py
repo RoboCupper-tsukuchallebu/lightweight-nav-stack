@@ -6,6 +6,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 
 import rclpy
 import yaml
@@ -20,6 +21,7 @@ TEST_DOMAIN_ID = "48"
 GOAL_START_TIMEOUT_S = 15.0
 PROCESS_EXIT_TIMEOUT_S = 10.0
 CANCEL_OBSERVE_TIMEOUT_S = 5.0
+EXECUTE_DEADLINE_S = 20.0
 
 
 def test_sigint_cancels_goal_and_cli_exits_in_bounded_time(tmp_path):
@@ -31,8 +33,12 @@ def test_sigint_cancels_goal_and_cli_exits_in_bounded_time(tmp_path):
 
     def execute(goal_handle):
         goal_running.set()
-        while not goal_handle.is_cancel_requested:
+        deadline = time.monotonic() + EXECUTE_DEADLINE_S
+        while not goal_handle.is_cancel_requested and time.monotonic() < deadline:
             threading.Event().wait(0.02)
+        if not goal_handle.is_cancel_requested:
+            goal_handle.abort()  # cancel が届かなかった場合も有限時間で終わる
+            return FollowWaypoints.Result()
         cancel_observed.set()
         goal_handle.canceled()
         return FollowWaypoints.Result()
@@ -56,11 +62,15 @@ def test_sigint_cancels_goal_and_cli_exits_in_bounded_time(tmp_path):
     }
     process = subprocess.Popen(
         [sys.executable, "-m", "lightnav_mission.send_waypoints", str(waypoints_file)],
-        env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
     try:
         assert goal_running.wait(GOAL_START_TIMEOUT_S), "goal が実行開始しなかった"
         process.send_signal(signal.SIGINT)
-        exit_code = process.wait(timeout=PROCESS_EXIT_TIMEOUT_S)
+        try:
+            exit_code = process.wait(timeout=PROCESS_EXIT_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            raise AssertionError("CLI が SIGINT 後に終了しなかった: " + process.communicate()[1])
         standard_error = process.stderr.read()
         assert exit_code == 1, standard_error
         assert cancel_observed.wait(CANCEL_OBSERVE_TIMEOUT_S)
@@ -69,7 +79,6 @@ def test_sigint_cancels_goal_and_cli_exits_in_bounded_time(tmp_path):
         if process.poll() is None:
             process.kill()
             process.wait()
-        process.stdout.close()
         process.stderr.close()
         executor.shutdown()
         spin_thread.join(timeout=2.0)
