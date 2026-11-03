@@ -1,0 +1,77 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Enabled: true
+    - Class: rviz_default_plugins/PointCloud2
+      Name: Velodyne points
+      Enabled: true
+      Topic:
+        Value: /velodyne_points
+        Reliability Policy: Best Effort
+      Size (m): 0.03
+      Style: Points
+    - Class: rviz_default_plugins/LaserScan
+      Name: Scan
+      Enabled: true
+      Topic:
+        Value: /scan
+        Reliability Policy: Best Effort
+      Size (m): 0.05
+      Style: Spheres
+      Color: 255; 0; 0
+      Color Transformer: FlatColor
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Sim markers
+      Enabled: true
+      Topic:
+        Value: /lightnav/sim/markers
+    - Class: rviz_default_plugins/Path
+      Name: Path (lightnav/path)
+      Enabled: true
+      Topic:
+        Value: /lightnav/sim/path_view
+        Reliability Policy: Reliable
+        Durability Policy: Transient Local
+    - Class: rviz_default_plugins/Pose
+      Name: Localized pose (pose_adapter)
+      Enabled: true
+      Topic:
+        Value: /lightnav/pose
+    - Class: rviz_default_plugins/Map
+      Name: Local grid (obstacle_monitor)
+      Enabled: true
+      Topic:
+        Value: /lightnav/local_grid
+  Enabled: true
+  Global Options:
+    Fixed Frame: map
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/MoveCamera
+  Value: true
+  Views:
+    Current:
+      Angle: 0
+      Class: rviz_default_plugins/TopDownOrtho
+      Scale: 45
+      X: 7
+      Y: 0
+    Saved: ~
+Window Geometry:
+  Displays:
+    collapsed: false
+  Height: 900
+  Width: 1400
+  X: 80
+  Y: 60
+  Hide Left Dock: false
+  Hide Right Dock: true

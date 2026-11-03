@@ -26,6 +26,12 @@ ArbitrationResult arbitrate(const ArbitrationInput& input) {
     return makeStop(StopReason::kPoseStale);
   }
   if (input.avoid.is_asserted && input.is_grid_fresh) {
+    if (input.avoid.reason != StopReason::kOk) {
+      // Avoid layer is waiting (no feasible arc / stuck): hold still and say why.
+      ArbitrationResult waiting = makeStop(input.avoid.reason);
+      waiting.source_layer = Layer::kAvoid;
+      return waiting;
+    }
     return makeAdopted(input.avoid, Layer::kAvoid);
   }
   if (input.follow.is_asserted) {

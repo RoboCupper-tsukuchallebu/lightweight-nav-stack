@@ -11,7 +11,7 @@ pixi run lint    # ruff check src
 ```
 
 - 実機・bag 再生用: `pixi run -e hardware ...`、評価用: `pixi run -e eval ...`
-- 試験（`pixi run test`）は `ROS_DOMAIN_ID=44`、`LOCALHOST` で走る（タスクの env が activation の env に勝つ。pixi 0.59 で実測）。GUI（43）と実機（42）に混ざらない。`tools/pytest_plugins/lightnav_test_environment.py` が pytest 起動時に 44 以外はすべて中止し、`lightnav_msgs` の試験が 44 と中止の配線を検証する。この中止は `pixi run test` の中だけで効く。`pixi shell` から直接 `colcon test` を実行すると task env もプラグインも無く、既定の 43 で走り中止もされないので、試験は必ず `pixi run test` で実行する。
+- 試験（`pixi run test`）は `ROS_DOMAIN_ID=44`、`LOCALHOST` で走る（タスクの env が activation の env に勝つ。pixi 0.59 で実測）。GUI（43）と実機（42）に混ざらない。`tools/pytest_plugins/lightnav_test_environment.py` が pytest 起動時に 44 以外はすべて中止し、`lightnav_msgs` の試験が 44 と中止の配線を検証する。この中止は `pixi run test` の中だけで効く。`pixi shell` から直接 `colcon test` を実行すると task env もプラグインも無く、既定の 43 で走り中止もされないので、試験は必ず `pixi run test` で実行する。パッケージは 1 つずつ順に走る（`--executor sequential`）。全パッケージの試験が同じドメイン 44 で同じトピック名・サービス名（`/lightnav/planner/plan_path`、`/lightnav/path`、`/lightnav/pose` など）を使うので、並列にすると互いの通信が見えて試験が壊れる。1 つのパッケージの試験を直しても並列には戻さない。
 - `pixi run test` は常にドメイン 44 で走るので、複数の worktree で同時に実行しない（トピックが混ざるおそれがある）。
 - 既定（activation）は `ROS_DOMAIN_ID=43`、`ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST`。`pixi shell` / `pixi run ...` すべてこの既定で、外から ROS_DOMAIN_ID を渡しても上書きされない（確認済み）。
 - pixi.lock は linux-64 と osx-arm64 でバージョンが異なる（例: Python 3.14 と 3.12）。Mac の試験結果は本番（Linux）の代わりにならない。
