@@ -37,3 +37,7 @@ jobs:
           cache: true
       - run: pixi run lint
       - run: pixi run test
+      # `pixi run test` stops before `colcon test-result` on failure, so print which tests failed.
+      - name: Show failed tests
+        if: failure()
+        run: pixi run colcon test-result --verbose
