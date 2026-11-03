@@ -51,7 +51,9 @@ build = "colcon build --merge-install --base-paths src --cmake-args -DCMAKE_BUIL
 # cannot mix TF into tests. The task env overrides the [activation] env (checked with pixi 0.59), and the
 # plugin aborts the run unless the value is exactly 44. colcon and SIP strip DYLD_LIBRARY_PATH, so it is
 # passed as LIGHTNAV_DYLD_LIBRARY_PATH and restored by the plugin (see CLAUDE.md).
-test = { cmd = "PYTHONPATH=$PIXI_PROJECT_ROOT/tools/pytest_plugins:$PYTHONPATH colcon test --merge-install --base-paths src --return-code-on-test-failure && colcon test-result --verbose", depends-on = ["build"], env = { ROS_DOMAIN_ID = "44", ROS_AUTOMATIC_DISCOVERY_RANGE = "LOCALHOST", PYTEST_PLUGINS = "lightnav_test_environment", LIGHTNAV_DYLD_LIBRARY_PATH = "$PIXI_PROJECT_ROOT/install/lib" } }
+# Packages run one at a time: all package tests share domain 44 and the same topic and service names
+# (e.g. /lightnav/planner/plan_path, /lightnav/path, /lightnav/pose), so parallel packages see each other.
+test = { cmd = "PYTHONPATH=$PIXI_PROJECT_ROOT/tools/pytest_plugins:$PYTHONPATH colcon test --merge-install --base-paths src --executor sequential --return-code-on-test-failure && colcon test-result --verbose", depends-on = ["build"], env = { ROS_DOMAIN_ID = "44", ROS_AUTOMATIC_DISCOVERY_RANGE = "LOCALHOST", PYTEST_PLUGINS = "lightnav_test_environment", LIGHTNAV_DYLD_LIBRARY_PATH = "$PIXI_PROJECT_ROOT/install/lib" } }
 lint = "ruff check src"
 # macOS SIP strips DYLD_LIBRARY_PATH set by activation, so pass it as task env.
 # `pixi run ros2 run|launch ...` resolves to this task, so follow-up PRs need nothing special.
