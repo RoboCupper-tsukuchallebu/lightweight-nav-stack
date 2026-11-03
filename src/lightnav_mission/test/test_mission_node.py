@@ -205,15 +205,21 @@ def test_cancel_during_planning_is_prompt(rig):
     _mission, harness = rig
     gate = threading.Event()
     harness.planner_behaviors[0] = {"wait": gate}
-    goal_handle = harness.send_goal([5.0])
-    assert wait_until(lambda: harness.planner_requests)
-    started = time.monotonic()
-    cancel_future = goal_handle.cancel_goal_async()
-    assert wait_until(cancel_future.done)
-    result = harness.result_of(goal_handle, timeout_s=1.0)
-    assert time.monotonic() - started < 0.5
-    assert not result.result.success
-    gate.set()
+    try:
+        goal_handle = harness.send_goal([5.0])
+        assert wait_until(lambda: harness.planner_requests)
+        path_count = len(harness.received_paths)
+        started = time.monotonic()
+        cancel_future = goal_handle.cancel_goal_async()
+        assert wait_until(
+            lambda: any(not path.path.poses for path in harness.received_paths[path_count:]),
+            timeout_s=0.3)
+        assert time.monotonic() - started < 0.3
+        assert wait_until(cancel_future.done)
+        result = harness.result_of(goal_handle, timeout_s=WAIT_TIMEOUT_S)
+        assert not result.result.success
+    finally:
+        gate.set()
 
 
 def test_preempted_plan_does_not_override_new_goal(rig):
