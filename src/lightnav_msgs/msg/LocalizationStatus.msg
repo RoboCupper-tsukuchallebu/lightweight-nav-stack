@@ -10,7 +10,7 @@ uint8 MODE_LOCALIZATION=0
 uint8 MODE_MAPPING=1
 uint8 mode
 bool is_large_correction        # 未適用の補正が閾値超え → mission は再計画
-bool is_gps_conflict            # 地図照合と GPS が連続して矛盾
+bool is_gps_conflict            # 地図照合の有無によらず、直近の窓でゲート棄却相当の GPS の割合が閾値以上
 float32 pending_correction_m
 float32 last_inlier_ratio       # 地図照合
 float32 last_lidar_odom_inlier_ratio

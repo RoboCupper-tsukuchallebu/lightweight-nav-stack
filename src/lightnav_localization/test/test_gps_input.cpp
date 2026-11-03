@@ -195,5 +195,5 @@ TEST(GpsInput, OrdinaryFixUsesMahalanobisGateBeyondTwoMeters) {
   EXPECT_TRUE(decision.measurement);
   EXPECT_EQ(decision.rejection, GpsRejection::kNone);
   ASSERT_TRUE(decision.gate_would_reject);
-  EXPECT_TRUE(*decision.gate_would_reject);
+  EXPECT_FALSE(*decision.gate_would_reject);
 }

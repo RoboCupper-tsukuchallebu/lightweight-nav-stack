@@ -71,7 +71,7 @@ GpsDecision GpsConverter::evaluate(const GpsFix& fix, const Eigen::Isometry3d& p
   const double horizontal_distance = difference.head<2>().norm();
   const bool absolute_rejection = horizontal_distance > parameters_.gps_absolute_gate_m;
   const bool mahalanobis_rejection = horizontal_distance / combined_std > parameters_.gate_mahalanobis;
-  decision.gate_would_reject = absolute_rejection || mahalanobis_rejection;
+  decision.gate_would_reject = mahalanobis_rejection || (trusted_fix && absolute_rejection);
   // Keep the conflict diagnostic independent of the recovery allowance.
   const double trusted_gate_distance_m = std::max(
       parameters_.gps_absolute_gate_m, parameters_.gate_mahalanobis * predicted_position_std_m);

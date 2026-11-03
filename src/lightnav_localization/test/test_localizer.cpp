@@ -800,7 +800,8 @@ TEST(Localizer, DegenerateCorridorWithoutGpsDoesNotBecomeLostOver150Meters) {
   Scenario scenario;
   scenario.is_open_corridor = true;
   scenario.open_corridor_length_m = 150.0;
-  // Isolate uncertainty growth while map matches remain fresh; wheel drift is tested separately.
+  // This covers ideal wheel scale (1.0) while map matches remain fresh.
+  // With 5% scale drift, matching was lost and the estimator became LOST; see MEASUREMENTS.md.
   scenario.wheel_scale = 1.0;
   scenario.is_gps_enabled = false;
   const Report report = run(scenario);
