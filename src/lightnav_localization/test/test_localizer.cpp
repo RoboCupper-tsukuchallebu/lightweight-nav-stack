@@ -137,6 +137,10 @@ struct Report {
   double max_pitch_error_deg = 0.0;          // whole run, includes the ramp entry transient
   double max_pitch_error_on_ramp_deg = 0.0;  // truth x in [5, 15] m: the whole climb
   double pitch_step_recovery_sec = std::numeric_limits<double>::quiet_NaN();
+  double max_pitch_error_after_step_entry_deg = 0.0;
+  double max_pitch_error_after_step_exit_deg = 0.0;
+  int pitch_samples_after_step_entry = 0;
+  int pitch_samples_after_step_exit = 0;
   double max_output_speed_mps = 0.0;
   double final_position_error_m = 0.0;
   std::string last_error;
@@ -311,6 +315,18 @@ Report run(const Scenario& scenario) {
       report.pitch_step_recovery_sec = has_observed_pitch_step ? time_sec - *pitch_step_begin_sec : 0.0;
     }
     if (pitch_step_begin_sec) has_observed_pitch_step = true;
+    if (scenario.has_ramp && scenario.ramp_blend_m == 0.0) {
+      if (time_sec >= 5.0 / kSpeed + 0.3 && time_sec < 15.0 / kSpeed) {
+        report.max_pitch_error_after_step_entry_deg =
+            std::max(report.max_pitch_error_after_step_entry_deg, pitch_error_deg);
+        ++report.pitch_samples_after_step_entry;
+      }
+      if (time_sec >= 15.0 / kSpeed + 0.3) {
+        report.max_pitch_error_after_step_exit_deg =
+            std::max(report.max_pitch_error_after_step_exit_deg, pitch_error_deg);
+        ++report.pitch_samples_after_step_exit;
+      }
+    }
     report.max_pitch_error_deg = std::max(report.max_pitch_error_deg, pitch_error_deg);
     if (truth.translation().x() >= 5.0 && truth.translation().x() <= 15.0) {
       report.max_pitch_error_on_ramp_deg = std::max(report.max_pitch_error_on_ramp_deg, pitch_error_deg);
@@ -340,9 +356,12 @@ Report run(const Scenario& scenario) {
   report.last_error = localizer.last_error();
   report.wheel_only_end_error_m = (wheel_only.translation() - truth_at(course.total_sec()).translation()).head<2>().norm();
   const auto* test_info = ::testing::UnitTest::GetInstance()->current_test_info();
-  std::printf("[ MEASURED ] scenario=%s error_m=%.9g final_error_m=%.9g pitch_error_ramp_deg=%.9g pitch_step_recovery_sec=%.9g scan_period_sec=%.9g wheel_sigma=%.9g gps_sigma=%.9g degeneracy_ratio=%.9g pillars=%d gps_accepted_before_10s=%d gps_accepted_10_to_20s=%d gps_accepted_after_20s=%d samples=time_sec,truth_x_m,pitch_error_deg,along_track_error_m,position_std_m,eigen_ratio,weak_axis_x,weak_axis_y,weak_axis_z:",
+  std::printf("[ MEASURED ] scenario=%s error_m=%.9g final_error_m=%.9g pitch_error_ramp_deg=%.9g pitch_step_recovery_sec=%.9g pitch_error_after_step_entry_deg=%.9g pitch_error_after_step_exit_deg=%.9g pitch_samples_after_step_entry=%d pitch_samples_after_step_exit=%d scan_period_sec=%.9g wheel_sigma=%.9g gps_sigma=%.9g degeneracy_ratio=%.9g pillars=%d gps_accepted_before_10s=%d gps_accepted_10_to_20s=%d gps_accepted_after_20s=%d samples=time_sec,truth_x_m,pitch_error_deg,along_track_error_m,position_std_m,eigen_ratio,weak_axis_x,weak_axis_y,weak_axis_z:",
       test_info->name(), report.max_position_error_m, report.final_position_error_m,
-      report.max_pitch_error_on_ramp_deg, report.pitch_step_recovery_sec, scenario.scan_period_sec, scenario.wheel_sigma_translation_per_m,
+      report.max_pitch_error_on_ramp_deg, report.pitch_step_recovery_sec,
+      report.max_pitch_error_after_step_entry_deg, report.max_pitch_error_after_step_exit_deg,
+      report.pitch_samples_after_step_entry, report.pitch_samples_after_step_exit,
+      scenario.scan_period_sec, scenario.wheel_sigma_translation_per_m,
       scenario.gps_sigma_m != 1.0 ? scenario.gps_sigma_m : scenario.gps_noise_m,
       scenario.degeneracy_ratio, scenario.has_pillars, report.gps_accepted_by_interval[0],
       report.gps_accepted_by_interval[1], report.gps_accepted_by_interval[2]);
@@ -535,7 +554,10 @@ TEST(Localizer, RecoversFromPitchStepWithinThreeTenthsAtTenHertz) {
   scenario.ramp_blend_m = 0.0;
   scenario.scan_period_sec = 0.1;
   const Report report = run(scenario);
-  EXPECT_LE(report.pitch_step_recovery_sec, 0.3);
+  EXPECT_GT(report.pitch_samples_after_step_entry, 0);
+  EXPECT_GT(report.pitch_samples_after_step_exit, 0);
+  EXPECT_LE(report.max_pitch_error_after_step_entry_deg, 2.0);
+  EXPECT_LE(report.max_pitch_error_after_step_exit_deg, 2.0);
 }
 
 // Review medium 1: a corridor whose ends cannot be seen. With a 5 % wheel scale error the dead

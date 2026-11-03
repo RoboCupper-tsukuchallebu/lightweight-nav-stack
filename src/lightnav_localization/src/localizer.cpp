@@ -145,7 +145,7 @@ struct Localizer::Implementation {
     }
     const Eigen::Isometry3d optimized_target = pose_cache[latest] * nodes.back().odom_to_base.inverse();
     if (preserve_target_tilt) {
-      corrector.set_planar_target(optimized_target);
+      corrector.set_planar_target(optimized_target, last_wheel_pose);
     } else {
       corrector.set_target(optimized_target);
     }

@@ -98,26 +98,35 @@ TEST(Corrector, HeightAndTiltFollowTargetImmediately) {
 }
 
 TEST(Corrector, PlanarTargetPreservesLatestHeightAndTilt) {
-  Corrector corrector(CorrectorParameters{});
-  Eigen::Isometry3d initial_target = Eigen::Isometry3d::Identity();
-  initial_target.translation() = Eigen::Vector3d(1.0, 2.0, 0.8);
-  const Eigen::Matrix3d tilt =
-      (Eigen::AngleAxisd(0.17, Eigen::Vector3d::UnitY()) *
-       Eigen::AngleAxisd(-0.12, Eigen::Vector3d::UnitX())).toRotationMatrix();
-  initial_target.linear() =
-      Eigen::AngleAxisd(3.0, Eigen::Vector3d::UnitZ()).toRotationMatrix() * tilt;
-  corrector.set_target(initial_target);
+  for (const double distance_m : {0.0, 1000.0}) {
+    SCOPED_TRACE(distance_m);
+    Corrector corrector(CorrectorParameters{});
+    Eigen::Isometry3d odom_to_base = odom_at(distance_m);
+    if (distance_m != 0.0) {
+      odom_to_base.linear() =
+          Eigen::AngleAxisd(0.4, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+    }
+    Eigen::Isometry3d lidar_base = Eigen::Isometry3d::Identity();
+    lidar_base.translation() = Eigen::Vector3d(distance_m + 1.0, 2.0, 0.8);
+    const Eigen::Matrix3d lidar_tilt =
+        (Eigen::AngleAxisd(10.0 * M_PI / 180.0, Eigen::Vector3d::UnitY()) *
+         Eigen::AngleAxisd(-0.12, Eigen::Vector3d::UnitX())).toRotationMatrix();
+    lidar_base.linear() =
+        Eigen::AngleAxisd(3.0, Eigen::Vector3d::UnitZ()).toRotationMatrix() * lidar_tilt;
+    corrector.set_target(lidar_base * odom_to_base.inverse());
 
-  Eigen::Isometry3d planar_target = Eigen::Isometry3d::Identity();
-  planar_target.translation() = Eigen::Vector3d(4.0, -3.0, 99.0);
-  planar_target.linear() =
-      (Eigen::AngleAxisd(-3.0, Eigen::Vector3d::UnitZ()) *
-       Eigen::AngleAxisd(-0.4, Eigen::Vector3d::UnitY())).toRotationMatrix();
-  corrector.set_planar_target(planar_target);
+    Eigen::Isometry3d graph_base = Eigen::Isometry3d::Identity();
+    graph_base.translation() = Eigen::Vector3d(distance_m + 4.0, -3.0, 99.0);
+    graph_base.linear() = Eigen::AngleAxisd(-3.0, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+    corrector.set_planar_target(graph_base * odom_to_base.inverse(), odom_to_base);
 
-  EXPECT_TRUE(corrector.target().translation().isApprox(Eigen::Vector3d(4.0, -3.0, 0.8)));
-  const Eigen::Matrix3d expected_rotation =
-      Eigen::AngleAxisd(-3.0, Eigen::Vector3d::UnitZ()).toRotationMatrix() * tilt;
-  EXPECT_TRUE(corrector.target().rotation().isApprox(expected_rotation, 1e-12));
-  EXPECT_TRUE(corrector.applied().isApprox(Eigen::Isometry3d::Identity()));
+    const Eigen::Isometry3d combined_base = corrector.target() * odom_to_base;
+    EXPECT_NEAR(combined_base.translation().x(), graph_base.translation().x(), 1e-6);
+    EXPECT_NEAR(combined_base.translation().y(), graph_base.translation().y(), 1e-6);
+    EXPECT_NEAR(combined_base.translation().z(), lidar_base.translation().z(), 1e-6);
+    EXPECT_NEAR(std::atan2(combined_base.rotation()(1, 0), combined_base.rotation()(0, 0)), -3.0, 1e-6);
+    EXPECT_NEAR(std::asin(-combined_base.rotation()(2, 0)), 10.0 * M_PI / 180.0, 1e-6);
+    EXPECT_NEAR(std::atan2(combined_base.rotation()(2, 1), combined_base.rotation()(2, 2)), -0.12, 1e-6);
+    EXPECT_TRUE(corrector.applied().isApprox(Eigen::Isometry3d::Identity()));
+  }
 }

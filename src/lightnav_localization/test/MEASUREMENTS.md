@@ -78,3 +78,42 @@ A は0.419183677 mでL2-bの0.45 m条件を満たすが、既存の0.3 m判定�
 変異確認は一時的に個別の変更を外して実行した。再同期を外した A は1.11932881 m（1.0 m超）、GPS後の目標合成を外した0.1秒周期の坂は9.44349552°（9°超）。確認後、変更後のソースとtest_localizerバイナリを復元した。
 
 開いた廊下の2ケースは+0.05 m条件を満たさない。数値合わせやL2-cの条件変更は行っていない。
+
+## L2-b レビュー H1 / M1 修正（2026-11-03）
+
+`Corrector::set_planar_target(map_to_odom, odom_to_base)` は両目標をbaseの姿勢に変換し、グラフ側のx/y/yawと直近LiDAR側のz/roll/pitchを合成してからmap→odomに戻す。呼び出し元は出力時点の最新車輪姿勢 `last_wheel_pose` を渡す。
+
+M1は0.1秒周期の段差について入口から0.3秒後〜出口直前、出口から0.3秒後〜終了をそれぞれ全サンプル評価する。両区間の最大絶対pitch誤差が2°以内かつ件数>0を要求する。初回復帰時間は参考値として残す。既存0.2秒周期の判定は変更していない。
+
+| シナリオ（複数実行は出力順） | L2-b 最大水平誤差 m | 修正後 m | 差 m |
+|---|---:|---:|---:|
+| FusionStaysCloseToTruthWhileWheelOdometryDrifts | 0.419184 | 0.419184 | +0.000000 |
+| GpsBiasDoesNotMoveEstimateWhileMapTracks | 0.098199 | 0.098199 | +0.000000 |
+| FallsBackToGpsOnlyWithoutMapAndRecovers | 0.487535 | 0.487535 | +0.000000 |
+| OdomOnlyBecomesLostAndStopsPublishing | 0.229158 | 0.229158 | +0.000000 |
+| FalseConvergenceAlongCorridorDoesNotJumpThePose (1) | 0.128468 | 0.128470 | +0.000001 |
+| FalseConvergenceAlongCorridorDoesNotJumpThePose (2) | 0.170166 | 0.170170 | +0.000003 |
+| RecoversFromOptimizationFailure | 0.107617 | 0.107618 | +0.000001 |
+| InitializeLeavesLost | 0.229158 | 0.229158 | +0.000000 |
+| GpsJumpsAreGatedInThePipeline | 0.096251 | 0.096251 | -0.000000 |
+| InitialOffsetIsSlewedNotJumped | 0.900038 | 0.900038 | +0.000000 |
+| ClimbsA10DegreeRamp | 0.093031 | 0.093036 | +0.000005 |
+| SurvivesAPitchStep | 0.113243 | 0.113244 | +0.000001 |
+| ClimbsA10DegreeRampAtTenHertz | 0.079128 | 0.079122 | -0.000006 |
+| RecoversFromPitchStepWithinThreeTenthsAtTenHertz | 0.083996 | 0.083996 | +0.000000 |
+| OpenCorridorIsCorrectedByGpsNotFrozenByMap | 3.124884 | 3.119231 | -0.005653 |
+| MapRebuildFailureKeepsOldTarget (1) | 0.107617 | 0.107618 | +0.000001 |
+| MapRebuildFailureKeepsOldTarget (2) | 0.107617 | 0.107618 | +0.000001 |
+| OpenCorridorWithPreciseGps | 5.945543 | 5.945543 | +0.000000 |
+
+| pitch 計測 | L2-b ° | 修正後 ° |
+|---|---:|---:|
+| 坂0.1 s・x∈[5,15]最大 | 1.437416 | 1.437847 |
+| 段差入口0.3 s後以降 | 0.502322 | 0.502322 |
+| 段差出口0.3 s後以降 | 0.344296 | 0.344295 |
+
+L2-bの入口・出口の値は保存済みMEASUREDの全時系列を同じ区間で再集計した。
+
+H1の変異確認：シグネチャだけ維持して旧map→odom合成へ戻した場合、1000 mケースでx差6.306202 m、y差1.666836 m、yaw差0.000284516 radとなり、1e-6のassertが失敗した。修正後はCorrector全6ケース通過。変異後に修正済みソースと全バイナリを復元し、ROS_DOMAIN_ID=44でCTest全量を実行した。
+
+復元後のCTest結果：14ターゲット中13通過、localizerの既知4ケース（A、0.2秒坂、0.2秒段差、開いた廊下）のみ失敗。0.1秒坂と入口・出口の継続判定は通過。入口818サンプル、出口2265サンプルを検証した。C++レビューは必須修正なし。ROS通信試験およびclang-tidy/cppcheckは未実施。

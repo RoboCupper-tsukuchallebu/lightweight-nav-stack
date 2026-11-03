@@ -23,12 +23,16 @@ class Corrector {
 
   void reset(const Eigen::Isometry3d& map_to_odom) { applied_ = target_ = map_to_odom; }
   void set_target(const Eigen::Isometry3d& map_to_odom) { target_ = map_to_odom; }
-  void set_planar_target(const Eigen::Isometry3d& map_to_odom) {
-    const double yaw_difference = yaw_of(map_to_odom) - yaw_of(target_);
-    target_.translation().head<2>() = map_to_odom.translation().head<2>();
-    target_.linear() =
+  void set_planar_target(const Eigen::Isometry3d& map_to_odom,
+                         const Eigen::Isometry3d& odom_to_base) {
+    const Eigen::Isometry3d graph_base = map_to_odom * odom_to_base;
+    Eigen::Isometry3d combined_base = target_ * odom_to_base;
+    const double yaw_difference = yaw_of(graph_base) - yaw_of(combined_base);
+    combined_base.translation().head<2>() = graph_base.translation().head<2>();
+    combined_base.linear() =
         Eigen::AngleAxisd(yaw_difference, Eigen::Vector3d::UnitZ()).toRotationMatrix() *
-        target_.rotation();
+        combined_base.rotation();
+    target_ = combined_base * odom_to_base.inverse();
   }
   const Eigen::Isometry3d& target() const { return target_; }
 
