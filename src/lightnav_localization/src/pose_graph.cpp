@@ -4,7 +4,7 @@
 #include <gtsam/inference/Symbol.h>
 #include <gtsam/nonlinear/ISAM2.h>
 #include <gtsam_unstable/nonlinear/IncrementalFixedLagSmoother.h>
-#include <gtsam/navigation/GPSFactor.h>
+#include <gtsam/nonlinear/NonlinearFactor.h>
 #include <gtsam/slam/BetweenFactor.h>
 #include <gtsam/slam/PriorFactor.h>
 
@@ -20,6 +20,25 @@ namespace {
 using gtsam::noiseModel::Diagonal;
 using gtsam::noiseModel::Robust;
 using gtsam::noiseModel::mEstimator::Huber;
+
+// GPS supplies horizontal position only; altitude must not flatten lidar-derived terrain.
+class HorizontalGpsFactor final : public gtsam::NoiseModelFactor1<gtsam::Pose3> {
+ public:
+  HorizontalGpsFactor(gtsam::Key key, const gtsam::Point2& position,
+                      const gtsam::SharedNoiseModel& noise)
+      : gtsam::NoiseModelFactor1<gtsam::Pose3>(noise, key), position_(position) {}
+
+  gtsam::Vector evaluateError(const gtsam::Pose3& pose,
+                             boost::optional<gtsam::Matrix&> jacobian = boost::none) const override {
+    gtsam::Matrix36 translation_jacobian;
+    const gtsam::Point3 translation = pose.translation(translation_jacobian);
+    if (jacobian) *jacobian = translation_jacobian.topRows<2>();
+    return translation.head<2>() - position_;
+  }
+
+ private:
+  gtsam::Point2 position_;
+};
 
 gtsam::Key key_of(int index) { return gtsam::Symbol('x', static_cast<std::uint64_t>(index)); }
 
@@ -122,9 +141,9 @@ void PoseGraph::add_map_factor(int index, const Eigen::Isometry3d& pose,
 
 void PoseGraph::add_gps_factor(int index, const Eigen::Vector3d& position,
                                const Eigen::Vector3d& sigma_m) {
-  implementation_->pending_factors.emplace_shared<gtsam::GPSFactor>(
-      key_of(index), gtsam::Point3(position),
-      robust(Diagonal::Sigmas(sigma_m), implementation_->parameters.huber_k));
+  implementation_->pending_factors.emplace_shared<HorizontalGpsFactor>(
+      key_of(index), gtsam::Point2(position.head<2>()),
+      robust(Diagonal::Sigmas(sigma_m.head<2>()), implementation_->parameters.huber_k));
 }
 
 bool PoseGraph::optimize() {
@@ -162,7 +181,11 @@ std::optional<Eigen::Vector3d> PoseGraph::position_and_yaw_std(int index) const 
     covariance_error_ = exception.what();
     return std::nullopt;
   }
-  return Eigen::Vector3d(std::sqrt(covariance(3, 3)), std::sqrt(covariance(4, 4)),
+  const Eigen::Matrix3d map_rotation = estimate.at<gtsam::Pose3>(key_of(index)).rotation().matrix();
+  const Eigen::Matrix3d map_translation_covariance =
+      map_rotation * covariance.bottomRightCorner<3, 3>() * map_rotation.transpose();
+  return Eigen::Vector3d(std::sqrt(map_translation_covariance(0, 0)),
+                         std::sqrt(map_translation_covariance(1, 1)),
                          std::sqrt(covariance(2, 2)));
 }
 

@@ -46,13 +46,14 @@ class PoseGraph {
                                  const Eigen::Matrix<double, 6, 6>& information);
   void add_map_factor(int index, const Eigen::Isometry3d& pose,
                       const Eigen::Matrix<double, 6, 6>& information);
+  // Uses only map-frame x/y and sigma x/y; altitude is intentionally ignored.
   void add_gps_factor(int index, const Eigen::Vector3d& position, const Eigen::Vector3d& sigma_m);
   // Optimizes. Returns false if GTSAM threw; the caller then rebuilds from the current estimate.
   bool optimize();
 
   // Estimate of a node; nullopt after it left the window.
   std::optional<Eigen::Isometry3d> pose(int index) const;
-  // sqrt of the (x, y) marginal variances and the yaw standard deviation.
+  // sqrt of map-frame (x, y) marginal variances and the local yaw standard deviation.
   std::optional<Eigen::Vector3d> position_and_yaw_std(int index) const;
   int latest_index() const { return latest_index_; }
   // Message of the last exception caught in optimize()/covariance (empty if none).

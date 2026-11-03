@@ -1,7 +1,9 @@
 #pragma once
 
 #include <Eigen/Geometry>
+#include <deque>
 #include <memory>
+#include <stdexcept>
 #include <optional>
 
 namespace lightnav_localization {
@@ -31,6 +33,7 @@ struct GpsParameters {
   double std_gbas_m = 0.3;
   double max_hdop = 3.0;
   double gate_mahalanobis = 3.0;
+  double gps_trusted_std_m = 0.3;
   double altitude_sigma_scale = 3.0;
   double altitude_sigma_floor_m = 1.0;
   Eigen::Vector3d antenna_in_base = Eigen::Vector3d::Zero();
@@ -49,16 +52,33 @@ struct GpsDecision {
   std::optional<GpsMeasurement> measurement;
 };
 
-// Counts consecutive gate rejections while the map matcher is tracking (is_gps_conflict).
+// Fraction of gate rejections in a complete recent observation window.
 class GpsConflictCounter {
  public:
-  explicit GpsConflictCounter(int threshold = 5) : threshold_(threshold) {}
-  void record(bool is_rejected_by_gate) { count_ = is_rejected_by_gate ? count_ + 1 : 0; }
-  bool is_conflict() const { return count_ >= threshold_; }
+  explicit GpsConflictCounter(int window = 10, double ratio = 0.5)
+      : window_(window), ratio_(ratio) {
+    if (window <= 0 || !(ratio > 0.0 && ratio <= 1.0)) {
+      throw std::invalid_argument("GPS conflict window and ratio must be positive");
+    }
+  }
+  void record(bool is_rejected_by_gate) {
+    observations_.push_back(is_rejected_by_gate);
+    rejected_count_ += is_rejected_by_gate ? 1 : 0;
+    if (observations_.size() > static_cast<std::size_t>(window_)) {
+      rejected_count_ -= observations_.front() ? 1 : 0;
+      observations_.pop_front();
+    }
+  }
+  bool is_conflict() const {
+    return observations_.size() == static_cast<std::size_t>(window_) &&
+           static_cast<double>(rejected_count_) / window_ >= ratio_;
+  }
 
  private:
-  int threshold_;
-  int count_ = 0;
+  int window_;
+  double ratio_;
+  std::deque<bool> observations_;
+  int rejected_count_ = 0;
 };
 
 // map frame = ENU about `origin`.

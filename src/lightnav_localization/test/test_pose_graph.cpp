@@ -126,3 +126,41 @@ TEST(PoseGraph, LidarOdometryOverridesPlanarConstraintOnSlope) {
   EXPECT_LT((estimate.translation() - truth.translation()).head<2>().norm(), 0.2);
   EXPECT_NEAR(estimate.translation().z(), truth.translation().z(), 0.2);
 }
+
+TEST(PoseGraph, PositionUncertaintyRotatesIntoMapCoordinates) {
+  const auto uncertainty_after_forward_motion = [](double initial_yaw) {
+    PoseGraph graph(PoseGraphParameters{});
+    const Eigen::Isometry3d initial_pose = yaw_translation(0.0, 0.0, initial_yaw);
+    graph.add_first_node(0.0, initial_pose, 0.05, 0.1);
+    EXPECT_TRUE(graph.optimize());
+    const Eigen::Isometry3d wheel_relative = translation_pose(10.0, 0.0);
+    const int index = graph.add_node_with_wheel_factor(
+        1.0, initial_pose * wheel_relative, wheel_relative);
+    EXPECT_TRUE(graph.optimize());
+    return graph.position_and_yaw_std(index);
+  };
+  const auto forward_uncertainty = uncertainty_after_forward_motion(0.0);
+  const auto rotated_uncertainty = uncertainty_after_forward_motion(M_PI / 2.0);
+  ASSERT_TRUE(forward_uncertainty);
+  ASSERT_TRUE(rotated_uncertainty);
+  EXPECT_GT(forward_uncertainty->y(), forward_uncertainty->x() * 2.0);
+  EXPECT_NEAR(rotated_uncertainty->x(), forward_uncertainty->y(), 1e-6);
+  EXPECT_NEAR(rotated_uncertainty->y(), forward_uncertainty->x(), 1e-6);
+  EXPECT_NEAR(rotated_uncertainty->z(), forward_uncertainty->z(), 1e-6);
+}
+
+
+TEST(PoseGraph, GpsAltitudeDoesNotChangeHeightOrTilt) {
+  Eigen::Isometry3d initial = Eigen::Isometry3d::Identity();
+  initial.translation() = Eigen::Vector3d(1.0, 2.0, 3.0);
+  initial.linear() = Eigen::AngleAxisd(0.2, Eigen::Vector3d::UnitY()).toRotationMatrix();
+  PoseGraph graph(PoseGraphParameters{});
+  graph.add_first_node(0.0, initial, 0.5, 0.1);
+  ASSERT_TRUE(graph.optimize());
+  graph.add_gps_factor(0, Eigen::Vector3d(1.0, 2.0, -100.0), Eigen::Vector3d::Constant(0.1));
+  ASSERT_TRUE(graph.optimize());
+  const auto estimate = graph.pose(0);
+  ASSERT_TRUE(estimate);
+  EXPECT_NEAR(estimate->translation().z(), 3.0, 1e-9);
+  EXPECT_NEAR(Eigen::AngleAxisd(initial.rotation().transpose() * estimate->rotation()).angle(), 0.0, 1e-9);
+}

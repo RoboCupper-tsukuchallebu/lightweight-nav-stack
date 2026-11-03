@@ -33,8 +33,9 @@ struct LocalizerParameters {
   double keyframe_distance_m = 1.0;
   double keyframe_time_s = 1.0;
   double match_period_s = 0.5;
-  double gps_node_gap_s = 0.2;       // beyond this a GPS fix gets its own node
-  int gps_conflict_count = 5;
+  double gps_keyframe_max_gap_s = 0.5;
+  int gps_conflict_window = 10;
+  double gps_conflict_ratio = 0.5;
   double drift_rate = 0.02;
   double map_submap_rebuild_distance_m = 50.0;
   double initial_sigma_xy_m = 0.5;
@@ -89,6 +90,10 @@ class Localizer {
   std::optional<double> last_match_eigenvalue_ratio() const;
   std::optional<Eigen::Vector3d> last_match_weakest_axis() const;
   double last_accepted_gps_stamp_sec() const;
+  std::size_t gps_time_gap_rejection_count() const;
+  std::size_t gps_gate_rejection_count() const;
+  double max_keyframe_interval_sec() const;
+  double last_absolute_observation_stamp_sec() const;
   // Test seam: may alter a prior-map match result before the gate (e.g. inject a false convergence).
   void set_map_match_hook(std::function<void(MatchResult&)> hook);
 

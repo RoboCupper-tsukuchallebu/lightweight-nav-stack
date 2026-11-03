@@ -65,7 +65,10 @@ GpsDecision GpsConverter::evaluate(const GpsFix& fix, const Eigen::Isometry3d& p
   const Eigen::Vector3d difference = base_position - predicted_map_to_base.translation();
   // Horizontal gate only: the vertical estimate is weak by design (planar constraint).
   const double combined_std = std::hypot(horizontal_std, predicted_position_std_m);
-  if (difference.head<2>().norm() / combined_std > parameters_.gate_mahalanobis) {
+  const bool trusted_fix = fix.has_known_covariance && std::isfinite(fix.known_std_m) &&
+                           fix.known_std_m > 0.0 &&
+                           fix.known_std_m <= parameters_.gps_trusted_std_m;
+  if (!trusted_fix && difference.head<2>().norm() / combined_std > parameters_.gate_mahalanobis) {
     decision.rejection = GpsRejection::kGate;
     return decision;
   }

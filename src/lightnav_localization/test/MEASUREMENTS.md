@@ -117,3 +117,175 @@ L2-bの入口・出口の値は保存済みMEASUREDの全時系列を同じ区�
 H1の変異確認：シグネチャだけ維持して旧map→odom合成へ戻した場合、1000 mケースでx差6.306202 m、y差1.666836 m、yaw差0.000284516 radとなり、1e-6のassertが失敗した。修正後はCorrector全6ケース通過。変異後に修正済みソースと全バイナリを復元し、ROS_DOMAIN_ID=44でCTest全量を実行した。
 
 復元後のCTest結果：14ターゲット中13通過、localizerの既知4ケース（A、0.2秒坂、0.2秒段差、開いた廊下）のみ失敗。0.1秒坂と入口・出口の継続判定は通過。入口818サンプル、出口2265サンプルを検証した。C++レビューは必須修正なし。ROS通信試験およびclang-tidy/cppcheckは未実施。
+
+## L2-c 事前確認で停止（2026-11-03）
+
+`InformationLimits::degeneracy_ratio` の既定だけを0.05から0.01に変更した。
+この既定は地図照合とLiDARオドメトリの両方、およびScenarioに適用される。
+ROS_DOMAIN_ID=44で対象をビルドし、既存test_match_informationと開いた廊下の
+パイプライン2ケースだけを実行した。ビルド成功、全量CTestは未実施。
+
+| シーン | 固有値比（最小〜最大） | 0.01での判定 |
+|---|---:|---|
+| test_match_information 開廊下 | 0.022715995 | 最弱方向も非縮退 |
+| localizer 開廊下・GPS σ1 m | 0.00145924276〜0.00165536393 | 最弱方向は縮退 |
+| localizer 開廊下・GPS σ0.1 m | 0.00146052020〜0.00173700881 | 最弱方向は縮退 |
+
+単体試験は400 m廊下中央で静止スキャンを同じスキャンへ自己照合する。
+パイプラインは120 m廊下を走行し、0.2 m間隔で生成した地図に照合する。
+照合対象と密度が異なり、同じHessianの計測ではない。
+
+単体試験の進行方向σは0.02 mとなり、既存のσ>=1 mを満たさない。
+RealHessianOfOpenCorridorWeakensSlidingDirectionOnly、および
+SlidingDirectionIsWeakAtEveryEffectiveRangeの2ケースが失敗した。
+後者はrange=30/40/45/50/60 mで失敗、20 mでは既存判定を通過した。
+ユーザー指定の停止条件に該当するため、シーン・閾値・assertは変更していない。
+
+| パイプライン最大水平誤差 m | L2-b修正後 | 縮退比だけ0.01 |
+|---|---:|---:|
+| 開廊下・GPS σ1 m | 3.119231 | 3.110401 |
+| 開廊下・GPS σ0.1 m | 5.945543 | 5.891444 |
+
+σ0.1 mの最終誤差は5.888045 m、GPS受理数は[0,10),[10,20),[20,∞)秒で
+9/3/0件。これはGPSゲート等をまだ変更していない途中状態の計測である。
+GPS時刻ノード廃止、trusted fixのゲート省略、矛盾率の窓、std座標変換、
+縮退時の絶対観測扱い、追加単体試験とAの0.1秒版は未着手。
+0.01と既存開廊下試験の要求の不整合についてユーザー判断を待つ。
+
+## L2-c 実装・検証途中（2026-11-03）
+
+上の「事前確認」は過去の実験記録。現在の縮退比の既定は **0.05**。GPS専用ノードを廃止し、既存の最寄りキーフレームへ車輪変位を補償して因子を追加する。時刻差が0.5 sを超える場合は棄却し、`gps_time_gap_rejection_count()`で数える。既知共分散の標準偏差が0.3 m以下ならマハラノビスゲートを省略する。矛盾は直近10件のゲート棄却率50%以上（窓が埋まってから）で検出する。位置標準偏差のx/yをmap座標に変換し、縮退照合では絶対観測時刻を更新しない。
+
+指定ビルド成功。ROS_DOMAIN_ID=44で全14 test_*バイナリを実行し、localizer以外の13ターゲットは通過。localizerは23件中17通過・6失敗。既知4件に加え、引継ぎ差分のA・0.1秒版とGPS σ0.1 m廊下の受理率が失敗。既存の判定条件は緩めていない。ROS通信試験は未実施。
+
+GPS入力9件、姿勢グラフ4件、0.5 s境界・車輪変位補償（map/odom間90°回転を含む）・縮退時刻の重点3件は通過。読み取りレビューでは重大指摘なし。
+
+以下は今回の `[ MEASURED ]` 出力。L2-bはH1/M1修正後の値。
+
+| シナリオ | L2-b最大水平誤差 m | L2-c最大水平誤差 m | 差 m |
+|---|---:|---:|---:|
+| FusionStaysCloseToTruthWhileWheelOdometryDrifts | 0.419184 | 0.426817 | +0.007633 |
+| FusionStaysCloseToTruthAtTenHertz | 未計測 | 0.409315 | — |
+| GpsBiasDoesNotMoveEstimateWhileMapTracks | 0.098199 | 0.090452 | -0.007747 |
+| FallsBackToGpsOnlyWithoutMapAndRecovers | 0.487535 | 0.471446 | -0.016089 |
+| OdomOnlyBecomesLostAndStopsPublishing | 0.229158 | 0.229158 | -0.000000 |
+| FalseConvergenceAlongCorridorDoesNotJumpThePose (1) | 0.128470 | 0.129317 | +0.000847 |
+| FalseConvergenceAlongCorridorDoesNotJumpThePose (2) | 0.170170 | 0.130539 | -0.039631 |
+| RecoversFromOptimizationFailure | 0.107618 | 0.124711 | +0.017093 |
+| InitializeLeavesLost | 0.229158 | 0.229158 | -0.000000 |
+| GpsJumpsAreGatedInThePipeline | 0.096251 | 0.113852 | +0.017601 |
+| InitialOffsetIsSlewedNotJumped | 0.900038 | 0.900038 | -0.000000 |
+| ClimbsA10DegreeRamp | 0.093036 | 0.101822 | +0.008786 |
+| SurvivesAPitchStep | 0.113244 | 0.127424 | +0.014180 |
+| ClimbsA10DegreeRampAtTenHertz | 0.079122 | 0.087991 | +0.008869 |
+| RecoversFromPitchStepWithinThreeTenthsAtTenHertz | 0.083996 | 0.091542 | +0.007546 |
+| OpenCorridorIsCorrectedByGpsNotFrozenByMap | 3.119231 | 2.799519 | -0.319712 |
+| MapRebuildFailureKeepsOldTarget (1) | 0.107618 | 0.124711 | +0.017093 |
+| MapRebuildFailureKeepsOldTarget (2) | 0.107618 | 0.124711 | +0.017093 |
+| OpenCorridorWithPreciseGps | 5.945543 | 1.663889 | -4.281654 |
+
+| pitch計測 | L2-b ° | L2-c ° | 差 ° |
+|---|---:|---:|---:|
+| 坂0.1 s | 1.437847 | 1.608216 | +0.170369 |
+| 段差入口 | 0.502322 | 0.520749 | +0.018427 |
+| 段差出口 | 0.344295 | 0.641996 | +0.297701 |
+
+受け入れ未達：精密GPS廊下の最終誤差は0.512125 m（<1 m）だが、受理143/200件＝71.5%で80%未満。57件が時刻差で棄却された。Eは最大誤差0.090452 mでis_gps_conflict=true。F/C/D/Iの最大水平誤差は+0.05 m以内。坂0.1 sと段差入口のpitch差は+0.2°以内だが、段差出口は+0.297701°で未達。Aは0.426817 m。追加A・0.1 s版は0.409315 mで0.3 m判定に未達（GPS時刻差棄却333/341件）。
+
+残作業：GPSとキーフレームの位相による大量の時刻差棄却、および段差出口の劣化を調査する。未生成の将来キーフレームを待つ処理は現在なく、GPS処理時点で存在する最寄りノードを選ぶ。閾値変更・数値合わせは行っていない。commit/pushなし。
+
+## L2-c キーフレーム時間比較の修正（2026-11-03）
+
+修正前の追加計測で、精密GPS廊下は最大キーフレーム間隔1.2 s、時刻差棄却57件、ゲート棄却0件。0.1 s周期の段差は最大間隔1.1 s、時刻差棄却63件、ゲート棄却0件だった。浮動小数の減算で1.0 s境界を取りこぼすことを再現したため、経過時間の比較に1 µsの許容を追加した。GPS時刻差上限0.5 sは変更していない。
+
+本実装は処理時点で存在する最寄りキーフレームを選ぶ（未来のキーフレームを待たない）。したがって「前後の最寄りなら最大0.6 s」という説明と厳密には異なる。今回の試験はGPSが毎秒+0.26 s、最初のスキャンが+0.2 sまたは+0.1 sで、キーフレーム時刻のずれがGPSとの位相を変えた。
+
+追加の `gps_gate_rejection_count()` と `max_keyframe_interval_sec()` をMEASUREDに出力する。Aの0.1 s版は計測専用とし、縮退比0.01前提の0.3 m判定はL2-dでユーザー判断後に入れる旨をコメントした。既存試験の判定は変更していない。
+
+| シナリオ | L2-b最大誤差 m | 修正前L2-c m | 今回 m | L2-b差 m |
+|---|---:|---:|---:|---:|
+| FusionStaysCloseToTruthWhileWheelOdometryDrifts | 0.419184 | 0.426817 | 0.386569 | -0.032615 |
+| FusionStaysCloseToTruthAtTenHertz | 未計測 | 0.409314822 | 0.380179 | — |
+| GpsBiasDoesNotMoveEstimateWhileMapTracks | 0.098199 | 0.090452 | 0.102417 | +0.004218 |
+| FallsBackToGpsOnlyWithoutMapAndRecovers | 0.487535 | 0.471446 | 0.474719 | -0.012816 |
+| OdomOnlyBecomesLostAndStopsPublishing | 0.229158 | 0.229158 | 0.222933 | -0.006225 |
+| FalseConvergenceAlongCorridorDoesNotJumpThePose (1) | 0.128470 | 0.129317 | 0.127235 | -0.001235 |
+| FalseConvergenceAlongCorridorDoesNotJumpThePose (2) | 0.170170 | 0.130539 | 0.144845 | -0.025325 |
+| RecoversFromOptimizationFailure | 0.107618 | 0.124711 | 0.122387 | +0.014769 |
+| InitializeLeavesLost | 0.229158 | 0.229158 | 0.222933 | -0.006225 |
+| GpsJumpsAreGatedInThePipeline | 0.096251 | 0.113852 | 0.125302 | +0.029051 |
+| InitialOffsetIsSlewedNotJumped | 0.900038 | 0.900038 | 0.900038 | -0.000000 |
+| ClimbsA10DegreeRamp | 0.093036 | 0.101822 | 0.100641 | +0.007605 |
+| SurvivesAPitchStep | 0.113244 | 0.127424 | 0.112454 | -0.000790 |
+| ClimbsA10DegreeRampAtTenHertz | 0.079122 | 0.087991 | 0.100052 | +0.020930 |
+| RecoversFromPitchStepWithinThreeTenthsAtTenHertz | 0.083996 | 0.091542 | 0.090762 | +0.006766 |
+| OpenCorridorIsCorrectedByGpsNotFrozenByMap | 3.119231 | 2.799519 | 2.971750 | -0.147481 |
+| MapRebuildFailureKeepsOldTarget (1) | 0.107618 | 0.124711 | 0.133176 | +0.025558 |
+| MapRebuildFailureKeepsOldTarget (2) | 0.107618 | 0.124711 | 0.133176 | +0.025558 |
+| OpenCorridorWithPreciseGps | 5.945543 | 1.663889 | 0.362240 | -5.583303 |
+
+| 計測 | L2-b | 修正前L2-c | 今回 |
+|---|---:|---:|---:|
+| 坂0.1 s pitch ° | 1.437847 | 1.60821593 | 2.40718397 |
+| 段差入口 pitch ° | 0.502322 | 0.520749099 | 0.819256209 |
+| 段差出口 pitch ° | 0.344295 | 0.641996445 | 0.465385565 |
+| 精密GPS廊下 最終誤差 m | 未記録 | 0.512124583 | 0.242823182 |
+| 精密GPS廊下 受理率 | 未記録 | 0.715 | 1 |
+
+| シナリオ | GPS投入 | 時刻差棄却 | ゲート棄却 | 最大キーフレーム間隔 s |
+|---|---:|---:|---:|---:|
+| FusionStaysCloseToTruthWhileWheelOdometryDrifts | 341 | 0 | 0 | 1 |
+| FusionStaysCloseToTruthAtTenHertz | 341 | 0 | 0 | 1 |
+| GpsBiasDoesNotMoveEstimateWhileMapTracks | 71 | 0 | 71 | 1 |
+| FallsBackToGpsOnlyWithoutMapAndRecovers | 341 | 0 | 0 | 1 |
+| OdomOnlyBecomesLostAndStopsPublishing | 0 | 0 | 0 | 1 |
+| FalseConvergenceAlongCorridorDoesNotJumpThePose | 71 | 0 | 0 | 1 |
+| FalseConvergenceAlongCorridorDoesNotJumpThePose | 71 | 0 | 0 | 1 |
+| RecoversFromOptimizationFailure | 71 | 0 | 0 | 1 |
+| InitializeLeavesLost | 0 | 0 | 0 | 1 |
+| GpsJumpsAreGatedInThePipeline | 71 | 0 | 14 | 1 |
+| InitialOffsetIsSlewedNotJumped | 71 | 0 | 0 | 1 |
+| ClimbsA10DegreeRamp | 71 | 0 | 0 | 1 |
+| SurvivesAPitchStep | 71 | 0 | 0 | 1 |
+| ClimbsA10DegreeRampAtTenHertz | 71 | 0 | 0 | 1 |
+| RecoversFromPitchStepWithinThreeTenthsAtTenHertz | 71 | 0 | 0 | 1 |
+| OpenCorridorIsCorrectedByGpsNotFrozenByMap | 200 | 0 | 0 | 1 |
+| MapRebuildFailureKeepsOldTarget | 71 | 0 | 0 | 1 |
+| MapRebuildFailureKeepsOldTarget | 71 | 0 | 0 | 1 |
+| OpenCorridorWithPreciseGps | 200 | 0 | 0 | 1 |
+
+GPSノード廃止のpitchへの影響経路：車輪・LiDAR因子の始点が直前GPSノードから前キーフレームへ変わり、固定tilt標準偏差を持つ車輪因子の構成も変わる。GPS更新自体はpitchを保持するが、次キーフレームの全姿勢更新とLiDARサブマップ更新から影響し得る。これはコード上の経路の確認であり、単独の因果を確定する比較実験は行っていない。
+
+指定ビルド成功。ROS_DOMAIN_ID=44でtest_localizer全量を実行。丸め境界の追加試験も通過。読み取りレビューに必須修正なし。commitなし。
+
+今回の判定：精密GPS廊下は受理200/200＝100%、最終誤差0.242823 mで達成。段差出口は0.465386°、L2-b差+0.121091°で許容内に改善した。ただし入口は0.819256°（+0.316934°）、坂0.1 sは2.407184°（+0.969337°）で未達。時間判定だけの変更で出口が改善するため、前回の出口悪化をGPSノード廃止だけに帰属できない。
+全24件中18通過、6失敗。既知4件に加えInitialOffsetIsSlewedNotJumpedとClimbsA10DegreeRampAtTenHertzが失敗した。これらの新たな失敗は未修正で、判定を緩めず残す。今回の3項目を超える修正は行っていない。
+
+## L2-c 新規失敗の切り分けとGPS水平因子修正（2026-11-03）
+
+各変異は開始時点のコードから一つだけ変更し、指定ビルド後にROS_DOMAIN_ID=44で初期オフセット・坂0.1 s・段差0.1 sの3件を実行した。各回で元のコードへ戻した。GPSノード復元では旧0.2 s境界と追加ノード経路を復元し、その他のゲート・矛盾検知・1 µs許容は維持した。最後に変異を全て除去してGPS因子だけxy専用に修正した。
+
+| 条件 | I 最終誤差 m | 坂0.1 s pitch ° | 段差入口 ° | 段差出口 ° |
+|---|---:|---:|---:|---:|
+| 変更前（今回開始時点） | 0.365145 | 2.407184 | 0.819256 | 0.465386 |
+| 時間判定だけ旧比較へ戻す | 0.041586 | 1.608216 | 0.520749 | 0.641996 |
+| trusted fixにもゲートを戻す | 0.365145 | 2.407184 | 0.819256 | 0.465386 |
+| 縮退照合でもmark_absoluteへ戻す | 0.365145 | 2.407184 | 0.819256 | 0.465386 |
+| GPS時刻ノードだけ復元 | 0.397769 | 2.297942 | 0.723483 | 0.573659 |
+| 最終修正：GPS因子をxy専用化 | 0.047251 | 1.780980 | 0.846832 | 0.579535 |
+
+初期オフセットの失敗は終了時位置誤差であり、速度上限ではなかった。全変異・修正後とも最大出力速度は0.830 m/sで既存判定を通過した。この3シナリオはtrusted fixを使わないため、trustedゲート復元の結果が同じなのは妥当。slew経路は変更していない。
+
+時間判定修正がGPS受理数と因子配置を変え、既存の3D GPS因子の影響を顕在化させた。GPSFactorはzも拘束し、坂の合成GPSは高度0のままなので、LiDARで得た高さと矛盾する。さらにHuberの重みが3D残差全体で計算され、z残差がxyの重みにも影響していた。GPS専用ノード復元だけでは新規失敗は解消しなかった。
+
+`HorizontalGpsFactor`を内部実装し、mapのx/y残差だけを使用する。JacobianはPose3::translationの先頭2行で、傾いたbody座標からmapへの回転を維持する。xyの標準偏差とHuberは従来値を使用し、GPS高度・sigma_zは因子に使用しない。GPSからz/roll/pitchを直接拘束する観測を除去したが、他因子との相関による間接影響までゼロにするものではない。
+
+| 受け入れ | L2-b | 修正後 | 差 | 結果 |
+|---|---:|---:|---:|---|
+| 坂0.1 s pitch ° | 1.437847 | 1.780980 | +0.343133 | 既存2°試験は通過、+0.2°条件は未達 |
+| 段差入口 pitch ° | 0.502322 | 0.846832 | +0.344510 | 既存2°試験は通過、+0.2°条件は未達 |
+| 段差出口 pitch ° | 0.344295 | 0.579535 | +0.235240 | 既存2°試験は通過、+0.2°条件は未達 |
+
+指定ビルド成功。pose_graph全5件通過（高度だけ異なるGPSを傾いた姿勢に与えても高さ・傾きが変わらない回帰試験を追加）。対象localizer3件は全通過。読み取りレビューに必須修正なし。残るpitch差の原因は未確定で、閾値調整や既存試験の弱体化はしていない。commitなし。
+
+最終コードのtest_localizer全量は24件中20通過、失敗は既知4件のみ。InitialOffsetIsSlewedNotJumpedとClimbsA10DegreeRampAtTenHertzの新規失敗は解消した。段差の入口・出口を含むL2-b比+0.2°条件は上表のとおり未達。

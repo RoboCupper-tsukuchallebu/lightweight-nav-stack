@@ -59,7 +59,7 @@ struct Localizer::Implementation {
         lidar(parameters_in.lidar_odometry),
         corrector(parameters_in.corrector),
         machine(parameters_in.state),
-        conflict(parameters_in.gps_conflict_count),
+        conflict(parameters_in.gps_conflict_window, parameters_in.gps_conflict_ratio),
         gps_origin(gps_origin_in) {
     if (gps_origin) gps.emplace(*gps_origin, parameters_in.gps);
   }
@@ -86,6 +86,9 @@ struct Localizer::Implementation {
   double last_scan_sec = kNeverSec;
   double last_map_sec = kNeverSec;
   double last_gps_sec = kNeverSec;
+  std::size_t gps_time_gap_rejections = 0;
+  std::size_t gps_gate_rejections = 0;
+  double max_keyframe_interval_sec = 0.0;
   double last_match_attempt_sec = kNeverSec;
   double absolute_reference_sec = 0.0;
   double distance_since_absolute_m = 0.0;
@@ -93,7 +96,7 @@ struct Localizer::Implementation {
   double position_std_m = 0.0;
 
   Eigen::Isometry3d last_scan_odom_for_gate = Eigen::Isometry3d::Identity();
-  double last_keyframe_sec = 0.0;  // last node that carries a scan (GPS-only nodes do not count)
+  double last_keyframe_sec = 0.0;  // all graph nodes are scan keyframes
   Eigen::Isometry3d last_keyframe_odom = Eigen::Isometry3d::Identity();
   std::deque<NodeRecord> nodes;
   std::deque<int> lidar_nodes;
@@ -253,7 +256,9 @@ struct Localizer::Implementation {
     graph->add_map_factor(node_index, result.target_to_source,
                           information_from_hessian(result.information, parameters.map_information));
     last_map_sec = stamp;
-    mark_absolute(stamp);
+    if (match_eigenvalue_ratio && *match_eigenvalue_ratio >= parameters.map_information.degeneracy_ratio) {
+      mark_absolute(stamp);
+    }
   }
 
   void process_scan(const PendingScan& pending) {
@@ -302,8 +307,10 @@ struct Localizer::Implementation {
     const double moved_since_keyframe_m =
         (odom_now->translation() - last_keyframe_odom.translation()).norm();
     last_scan_odom_for_gate = *odom_now;
+    // One microsecond covers timestamp subtraction rounding, not a scan-period delay.
+    constexpr double kKeyframeTimeToleranceSec = 1e-6;
     const bool is_keyframe = moved_since_keyframe_m >= parameters.keyframe_distance_m ||
-                             pending.stamp - last_keyframe_sec >= parameters.keyframe_time_s;
+                             pending.stamp - last_keyframe_sec + kKeyframeTimeToleranceSec >= parameters.keyframe_time_s;
     if (is_keyframe) {
       const int index = graph->add_node_with_wheel_factor(pending.stamp, best, wheel_relative);
       if (lidar_result) {
@@ -312,6 +319,7 @@ struct Localizer::Implementation {
             information_from_hessian(lidar_result->information, parameters.lidar_odometry_information));
       }
       nodes.push_back({index, pending.stamp, *odom_now});
+      max_keyframe_interval_sec = std::max(max_keyframe_interval_sec, pending.stamp - last_keyframe_sec);
       last_keyframe_sec = pending.stamp;
       last_keyframe_odom = *odom_now;
       pose_cache[index] = best;
@@ -334,33 +342,26 @@ struct Localizer::Implementation {
     for (const NodeRecord& node : nodes) {
       if (std::abs(node.stamp - pending.stamp) < std::abs(nearest->stamp - pending.stamp)) nearest = &node;
     }
-    int node_index = nearest->index;
-    Eigen::Isometry3d predicted;
-    bool is_new_node = false;
-    if (std::abs(nearest->stamp - pending.stamp) <= parameters.gps_node_gap_s) {
-      predicted = pose_of(node_index);
-    } else if (pending.stamp > nodes.back().stamp) {
-      const auto odom_at = buffer.interpolate(pending.stamp);
-      if (!odom_at) return;
-      const Eigen::Isometry3d relative = nodes.back().odom_to_base.inverse() * *odom_at;
-      predicted = pose_of(nodes.back().index) * relative;
-      node_index = graph->add_node_with_wheel_factor(pending.stamp, predicted, relative);
-      nodes.push_back({node_index, pending.stamp, *odom_at});
-      pose_cache[node_index] = predicted;
-      is_new_node = true;
-    } else {
-      return;  // late fix far from every node in the window
+    if (std::abs(nearest->stamp - pending.stamp) > parameters.gps_keyframe_max_gap_s) {
+      ++gps_time_gap_rejections;
+      return;
     }
+    const auto odom_at_fix = buffer.interpolate(pending.stamp);
+    if (!odom_at_fix) return;
+    const int node_index = nearest->index;
+    const Eigen::Isometry3d keyframe_pose = pose_of(node_index);
+    const Eigen::Isometry3d predicted = keyframe_pose * nearest->odom_to_base.inverse() * *odom_at_fix;
     const GpsDecision decision = gps->evaluate(pending.fix, predicted, position_std_m);
-    const bool is_tracking = pending.stamp - last_map_sec <= parameters.state.tracking_window_s;
-    if (decision.rejection == GpsRejection::kGate) conflict.record(is_tracking);
+    if (decision.rejection == GpsRejection::kGate) ++gps_gate_rejections;
+    conflict.record(decision.rejection == GpsRejection::kGate);
     if (decision.measurement) {
-      conflict.record(false);
-      graph->add_gps_factor(node_index, decision.measurement->base_position, decision.measurement->sigma_m);
+      const Eigen::Vector3d displacement = predicted.translation() - keyframe_pose.translation();
+      graph->add_gps_factor(node_index, decision.measurement->base_position - displacement,
+                            decision.measurement->sigma_m);
       last_gps_sec = pending.stamp;
       mark_absolute(pending.stamp);
+      refresh_after_optimize(true);
     }
-    if (is_new_node || decision.measurement) refresh_after_optimize(true);
   }
 
   StateInputs make_state_inputs(double now_sec) const {
@@ -457,6 +458,10 @@ std::optional<Eigen::Vector3d> Localizer::last_match_weakest_axis() const {
   return implementation_->match_weakest_axis;
 }
 double Localizer::last_accepted_gps_stamp_sec() const { return implementation_->last_gps_sec; }
+std::size_t Localizer::gps_time_gap_rejection_count() const { return implementation_->gps_time_gap_rejections; }
+std::size_t Localizer::gps_gate_rejection_count() const { return implementation_->gps_gate_rejections; }
+double Localizer::max_keyframe_interval_sec() const { return implementation_->max_keyframe_interval_sec; }
+double Localizer::last_absolute_observation_stamp_sec() const { return implementation_->absolute_reference_sec; }
 
 std::optional<LocalizerOutput> Localizer::on_wheel_odom(double stamp_sec,
                                                         const Eigen::Isometry3d& odom_to_base) {

@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <limits>
 
 #include "lightnav_localization/gps_input.hpp"
 
@@ -62,7 +63,7 @@ TEST(GpsInput, RejectsNoFixAndHighHdopAndRemovesLeverArm) {
 }
 
 TEST(GpsInput, ConflictFlagAfterConsecutiveRejections) {
-  GpsConflictCounter counter(5);
+  GpsConflictCounter counter(5, 1.0);
   for (int index = 0; index < 4; ++index) counter.record(true);
   EXPECT_FALSE(counter.is_conflict());
   counter.record(true);
@@ -83,4 +84,63 @@ TEST(GpsInput, RejectsNanAndFallsBackWhenKnownStdIsZero) {
   const GpsDecision decision = converter.evaluate(zero_std, predicted, 0.1);
   ASSERT_TRUE(decision.measurement.has_value());
   EXPECT_GT(decision.measurement->sigma_m.x(), 0.0);
+}
+
+TEST(GpsInput, TrustedKnownCovarianceBypassesOnlyGate) {
+  const GpsConverter converter(kOrigin, GpsParameters{});
+  const Eigen::Isometry3d predicted = Eigen::Isometry3d::Identity();
+  GpsFix fix = fix_at_enu(100.0, 0.0);
+  fix.has_known_covariance = true;
+  fix.known_std_m = 0.3;
+  EXPECT_TRUE(converter.evaluate(fix, predicted, 0.1).measurement.has_value());
+  fix.known_std_m = 0.31;
+  EXPECT_EQ(converter.evaluate(fix, predicted, 0.1).rejection, GpsRejection::kGate);
+  for (double invalid_std : {0.0, -0.1, std::nan(""), std::numeric_limits<double>::infinity()}) {
+    fix.known_std_m = invalid_std;
+    EXPECT_EQ(converter.evaluate(fix, predicted, 0.1).rejection, GpsRejection::kGate);
+  }
+  fix.known_std_m = 0.1;
+  fix.has_known_covariance = false;
+  EXPECT_EQ(converter.evaluate(fix, predicted, 0.1).rejection, GpsRejection::kGate);
+  fix.has_known_covariance = true;
+  fix.hdop = 4.0;
+  EXPECT_EQ(converter.evaluate(fix, predicted, 0.1).rejection, GpsRejection::kHdop);
+  fix.hdop = 0.0;
+  fix.status = GpsFixStatus::kNoFix;
+  EXPECT_EQ(converter.evaluate(fix, predicted, 0.1).rejection, GpsRejection::kNoFix);
+}
+
+TEST(GpsInput, ConflictUsesNonconsecutiveRejectionsAndEvictsOldObservations) {
+  GpsConflictCounter counter(4, 0.5);
+  counter.record(true);
+  counter.record(false);
+  counter.record(true);
+  EXPECT_FALSE(counter.is_conflict());
+  counter.record(false);
+  EXPECT_TRUE(counter.is_conflict());
+  counter.record(false);
+  EXPECT_FALSE(counter.is_conflict());
+  counter.record(true);
+  EXPECT_TRUE(counter.is_conflict());
+  for (int index = 0; index < 4; ++index) counter.record(false);
+  EXPECT_FALSE(counter.is_conflict());
+}
+
+TEST(GpsInput, ConflictRejectsInvalidWindowParameters) {
+  EXPECT_THROW(GpsConflictCounter(0), std::invalid_argument);
+  EXPECT_THROW(GpsConflictCounter(10, 0.0), std::invalid_argument);
+  EXPECT_THROW(GpsConflictCounter(10, std::nan("")), std::invalid_argument);
+  EXPECT_THROW(GpsConflictCounter(10, 1.1), std::invalid_argument);
+}
+
+TEST(GpsInput, ConflictDefaultsToHalfOfTenObservations) {
+  GpsConflictCounter counter;
+  for (int index = 0; index < 9; ++index) {
+    counter.record(index % 2 == 0);
+    EXPECT_FALSE(counter.is_conflict());
+  }
+  counter.record(false);
+  EXPECT_TRUE(counter.is_conflict());
+  counter.record(false);
+  EXPECT_FALSE(counter.is_conflict());
 }
