@@ -150,6 +150,13 @@ protected:
 };
 }  // namespace
 
+TEST_F(ObstacleMonitorNodeTest, NegativeStepNeighborRadiusIsRejected)
+{
+  ASSERT_TRUE(monitor_->set_parameter(rclcpp::Parameter("step_neighbor_radius_m", -0.1)).successful);
+  EXPECT_EQ(
+    monitor_->configure().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED);
+}
+
 TEST_F(ObstacleMonitorNodeTest, WatchdogPublishesStaleStatusWithoutGridWhenNoInput)
 {
   bringUp();

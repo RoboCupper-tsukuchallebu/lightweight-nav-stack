@@ -17,6 +17,7 @@ struct ObstacleMonitorParameters
   double gridOriginYMeters = -4.0;
   double zMaxMeters = 1.5;
   double heightDifferenceThresholdMeters = 0.15;
+  double stepNeighborRadiusMeters = 0.5;
   int minPointsPerCell = 2;
   double scanMaxUseRangeMeters = 4.0;
   double inflationRadiusMeters = 0.5;
@@ -56,12 +57,14 @@ public:
   void addPoint3d(double xMeters, double yMeters, double zMeters);
   void addScanHit(double xMeters, double yMeters);
 
-  // 1 for a cell whose point count and (max - min) z exceed the thresholds, or that has a scan hit.
+  // 1 for sufficient 3D points with an internal height difference or neighbor step, or a scan hit.
   std::vector<std::uint8_t> occupiedCells() const;
 
   const GridGeometry & geometry() const {return geometry_;}
 
 private:
+  bool hasNeighborStep(std::size_t index) const;
+
   GridGeometry geometry_;
   ObstacleMonitorParameters parameters_;
   std::vector<float> minHeights_;

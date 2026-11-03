@@ -1,5 +1,6 @@
 #include "lightnav_obstacle_monitor/obstacle_monitor_node.hpp"
 
+#include <cmath>
 #include <exception>
 #include <limits>
 
@@ -39,6 +40,7 @@ ObstacleMonitorNode::ObstacleMonitorNode(const rclcpp::NodeOptions & options)
   declare_parameter("grid_origin_y_m", defaults.gridOriginYMeters);
   declare_parameter("z_max_m", defaults.zMaxMeters);
   declare_parameter("height_diff_threshold_m", defaults.heightDifferenceThresholdMeters);
+  declare_parameter("step_neighbor_radius_m", defaults.stepNeighborRadiusMeters);
   declare_parameter("min_points_per_cell", defaults.minPointsPerCell);
   declare_parameter("scan_max_use_range_m", defaults.scanMaxUseRangeMeters);
   declare_parameter("inflation_radius_m", defaults.inflationRadiusMeters);
@@ -60,6 +62,7 @@ ObstacleMonitorNode::CallbackReturn ObstacleMonitorNode::on_configure(const rclc
   parameters_.gridOriginYMeters = get_parameter("grid_origin_y_m").as_double();
   parameters_.zMaxMeters = get_parameter("z_max_m").as_double();
   parameters_.heightDifferenceThresholdMeters = get_parameter("height_diff_threshold_m").as_double();
+  parameters_.stepNeighborRadiusMeters = get_parameter("step_neighbor_radius_m").as_double();
   parameters_.minPointsPerCell = static_cast<int>(get_parameter("min_points_per_cell").as_int());
   parameters_.scanMaxUseRangeMeters = get_parameter("scan_max_use_range_m").as_double();
   parameters_.inflationRadiusMeters = get_parameter("inflation_radius_m").as_double();
@@ -79,9 +82,10 @@ ObstacleMonitorNode::CallbackReturn ObstacleMonitorNode::on_configure(const rclc
   watchdogHz_ = get_parameter("watchdog_hz").as_double();
 
   const bool isValid = parameters_.cellSizeMeters > 0.0 && parameters_.gridSizeMeters > 0.0 &&
-    watchdogHz_ > 0.0 && (!pointsTopic_.empty() || !scanTopic_.empty());
+    std::isfinite(parameters_.stepNeighborRadiusMeters) &&
+    parameters_.stepNeighborRadiusMeters >= 0.0 && watchdogHz_ > 0.0 && (!pointsTopic_.empty() || !scanTopic_.empty());
   if (!isValid) {
-    RCLCPP_ERROR(get_logger(), "invalid parameters: sizes and watchdog_hz must be positive and at least one input topic is needed");
+    RCLCPP_ERROR(get_logger(), "invalid parameters: sizes and watchdog_hz must be positive, step_neighbor_radius_m must be finite and nonnegative, and at least one input topic is needed");
     return CallbackReturn::FAILURE;
   }
   geometry_ = GridGeometry::fromParameters(parameters_);

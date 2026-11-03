@@ -77,13 +77,51 @@ void ObstacleGrid::addScanHit(double xMeters, double yMeters)
   }
 }
 
+bool ObstacleGrid::hasNeighborStep(std::size_t index) const
+{
+  if (!(parameters_.stepNeighborRadiusMeters > 0.0)) {
+    return false;
+  }
+  const double radiusCells = parameters_.stepNeighborRadiusMeters / geometry_.cellSizeMeters;
+  const int columnRadius = static_cast<int>(std::min(
+    std::ceil(radiusCells), static_cast<double>(geometry_.columnCount - 1)));
+  const int rowRadius = static_cast<int>(std::min(
+    std::ceil(radiusCells), static_cast<double>(geometry_.rowCount - 1)));
+  const int column = static_cast<int>(index % geometry_.columnCount);
+  const int row = static_cast<int>(index / geometry_.columnCount);
+  for (int neighborRow = std::max(0, row - rowRadius);
+    neighborRow <= std::min(geometry_.rowCount - 1, row + rowRadius); ++neighborRow)
+  {
+    for (int neighborColumn = std::max(0, column - columnRadius);
+      neighborColumn <= std::min(geometry_.columnCount - 1, column + columnRadius);
+      ++neighborColumn)
+    {
+      const double rowOffset = neighborRow - row;
+      const double columnOffset = neighborColumn - column;
+      if (rowOffset * rowOffset + columnOffset * columnOffset > radiusCells * radiusCells) {
+        continue;
+      }
+      const auto neighborIndex =
+        static_cast<std::size_t>(neighborRow) * geometry_.columnCount + neighborColumn;
+      // Existence of a lower neighbor is equivalent to comparing against their minimum z.
+      if (neighborIndex != index && pointCounts_[neighborIndex] >= parameters_.minPointsPerCell &&
+        maxHeights_[index] - minHeights_[neighborIndex] > parameters_.heightDifferenceThresholdMeters)
+      {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 std::vector<std::uint8_t> ObstacleGrid::occupiedCells() const
 {
   std::vector<std::uint8_t> occupied(geometry_.cellCount(), 0);
   for (std::size_t index = 0; index < occupied.size(); ++index) {
     const bool hasHeightStep =
       pointCounts_[index] >= parameters_.minPointsPerCell &&
-      maxHeights_[index] - minHeights_[index] > parameters_.heightDifferenceThresholdMeters;
+      (maxHeights_[index] - minHeights_[index] > parameters_.heightDifferenceThresholdMeters ||
+      hasNeighborStep(index));
     occupied[index] = (hasHeightStep || scanHits_[index] != 0) ? 1 : 0;
   }
   return occupied;

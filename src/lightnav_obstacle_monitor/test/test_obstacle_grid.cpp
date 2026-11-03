@@ -35,6 +35,18 @@ std::size_t countOccupied(const std::vector<std::uint8_t> & cells)
   }
   return count;
 }
+
+void addRaisedSurfaceWithGround(ObstacleGrid & grid, double minimumHeight, double maximumHeight)
+{
+  const auto & geometry = grid.geometry();
+  const auto raisedCell = geometry.cellIndex(2.05, 0.05);
+  for (std::size_t cellIndex = 0; cellIndex < geometry.cellCount(); ++cellIndex) {
+    const double centerX = geometry.cellCenterX(cellIndex);
+    const double centerY = geometry.cellCenterY(cellIndex);
+    grid.addPoint3d(centerX, centerY, cellIndex == *raisedCell ? minimumHeight : 0.0);
+    grid.addPoint3d(centerX, centerY, cellIndex == *raisedCell ? maximumHeight : 0.0);
+  }
+}
 }  // namespace
 
 TEST(ObstacleGridTest, FlatGroundHasNoOccupiedCell)
@@ -73,6 +85,78 @@ TEST(ObstacleGridTest, TenCentimeterCurbIsNotOccupied)
   grid.addPoint3d(3.05, 0.05, 0.10);
   grid.addPoint3d(3.06, 0.06, 0.10);
   EXPECT_EQ(countOccupied(grid.occupiedCells()), 0U);
+}
+
+TEST(ObstacleGridTest, RaisedSurfaceWithoutGroundPointsOccupiesOnlyTheHighCell)
+{
+  const ObstacleMonitorParameters parameters;
+  ASSERT_LT(0.30 - 0.25, parameters.heightDifferenceThresholdMeters);
+  auto grid = makeGrid(parameters);
+  addRaisedSurfaceWithGround(grid, 0.25, 0.30);
+  const auto occupied = grid.occupiedCells();
+  EXPECT_EQ(occupied[*grid.geometry().cellIndex(2.05, 0.05)], 1);
+  EXPECT_EQ(countOccupied(occupied), 1U);
+
+  auto disabledParameters = parameters;
+  disabledParameters.stepNeighborRadiusMeters = 0.0;
+  auto disabledGrid = makeGrid(disabledParameters);
+  addRaisedSurfaceWithGround(disabledGrid, 0.25, 0.30);
+  EXPECT_EQ(countOccupied(disabledGrid.occupiedCells()), 0U);
+}
+
+TEST(ObstacleGridTest, TenDegreeSlopeWithMultiplePointsInEveryCellIsNotOccupied)
+{
+  auto grid = makeGrid({});
+  const auto & geometry = grid.geometry();
+  const double tangent = std::tan(10.0 * kDegreesToRadians);
+  for (std::size_t cellIndex = 0; cellIndex < geometry.cellCount(); ++cellIndex) {
+    const double centerX = geometry.cellCenterX(cellIndex);
+    const double centerY = geometry.cellCenterY(cellIndex);
+    grid.addPoint3d(centerX - 0.01, centerY, (centerX - 0.01) * tangent);
+    grid.addPoint3d(centerX + 0.01, centerY, (centerX + 0.01) * tangent);
+  }
+  EXPECT_EQ(countOccupied(grid.occupiedCells()), 0U);
+}
+
+TEST(ObstacleGridTest, TenCentimeterSurfaceWithoutGroundPointsIsNotOccupied)
+{
+  auto grid = makeGrid({});
+  addRaisedSurfaceWithGround(grid, 0.10, 0.10);
+  EXPECT_EQ(countOccupied(grid.occupiedCells()), 0U);
+}
+
+TEST(ObstacleGridTest, IsolatedSurfaceAndInsufficientGroundSamplesAreNotOccupied)
+{
+  auto grid = makeGrid({});
+  grid.addPoint3d(2.05, 0.05, 0.25);
+  grid.addPoint3d(2.05, 0.05, 0.30);
+  EXPECT_EQ(countOccupied(grid.occupiedCells()), 0U);
+  grid.addPoint3d(2.15, 0.05, 0.0);
+  EXPECT_EQ(countOccupied(grid.occupiedCells()), 0U);
+}
+
+TEST(ObstacleGridTest, GroundOutsideCircularNeighborRadiusDoesNotOccupySurface)
+{
+  auto grid = makeGrid({});
+  grid.addPoint3d(2.05, 0.05, 0.25);
+  grid.addPoint3d(2.05, 0.05, 0.30);
+  grid.addPoint3d(2.65, 0.05, 0.0);
+  grid.addPoint3d(2.65, 0.05, 0.0);
+  grid.addPoint3d(2.45, 0.45, 0.0);
+  grid.addPoint3d(2.45, 0.45, 0.0);
+  EXPECT_EQ(countOccupied(grid.occupiedCells()), 0U);
+}
+
+TEST(ObstacleGridTest, GroundOnNeighborRadiusBoundaryOccupiesSurface)
+{
+  auto grid = makeGrid({});
+  grid.addPoint3d(2.05, 0.05, 0.25);
+  grid.addPoint3d(2.05, 0.05, 0.30);
+  grid.addPoint3d(2.35, 0.45, 0.0);
+  grid.addPoint3d(2.35, 0.45, 0.0);
+  const auto occupied = grid.occupiedCells();
+  EXPECT_EQ(occupied[*grid.geometry().cellIndex(2.05, 0.05)], 1);
+  EXPECT_EQ(countOccupied(occupied), 1U);
 }
 
 TEST(ObstacleGridTest, PointsAboveZMaxAreDropped)
