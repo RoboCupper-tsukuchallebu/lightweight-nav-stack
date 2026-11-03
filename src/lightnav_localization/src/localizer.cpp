@@ -107,6 +107,8 @@ struct Localizer::Implementation {
   double scan_time_ms = 0.0;
   double match_time_ms = 0.0;
   double submap_rebuild_time_ms = 0.0;
+  std::optional<double> match_eigenvalue_ratio;
+  std::optional<Eigen::Vector3d> match_weakest_axis;
 
   Eigen::Isometry3d pose_of(int index) {
     if (const auto pose = graph->pose(index)) return pose_cache[index] = *pose;
@@ -225,6 +227,17 @@ struct Localizer::Implementation {
     MatchResult result = match_scan(map_target, cloud, estimate, parameters.map_matcher);
     match_time_ms = elapsed_ms(start);
     if (map_match_hook) map_match_hook(result);
+    match_eigenvalue_ratio.reset();
+    match_weakest_axis.reset();
+    const Eigen::Matrix3d translation_hessian = result.information.block<3, 3>(3, 3);
+    if (translation_hessian.allFinite()) {
+      const Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> solver(
+          0.5 * (translation_hessian + translation_hessian.transpose()));
+      if (solver.info() == Eigen::Success && solver.eigenvalues()[2] > 0.0) {
+        match_eigenvalue_ratio = solver.eigenvalues()[0] / solver.eigenvalues()[2];
+        match_weakest_axis = solver.eigenvectors().col(0);
+      }
+    }
     // Without a map match or GPS the estimate is less certain, so the gate widens with it.
     const bool is_tracking = stamp - last_map_sec <= parameters.state.tracking_window_s;
     const double gate_scale = is_tracking ? 1.0 : std::max(1.0, 3.0 * position_std_m);
@@ -440,6 +453,13 @@ void Localizer::inject_optimization_failure_for_test() { implementation_->graph-
 double Localizer::last_scan_time_ms() const { return implementation_->scan_time_ms; }
 double Localizer::last_match_time_ms() const { return implementation_->match_time_ms; }
 double Localizer::last_submap_rebuild_time_ms() const { return implementation_->submap_rebuild_time_ms; }
+std::optional<double> Localizer::last_match_eigenvalue_ratio() const {
+  return implementation_->match_eigenvalue_ratio;
+}
+std::optional<Eigen::Vector3d> Localizer::last_match_weakest_axis() const {
+  return implementation_->match_weakest_axis;
+}
+double Localizer::last_accepted_gps_stamp_sec() const { return implementation_->last_gps_sec; }
 
 std::optional<LocalizerOutput> Localizer::on_wheel_odom(double stamp_sec,
                                                         const Eigen::Isometry3d& odom_to_base) {

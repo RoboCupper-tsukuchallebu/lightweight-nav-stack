@@ -3,6 +3,8 @@
 #include <cmath>
 #include <cstdio>
 #include <random>
+#include <array>
+#include <limits>
 #include <vector>
 #include <string>
 
@@ -15,7 +17,6 @@ using namespace lightnav_localization::testing;
 namespace {
 
 constexpr double kDt = 0.02;
-constexpr double kScanPeriod = 0.2;
 constexpr double kScanDuration = 0.1;
 constexpr double kSpeed = 0.6;
 constexpr double kTurnRate = 0.4;
@@ -75,6 +76,11 @@ GpsFix fix_at_enu(double east_m, double north_m) {
 }
 
 struct Scenario {
+  double scan_period_sec = 0.2;
+  double wheel_sigma_translation_per_m = PoseGraphParameters{}.wheel_sigma_translation_per_m;
+  double gps_sigma_m = 1.0;
+  double degeneracy_ratio = InformationLimits{}.degeneracy_ratio;
+  bool has_pillars = false;
   double gps_bias_east_m = 0.0;
   double gps_noise_m = 1.0;  // also reported as the fix's known standard deviation when != 1.0
   bool is_gps_enabled = true;
@@ -101,7 +107,20 @@ struct Scenario {
   double false_shift_m = 0.0;
 };
 
+struct Measurement {
+  double time_sec;
+  double truth_x_m;
+  double pitch_error_deg;
+  double along_track_error_m;
+  double position_std_m;
+  double eigenvalue_ratio;
+  Eigen::Vector3d weakest_axis;
+};
+
 struct Report {
+  std::vector<Measurement> samples;
+  std::array<int, 3> gps_accepted_by_interval{};  // [0,10), [10,20), [20,infinity)
+
   double max_position_error_m = 0.0;
   double max_yaw_error_deg = 0.0;
   double max_error_in_hole_m = 0.0;
@@ -128,6 +147,7 @@ struct Report {
 Report run(const Scenario& scenario) {
   const Course& course = scenario.is_open_corridor ? kOpenCorridor : (scenario.use_spec_course ? kSpecCourse : kShortCourse);
   SyntheticWorld world(course.centerline(), !scenario.is_open_corridor);
+  if (scenario.has_pillars) world.add_pillars();
   constexpr double kRampAngleRad = 10.0 * M_PI / 180.0;
   if (scenario.has_ramp) world.set_ramp(5.0, 10.0, kRampAngleRad);
   const double ramp_blend_m = scenario.ramp_blend_m;
@@ -146,6 +166,8 @@ Report run(const Scenario& scenario) {
   };
   const PointList full_map = world.sample_map(0.2);
   LocalizerParameters parameters;
+  parameters.graph.wheel_sigma_translation_per_m = scenario.wheel_sigma_translation_per_m;
+  parameters.map_information.degeneracy_ratio = scenario.degeneracy_ratio;
   parameters.state.odom_only_max_distance_m = scenario.odom_only_max_distance_m;
   parameters.map_submap_rebuild_distance_m = scenario.map_rebuild_distance_m;
   parameters.corrector.large_correction_threshold_m = scenario.large_correction_threshold_m;
@@ -202,6 +224,7 @@ Report run(const Scenario& scenario) {
   Eigen::Isometry3d wheel_only = truth_at(0.0);
   Report report;
   bool has_reinitialized = false;
+  double previous_accepted_gps_stamp_sec = -1.0;
   const int step_count = static_cast<int>(course.total_sec() / kDt);
   for (int step = 0; step <= step_count; ++step) {
     const double time_sec = step * kDt;
@@ -221,7 +244,7 @@ Report run(const Scenario& scenario) {
       wheel_only = wheel_only * drifted;
     }
     // Scans are fed BEFORE the wheel sample of the same stamp so that the queue has to wait.
-    if (step > 0 && step % static_cast<int>(kScanPeriod / kDt) == 0 && time_sec >= kScanDuration) {
+    if (step > 0 && step % static_cast<int>(scenario.scan_period_sec / kDt) == 0 && time_sec >= kScanDuration) {
       localizer.on_scan(time_sec, world.synthesize_scan(truth_at, time_sec - kScanDuration, kScanDuration, true, 360, 8));
     }
     const bool is_gps_time = step % static_cast<int>(1.0 / kDt) == 13;  // not aligned with scans
@@ -232,9 +255,9 @@ Report run(const Scenario& scenario) {
       const double jump = (scenario.gps_outlier_every > 0 && gps_counter % scenario.gps_outlier_every == 0) ? 20.0 : 0.0;
       GpsFix fix = fix_at_enu(jump + gps_truth.translation().x() + scenario.gps_noise_m * noise(random_generator) + scenario.gps_bias_east_m,
                               gps_truth.translation().y() + scenario.gps_noise_m * noise(random_generator));
-      if (scenario.gps_noise_m != 1.0) {
+      if (scenario.gps_noise_m != 1.0 || scenario.gps_sigma_m != 1.0) {
         fix.has_known_covariance = true;  // GST available: the receiver reports its own sigma
-        fix.known_std_m = scenario.gps_noise_m;
+        fix.known_std_m = scenario.gps_sigma_m != 1.0 ? scenario.gps_sigma_m : scenario.gps_noise_m;
       }
       localizer.on_gps(time_sec, fix);
     }
@@ -250,6 +273,11 @@ Report run(const Scenario& scenario) {
       has_injected_rebuild_failure = true;
     }
     const auto output = localizer.on_wheel_odom(time_sec, odom);
+    const double accepted_gps_stamp_sec = localizer.last_accepted_gps_stamp_sec();
+    if (accepted_gps_stamp_sec >= 0.0 && accepted_gps_stamp_sec != previous_accepted_gps_stamp_sec) {
+      ++report.gps_accepted_by_interval[accepted_gps_stamp_sec < 10.0 ? 0 : (accepted_gps_stamp_sec < 20.0 ? 1 : 2)];
+    }
+    previous_accepted_gps_stamp_sec = accepted_gps_stamp_sec;
     if (has_reinitialized && output) report.published_after_reinitialize = true;
     report.scan_ms_max = std::max(report.scan_ms_max, localizer.last_scan_time_ms());
     report.match_ms_max = std::max(report.match_ms_max, localizer.last_match_time_ms());
@@ -263,6 +291,11 @@ Report run(const Scenario& scenario) {
     
     const double pitch_error_deg =
         std::abs(std::asin(-output->map_to_base.rotation()(2, 0)) - std::asin(-truth.rotation()(2, 0))) * 180.0 / M_PI;
+    report.samples.push_back({time_sec, truth.translation().x(), pitch_error_deg,
+        (output->map_to_base.translation() - truth.translation()).dot(truth.rotation().col(0)),
+        output->position_std_m,
+        localizer.last_match_eigenvalue_ratio().value_or(std::numeric_limits<double>::quiet_NaN()),
+        localizer.last_match_weakest_axis().value_or(Eigen::Vector3d::Constant(std::numeric_limits<double>::quiet_NaN()))});
     report.max_pitch_error_deg = std::max(report.max_pitch_error_deg, pitch_error_deg);
     if (truth.translation().x() >= 5.0 && truth.translation().x() <= 15.0) {
       report.max_pitch_error_on_ramp_deg = std::max(report.max_pitch_error_on_ramp_deg, pitch_error_deg);
@@ -291,6 +324,19 @@ Report run(const Scenario& scenario) {
   }
   report.last_error = localizer.last_error();
   report.wheel_only_end_error_m = (wheel_only.translation() - truth_at(course.total_sec()).translation()).head<2>().norm();
+  const auto* test_info = ::testing::UnitTest::GetInstance()->current_test_info();
+  std::printf("[ MEASURED ] scenario=%s error_m=%.9g final_error_m=%.9g pitch_error_ramp_deg=%.9g scan_period_sec=%.9g wheel_sigma=%.9g gps_sigma=%.9g degeneracy_ratio=%.9g pillars=%d gps_accepted_before_10s=%d gps_accepted_10_to_20s=%d gps_accepted_after_20s=%d samples=time_sec,truth_x_m,pitch_error_deg,along_track_error_m,position_std_m,eigen_ratio,weak_axis_x,weak_axis_y,weak_axis_z:",
+      test_info->name(), report.max_position_error_m, report.final_position_error_m,
+      report.max_pitch_error_on_ramp_deg, scenario.scan_period_sec, scenario.wheel_sigma_translation_per_m,
+      scenario.gps_sigma_m != 1.0 ? scenario.gps_sigma_m : scenario.gps_noise_m,
+      scenario.degeneracy_ratio, scenario.has_pillars, report.gps_accepted_by_interval[0],
+      report.gps_accepted_by_interval[1], report.gps_accepted_by_interval[2]);
+  for (const auto& sample : report.samples) {
+    std::printf("%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g;", sample.time_sec,
+        sample.truth_x_m, sample.pitch_error_deg, sample.along_track_error_m, sample.position_std_m,
+        sample.eigenvalue_ratio, sample.weakest_axis.x(), sample.weakest_axis.y(), sample.weakest_axis.z());
+  }
+  std::printf("\n");
   return report;
 }
 
@@ -487,4 +533,30 @@ TEST(Localizer, MapRebuildFailureKeepsOldTarget) {
     EXPECT_LT(report.max_position_error_m, 0.3) << "mode " << mode;
     EXPECT_TRUE(report.is_tracking_at_end) << "mode " << mode;
   }
+}
+
+TEST(LocalizerMeasurements, OpenCorridorWithPreciseGps) {
+  Scenario scenario;
+  scenario.is_open_corridor = true;
+  scenario.gps_noise_m = 0.1;
+  scenario.gps_sigma_m = 0.1;
+  const Report report = run(scenario);
+  EXPECT_FALSE(report.samples.empty());
+}
+
+TEST(LocalizerMeasurements, PillarsAppearInMapAndScan) {
+  SyntheticWorld world({{0.0, 0.0}, {40.0, 0.0}}, false);
+  const auto pose_at = [](double) {
+    return arc_pose(0.0, Eigen::Vector2d(9.0, 0.0), 0.0, 0.0, 0.0);
+  };
+  const auto original_map_size = world.sample_map(0.2).size();
+  const auto original_scan = world.synthesize_scan(pose_at, 0.0, 0.1, true, 360, 8);
+  world.add_pillars();
+  EXPECT_GT(world.sample_map(0.2).size(), original_map_size);
+  const auto pillar_scan = world.synthesize_scan(pose_at, 0.0, 0.1, true, 360, 8);
+  bool scan_changed = original_scan.size() != pillar_scan.size();
+  for (std::size_t index = 0; index < std::min(original_scan.size(), pillar_scan.size()); ++index) {
+    scan_changed |= (original_scan[index].position - pillar_scan[index].position).norm() > 0.01F;
+  }
+  EXPECT_TRUE(scan_changed);
 }

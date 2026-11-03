@@ -38,6 +38,27 @@ class SyntheticWorld {
     }
   }
 
+  void add_pillars() {
+    for (std::size_t leg = 0; leg + 1 < centerline_.size(); ++leg) {
+      const Eigen::Vector2d displacement = centerline_[leg + 1] - centerline_[leg];
+      const double length = displacement.norm();
+      if (length <= 0.0) continue;
+      const Eigen::Vector2d direction = displacement / length;
+      const Eigen::Vector2d normal(-direction.y(), direction.x());
+      for (double distance = 10.0; distance < length; distance += 10.0) {
+        const Eigen::Vector2d center = centerline_[leg] + distance * direction + 1.5 * normal;
+        const Eigen::Vector2d front_left = center + 0.2 * direction + 0.2 * normal;
+        const Eigen::Vector2d front_right = center + 0.2 * direction - 0.2 * normal;
+        const Eigen::Vector2d back_left = center - 0.2 * direction + 0.2 * normal;
+        const Eigen::Vector2d back_right = center - 0.2 * direction - 0.2 * normal;
+        walls_.push_back({front_left, front_right});
+        walls_.push_back({front_right, back_right});
+        walls_.push_back({back_right, back_left});
+        walls_.push_back({back_left, front_left});
+      }
+    }
+  }
+
   // Floor rises at `angle_rad` from x = begin_x over `horizontal_length_m`, then stays level.
   void set_max_range(double range_m) { max_range_m_ = range_m; }
   void set_ramp(double begin_x, double horizontal_length_m, double angle_rad) {

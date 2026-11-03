@@ -42,14 +42,26 @@ TEST(MatchInformation, HessianOrderIsRotationThenTranslation) {
 // the floor-level sigma. 
 TEST(MatchInformation, RealHessianOfOpenCorridorWeakensSlidingDirectionOnly) {
   const InformationLimits limits;
+  const Eigen::Matrix<double, 6, 6> open_hessian = corridor_hessian(false);
   const Eigen::Matrix<double, 6, 6> open_information =
-      information_from_hessian(corridor_hessian(false), limits);
+      information_from_hessian(open_hessian, limits);
   // Sigma = sqrt of the covariance (inverse information) diagonal: the information diagonal alone
   // would hide the coupling between translation and rotation.
   const Eigen::Matrix<double, 6, 6> open_covariance = open_information.inverse();
   const double sliding_sigma_m = std::sqrt(open_covariance(3, 3));
   const double lateral_sigma_m = std::sqrt(open_covariance(4, 4));
   std::printf("open corridor: sliding sigma %.3f m, lateral sigma %.3f m\n", sliding_sigma_m, lateral_sigma_m);
+  const Eigen::Matrix3d translation_hessian = open_hessian.block<3, 3>(3, 3);
+  const Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> solver(
+      0.5 * (translation_hessian + translation_hessian.transpose()));
+  ASSERT_EQ(solver.info(), Eigen::Success);
+  ASSERT_GT(solver.eigenvalues()[2], 0.0);
+  const Eigen::Vector3d weakest_axis = solver.eigenvectors().col(0);
+  std::printf("[ MEASURED ] scenario=match_information_open_corridor eigen_ratio_min=%.9g "
+              "weakest_axis_scan_x=%.9g weakest_axis_scan_y=%.9g weakest_axis_scan_z=%.9g "
+              "sliding_sigma_m=%.9g lateral_sigma_m=%.9g\n",
+              solver.eigenvalues()[0] / solver.eigenvalues()[2], weakest_axis.x(), weakest_axis.y(),
+              weakest_axis.z(), sliding_sigma_m, lateral_sigma_m);
   EXPECT_GE(sliding_sigma_m, 1.0);
   EXPECT_LE(lateral_sigma_m, 0.05);
 

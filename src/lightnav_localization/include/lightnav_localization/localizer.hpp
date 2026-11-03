@@ -84,6 +84,11 @@ class Localizer {
   double last_scan_time_ms() const;
   double last_match_time_ms() const;
   double last_submap_rebuild_time_ms() const;
+  // Raw translation Hessian diagnostics; absent before a valid match. Axis is in the scan frame
+  // and its sign is arbitrary. initialize() clears both values.
+  std::optional<double> last_match_eigenvalue_ratio() const;
+  std::optional<Eigen::Vector3d> last_match_weakest_axis() const;
+  double last_accepted_gps_stamp_sec() const;
   // Test seam: may alter a prior-map match result before the gate (e.g. inject a false convergence).
   void set_map_match_hook(std::function<void(MatchResult&)> hook);
 
