@@ -26,6 +26,9 @@ geographiclib-cpp = "*"
 ros-jazzy-velodyne = "*"
 ros-jazzy-nmea-navsat-driver = "*"
 
+[feature.gui.dependencies]
+ros-jazzy-rviz2 = "*"
+
 [feature.eval.dependencies]
 rosbags = "*"
 evo = "*"
@@ -34,6 +37,7 @@ matplotlib = "*"
 [environments]
 hardware = ["hardware"]
 eval = ["eval"]
+gui = ["gui"]
 
 [activation]
 # Skipped when install/ does not exist yet (before the first build).
@@ -54,3 +58,5 @@ lint = "ruff check src"
 ros2 = { cmd = "ros2", env = { DYLD_LIBRARY_PATH = "$PIXI_PROJECT_ROOT/install/lib" } }
 # The only way to reach a real robot (domain 42). Needs human approval every time; agents must not use it.
 ros2-robot = { cmd = "ros2", env = { ROS_DOMAIN_ID = "42", ROS_AUTOMATIC_DISCOVERY_RANGE = "SUBNET", DYLD_LIBRARY_PATH = "$PIXI_PROJECT_ROOT/install/lib" } }
+# RViz2 + simulator in one command. Run as `pixi run -e gui sim-gui` after `pixi run build`.
+sim-gui = { cmd = "ros2 launch lightnav_sim sim_gui.launch.py", env = { DYLD_LIBRARY_PATH = "$PIXI_PROJECT_ROOT/install/lib" } }
