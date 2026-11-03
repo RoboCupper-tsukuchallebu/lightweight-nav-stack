@@ -21,8 +21,9 @@ controller_node:
     max_path_deviation_m: 2.5
 ```
 
-Choose the deviation limit for the course width. Short arcs may not reach the free
-space beside an obstacle and can stop the robot. A small deviation limit can prevent
-a detour around an obstacle in the path center, causing a safe stop / `STUCK`.
+Choose the deviation limit for the course width and specify it in the course YAML.
+A small deviation limit (1.5 m in the test) causes a safe stop / `STUCK` for an
+obstacle in the path center. No difference between 1.0 m and 2.0 m arc lengths
+has been confirmed in this test scenario.
 The closed-loop tests use a 0.5 m radius obstacle with 0.5 m inflation, a 2.0 m arc,
 and a 2.5 m deviation limit; a centered obstacle with a 1.5 m limit must stop safely.

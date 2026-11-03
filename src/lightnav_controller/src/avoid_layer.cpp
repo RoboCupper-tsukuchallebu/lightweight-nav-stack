@@ -132,6 +132,8 @@ std::vector<ArcCandidate> evaluateArcCandidates(const LocalGrid& grid, const Pos
                                                 const AvoidParameters& parameters) {
   std::vector<ArcCandidate> candidates;
   if (parameters.arc_candidate_count < 1 || path_points.empty() ||
+      !std::isfinite(parameters.arc_length_m) || parameters.arc_length_m <= 0.0 ||
+      !std::isfinite(parameters.arc_step_m) || parameters.arc_step_m <= 0.0 ||
       !std::isfinite(parameters.max_path_deviation_m) || parameters.max_path_deviation_m <= 0.0) {
     return candidates;
   }

@@ -318,6 +318,32 @@ TEST(ArcAvoidLayer, NarrowCourseStopsBeforeCenteredObstacle) {
   EXPECT_LT(result.final_pose.x_m, 6.0);
 }
 
+TEST(AvoidParameters, DefaultArcLengthIsTwoMeters) {
+  EXPECT_DOUBLE_EQ(AvoidParameters{}.arc_length_m, 2.0);
+}
+
+TEST(EvaluateArcCandidates, InvalidArcLengthRejectsAllCandidates) {
+  for (const double invalid_value : {std::numeric_limits<double>::quiet_NaN(),
+                                     std::numeric_limits<double>::infinity(), 0.0, -1.0}) {
+    SCOPED_TRACE(invalid_value);
+    AvoidParameters parameters = makeAvoidParameters();
+    parameters.arc_length_m = invalid_value;
+    EXPECT_TRUE(evaluateArcCandidates(makeEmptyGrid(), kOrigin, makeStraightPath(), 0, 0.0,
+                                      parameters).empty());
+  }
+}
+
+TEST(EvaluateArcCandidates, InvalidArcStepRejectsAllCandidates) {
+  for (const double invalid_value : {std::numeric_limits<double>::quiet_NaN(),
+                                     std::numeric_limits<double>::infinity(), 0.0, -1.0}) {
+    SCOPED_TRACE(invalid_value);
+    AvoidParameters parameters = makeAvoidParameters();
+    parameters.arc_step_m = invalid_value;
+    EXPECT_TRUE(evaluateArcCandidates(makeEmptyGrid(), kOrigin, makeStraightPath(), 0, 0.0,
+                                      parameters).empty());
+  }
+}
+
 TEST(EvaluateArcCandidates, MissingOrInvalidDeviationRejectsAllCandidates) {
   for (const double deviation_m : {std::numeric_limits<double>::quiet_NaN(),
                                    std::numeric_limits<double>::infinity(), 0.0, -1.0}) {
