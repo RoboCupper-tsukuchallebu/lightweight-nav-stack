@@ -136,6 +136,7 @@ struct Report {
   bool saw_large_correction = false;
   double max_pitch_error_deg = 0.0;          // whole run, includes the ramp entry transient
   double max_pitch_error_on_ramp_deg = 0.0;  // truth x in [5, 15] m: the whole climb
+  double pitch_step_recovery_sec = std::numeric_limits<double>::quiet_NaN();
   double max_output_speed_mps = 0.0;
   double final_position_error_m = 0.0;
   std::string last_error;
@@ -223,6 +224,11 @@ Report run(const Scenario& scenario) {
   Eigen::Isometry3d odom = Eigen::Isometry3d::Identity();
   Eigen::Isometry3d wheel_only = truth_at(0.0);
   Report report;
+  std::optional<double> pitch_step_begin_sec;
+  bool has_observed_pitch_step = false;
+  if (scenario.has_ramp && scenario.ramp_blend_m == 0.0) {
+    report.pitch_step_recovery_sec = std::numeric_limits<double>::infinity();
+  }
   bool has_reinitialized = false;
   double previous_accepted_gps_stamp_sec = -1.0;
   const int step_count = static_cast<int>(course.total_sec() / kDt);
@@ -230,6 +236,10 @@ Report run(const Scenario& scenario) {
     const double time_sec = step * kDt;
     current_time_sec = time_sec;
     const Eigen::Isometry3d truth = truth_at(time_sec);
+    if (scenario.has_ramp && scenario.ramp_blend_m == 0.0 &&
+        !pitch_step_begin_sec && truth.translation().x() >= 5.0) {
+      pitch_step_begin_sec = 5.0 / kSpeed;
+    }
     if (step > 0) {
       const Eigen::Isometry3d relative = truth_at(time_sec - kDt).inverse() * truth;
       const double distance = relative.translation().norm();
@@ -296,6 +306,11 @@ Report run(const Scenario& scenario) {
         output->position_std_m,
         localizer.last_match_eigenvalue_ratio().value_or(std::numeric_limits<double>::quiet_NaN()),
         localizer.last_match_weakest_axis().value_or(Eigen::Vector3d::Constant(std::numeric_limits<double>::quiet_NaN()))});
+    if (pitch_step_begin_sec && std::isinf(report.pitch_step_recovery_sec) &&
+        truth.translation().x() <= 15.0 && pitch_error_deg <= 2.0) {
+      report.pitch_step_recovery_sec = has_observed_pitch_step ? time_sec - *pitch_step_begin_sec : 0.0;
+    }
+    if (pitch_step_begin_sec) has_observed_pitch_step = true;
     report.max_pitch_error_deg = std::max(report.max_pitch_error_deg, pitch_error_deg);
     if (truth.translation().x() >= 5.0 && truth.translation().x() <= 15.0) {
       report.max_pitch_error_on_ramp_deg = std::max(report.max_pitch_error_on_ramp_deg, pitch_error_deg);
@@ -325,9 +340,9 @@ Report run(const Scenario& scenario) {
   report.last_error = localizer.last_error();
   report.wheel_only_end_error_m = (wheel_only.translation() - truth_at(course.total_sec()).translation()).head<2>().norm();
   const auto* test_info = ::testing::UnitTest::GetInstance()->current_test_info();
-  std::printf("[ MEASURED ] scenario=%s error_m=%.9g final_error_m=%.9g pitch_error_ramp_deg=%.9g scan_period_sec=%.9g wheel_sigma=%.9g gps_sigma=%.9g degeneracy_ratio=%.9g pillars=%d gps_accepted_before_10s=%d gps_accepted_10_to_20s=%d gps_accepted_after_20s=%d samples=time_sec,truth_x_m,pitch_error_deg,along_track_error_m,position_std_m,eigen_ratio,weak_axis_x,weak_axis_y,weak_axis_z:",
+  std::printf("[ MEASURED ] scenario=%s error_m=%.9g final_error_m=%.9g pitch_error_ramp_deg=%.9g pitch_step_recovery_sec=%.9g scan_period_sec=%.9g wheel_sigma=%.9g gps_sigma=%.9g degeneracy_ratio=%.9g pillars=%d gps_accepted_before_10s=%d gps_accepted_10_to_20s=%d gps_accepted_after_20s=%d samples=time_sec,truth_x_m,pitch_error_deg,along_track_error_m,position_std_m,eigen_ratio,weak_axis_x,weak_axis_y,weak_axis_z:",
       test_info->name(), report.max_position_error_m, report.final_position_error_m,
-      report.max_pitch_error_on_ramp_deg, scenario.scan_period_sec, scenario.wheel_sigma_translation_per_m,
+      report.max_pitch_error_on_ramp_deg, report.pitch_step_recovery_sec, scenario.scan_period_sec, scenario.wheel_sigma_translation_per_m,
       scenario.gps_sigma_m != 1.0 ? scenario.gps_sigma_m : scenario.gps_noise_m,
       scenario.degeneracy_ratio, scenario.has_pillars, report.gps_accepted_by_interval[0],
       report.gps_accepted_by_interval[1], report.gps_accepted_by_interval[2]);
@@ -504,6 +519,23 @@ TEST(Localizer, SurvivesAPitchStep) {
               report.max_position_error_m, report.max_pitch_error_on_ramp_deg);
   EXPECT_LT(report.max_pitch_error_on_ramp_deg, 2.0);
   EXPECT_LT(report.max_position_error_m, 0.2);
+}
+
+TEST(Localizer, ClimbsA10DegreeRampAtTenHertz) {
+  Scenario scenario;
+  scenario.has_ramp = true;
+  scenario.scan_period_sec = 0.1;
+  const Report report = run(scenario);
+  EXPECT_LE(report.max_pitch_error_on_ramp_deg, 2.0);
+}
+
+TEST(Localizer, RecoversFromPitchStepWithinThreeTenthsAtTenHertz) {
+  Scenario scenario;
+  scenario.has_ramp = true;
+  scenario.ramp_blend_m = 0.0;
+  scenario.scan_period_sec = 0.1;
+  const Report report = run(scenario);
+  EXPECT_LE(report.pitch_step_recovery_sec, 0.3);
 }
 
 // Review medium 1: a corridor whose ends cannot be seen. With a 5 % wheel scale error the dead

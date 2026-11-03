@@ -23,6 +23,14 @@ class Corrector {
 
   void reset(const Eigen::Isometry3d& map_to_odom) { applied_ = target_ = map_to_odom; }
   void set_target(const Eigen::Isometry3d& map_to_odom) { target_ = map_to_odom; }
+  void set_planar_target(const Eigen::Isometry3d& map_to_odom) {
+    const double yaw_difference = yaw_of(map_to_odom) - yaw_of(target_);
+    target_.translation().head<2>() = map_to_odom.translation().head<2>();
+    target_.linear() =
+        Eigen::AngleAxisd(yaw_difference, Eigen::Vector3d::UnitZ()).toRotationMatrix() *
+        target_.rotation();
+  }
+  const Eigen::Isometry3d& target() const { return target_; }
 
   // `odom_to_base` is the current wheel odometry pose. Non-positive elapsed time does not move.
   const Eigen::Isometry3d& step(double elapsed_sec, const Eigen::Isometry3d& odom_to_base) {

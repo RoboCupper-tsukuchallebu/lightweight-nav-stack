@@ -92,8 +92,7 @@ struct Localizer::Implementation {
   Eigen::Isometry3d last_wheel_pose = Eigen::Isometry3d::Identity();
   double position_std_m = 0.0;
 
-  Eigen::Isometry3d previous_scan_pose = Eigen::Isometry3d::Identity();  // map->base at the last scan
-  Eigen::Isometry3d previous_scan_odom = Eigen::Isometry3d::Identity();
+  Eigen::Isometry3d last_scan_odom_for_gate = Eigen::Isometry3d::Identity();
   double last_keyframe_sec = 0.0;  // last node that carries a scan (GPS-only nodes do not count)
   Eigen::Isometry3d last_keyframe_odom = Eigen::Isometry3d::Identity();
   std::deque<NodeRecord> nodes;
@@ -121,7 +120,7 @@ struct Localizer::Implementation {
   // Optimizes; returns true when the optimization failed and the window was restarted from the
   // current estimate (node indices are renumbered from 0 and the lidar sub-map is dropped, so
   // callers must re-read nodes.back().index).
-  bool refresh_after_optimize() {
+  bool refresh_after_optimize(bool preserve_target_tilt = false) {
     bool was_restarted = false;
     if (!graph->optimize()) {
       last_error = "pose graph optimization failed, window restarted: " + graph->last_error();
@@ -144,7 +143,12 @@ struct Localizer::Implementation {
     if (const auto std_values = graph->position_and_yaw_std(latest)) {
       position_std_m = std::max((*std_values)[0], (*std_values)[1]);
     }
-    corrector.set_target(pose_cache[latest] * nodes.back().odom_to_base.inverse());
+    const Eigen::Isometry3d optimized_target = pose_cache[latest] * nodes.back().odom_to_base.inverse();
+    if (preserve_target_tilt) {
+      corrector.set_planar_target(optimized_target);
+    } else {
+      corrector.set_target(optimized_target);
+    }
     while (nodes.size() > 1 && nodes.front().stamp < nodes.back().stamp - parameters.graph.window_s) {
       pose_cache.erase(nodes.front().index);
       nodes.pop_front();
@@ -269,8 +273,7 @@ struct Localizer::Implementation {
       nodes.push_back({0, pending.stamp, *odom_now});
       lidar.add_keyframe(initial, cloud);
       lidar_nodes.push_back(0);
-      previous_scan_pose = initial;
-      previous_scan_odom = *odom_now;
+      last_scan_odom_for_gate = *odom_now;
       last_keyframe_sec = pending.stamp;
       last_keyframe_odom = *odom_now;
       is_graph_started = true;
@@ -281,16 +284,14 @@ struct Localizer::Implementation {
     const NodeRecord last = nodes.back();
     const Eigen::Isometry3d last_pose = pose_of(last.index);
     const Eigen::Isometry3d wheel_relative = last.odom_to_base.inverse() * *odom_now;
-    const Eigen::Isometry3d prediction = last_pose * wheel_relative;
+    const Eigen::Isometry3d prediction = corrector.target() * *odom_now;
 
     Eigen::Isometry3d best = prediction;
     std::optional<MatchResult> lidar_result;
     if (lidar.has_submap()) {
-      // The LiDAR prediction starts at the previous SCAN (10 Hz), so the gate compares with at most
-      // 0.1 s of wheel motion, not with everything since the last keyframe.
-      const Eigen::Isometry3d scan_relative = previous_scan_odom.inverse() * *odom_now;
-      const Eigen::Isometry3d scan_prediction = previous_scan_pose * scan_relative;
-      MatchResult result = lidar.match(cloud, scan_prediction, scan_relative.translation().norm());
+      // Keep the gate's scan-to-scan wheel distance independent of the optimized prediction.
+      const Eigen::Isometry3d scan_relative = last_scan_odom_for_gate.inverse() * *odom_now;
+      MatchResult result = lidar.match(cloud, prediction, scan_relative.translation().norm());
       if (result.is_accepted) {
         best = result.target_to_source;
         lidar_result = result;
@@ -300,11 +301,7 @@ struct Localizer::Implementation {
 
     const double moved_since_keyframe_m =
         (odom_now->translation() - last_keyframe_odom.translation()).norm();
-    const auto remember_scan = [&](const Eigen::Isometry3d& pose) {
-      previous_scan_pose = pose;
-      previous_scan_odom = *odom_now;
-    };
-    remember_scan(best);
+    last_scan_odom_for_gate = *odom_now;
     const bool is_keyframe = moved_since_keyframe_m >= parameters.keyframe_distance_m ||
                              pending.stamp - last_keyframe_sec >= parameters.keyframe_time_s;
     if (is_keyframe) {
@@ -363,7 +360,7 @@ struct Localizer::Implementation {
       last_gps_sec = pending.stamp;
       mark_absolute(pending.stamp);
     }
-    if (is_new_node || decision.measurement) refresh_after_optimize();
+    if (is_new_node || decision.measurement) refresh_after_optimize(true);
   }
 
   StateInputs make_state_inputs(double now_sec) const {
