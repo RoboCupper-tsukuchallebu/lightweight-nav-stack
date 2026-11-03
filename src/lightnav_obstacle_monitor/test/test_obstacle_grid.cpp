@@ -87,7 +87,7 @@ TEST(ObstacleGridTest, TenCentimeterCurbIsNotOccupied)
   EXPECT_EQ(countOccupied(grid.occupiedCells()), 0U);
 }
 
-TEST(ObstacleGridTest, RaisedSurfaceWithoutGroundPointsOccupiesOnlyTheHighCell)
+TEST(ObstacleGridTest, RaisedCellWithOnlyTopPointsAndSurroundingGroundIsOccupied)
 {
   const ObstacleMonitorParameters parameters;
   ASSERT_LT(0.30 - 0.25, parameters.heightDifferenceThresholdMeters);
@@ -115,6 +115,42 @@ TEST(ObstacleGridTest, TenDegreeSlopeWithMultiplePointsInEveryCellIsNotOccupied)
     grid.addPoint3d(centerX - 0.01, centerY, (centerX - 0.01) * tangent);
     grid.addPoint3d(centerX + 0.01, centerY, (centerX + 0.01) * tangent);
   }
+  EXPECT_EQ(countOccupied(grid.occupiedCells()), 0U);
+}
+
+TEST(ObstacleGridTest, TenDegreeSlopeAtCellEdgesAndNeighborRadiusBoundaryIsNotOccupied)
+{
+  const ObstacleMonitorParameters parameters;
+  auto grid = makeGrid(parameters);
+  const auto & geometry = grid.geometry();
+  const auto targetIndex = *geometry.cellIndex(2.05, 0.05);
+  const auto neighborIndex = *geometry.cellIndex(1.55, 0.05);
+  ASSERT_NEAR(
+    geometry.cellCenterX(targetIndex) - geometry.cellCenterX(neighborIndex),
+    parameters.stepNeighborRadiusMeters, 1e-12);
+  const double tangent = std::tan(10.0 * kDegreesToRadians);
+  // Stay just inside each cell so floating-point rounding cannot move a point across its edge.
+  const double edgeOffset = parameters.cellSizeMeters / 2.0 - 1e-8;
+  for (const auto cellIndex : {targetIndex, neighborIndex}) {
+    for (const double offset : {-edgeOffset, edgeOffset}) {
+      const double pointX = geometry.cellCenterX(cellIndex) + offset;
+      ASSERT_EQ(geometry.cellIndex(pointX, 0.05), cellIndex);
+      grid.addPoint3d(pointX, 0.05, pointX * tangent);
+    }
+  }
+  const double maximumHeightDifference =
+    (parameters.stepNeighborRadiusMeters + 2.0 * edgeOffset) * tangent;
+  ASSERT_NEAR(maximumHeightDifference, 0.6 * tangent, 1e-8);
+  ASSERT_LT(maximumHeightDifference, parameters.heightDifferenceThresholdMeters);
+  EXPECT_EQ(countOccupied(grid.occupiedCells()), 0U);
+}
+
+TEST(ObstacleGridTest, SingleTopPointWithSufficientNeighborGroundIsNotOccupied)
+{
+  auto grid = makeGrid({});
+  grid.addPoint3d(2.05, 0.05, 0.30);
+  grid.addPoint3d(2.15, 0.05, 0.0);
+  grid.addPoint3d(2.16, 0.05, 0.0);
   EXPECT_EQ(countOccupied(grid.occupiedCells()), 0U);
 }
 

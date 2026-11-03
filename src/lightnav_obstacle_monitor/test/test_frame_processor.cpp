@@ -20,6 +20,7 @@ namespace
 constexpr int kRingCount = 32;
 constexpr int kAzimuthCount = 2160;  // 32 * 2160 = 69,120 points, like one HDL-32E frame
 constexpr double kSensorHeightMeters = 0.7;
+constexpr double kCylinderHeightMeters = 1.0;
 
 Eigen::Isometry3d sensorMount()
 {
@@ -59,7 +60,7 @@ sensor_msgs::msg::PointCloud2 makeSyntheticFrame()
       const double discriminant = quadraticB * quadraticB - 4.0 * quadraticA * quadraticC;
       if (discriminant >= 0.0 && quadraticA > 1e-9) {
         const double hitRange = (-quadraticB - std::sqrt(discriminant)) / (2.0 * quadraticA);
-        const bool isBelowTop = kSensorHeightMeters + hitRange * direction.z() <= 1.0;
+        const bool isBelowTop = kSensorHeightMeters + hitRange * direction.z() <= kCylinderHeightMeters;
         if (hitRange > 0.0 && isBelowTop) {
           range = std::min(range, hitRange);
         }

@@ -83,7 +83,8 @@ ObstacleMonitorNode::CallbackReturn ObstacleMonitorNode::on_configure(const rclc
 
   const bool isValid = parameters_.cellSizeMeters > 0.0 && parameters_.gridSizeMeters > 0.0 &&
     std::isfinite(parameters_.stepNeighborRadiusMeters) &&
-    parameters_.stepNeighborRadiusMeters >= 0.0 && watchdogHz_ > 0.0 && (!pointsTopic_.empty() || !scanTopic_.empty());
+    parameters_.stepNeighborRadiusMeters >= 0.0 && watchdogHz_ > 0.0 &&
+    (!pointsTopic_.empty() || !scanTopic_.empty());
   if (!isValid) {
     RCLCPP_ERROR(get_logger(), "invalid parameters: sizes and watchdog_hz must be positive, step_neighbor_radius_m must be finite and nonnegative, and at least one input topic is needed");
     return CallbackReturn::FAILURE;

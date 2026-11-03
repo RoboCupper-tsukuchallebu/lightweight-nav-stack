@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <string>
 
@@ -153,6 +154,14 @@ protected:
 TEST_F(ObstacleMonitorNodeTest, NegativeStepNeighborRadiusIsRejected)
 {
   ASSERT_TRUE(monitor_->set_parameter(rclcpp::Parameter("step_neighbor_radius_m", -0.1)).successful);
+  EXPECT_EQ(
+    monitor_->configure().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED);
+}
+
+TEST_F(ObstacleMonitorNodeTest, NaNStepNeighborRadiusIsRejected)
+{
+  ASSERT_TRUE(monitor_->set_parameter(rclcpp::Parameter(
+    "step_neighbor_radius_m", std::numeric_limits<double>::quiet_NaN())).successful);
   EXPECT_EQ(
     monitor_->configure().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED);
 }
