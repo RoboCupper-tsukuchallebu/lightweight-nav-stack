@@ -6,6 +6,7 @@ import time
 
 import pytest
 import rclpy
+from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped
 from lifecycle_msgs.msg import Transition
 from lifecycle_msgs.srv import ChangeState
@@ -211,6 +212,7 @@ def test_cancel_during_planning_is_prompt(rig):
         path_count = len(harness.received_paths)
         started = time.monotonic()
         cancel_future = goal_handle.cancel_goal_async()
+        # fixture は tick_hz=20.0（周期 0.05 s）で次の tick に cancel を検知し、その場で停止経路を出すため 0.3 s を上限とする。
         assert wait_until(
             lambda: any(not path.path.poses for path in harness.received_paths[path_count:]),
             timeout_s=0.3)
@@ -218,6 +220,7 @@ def test_cancel_during_planning_is_prompt(rig):
         assert wait_until(cancel_future.done)
         result = harness.result_of(goal_handle, timeout_s=WAIT_TIMEOUT_S)
         assert not result.result.success
+        assert result.status == GoalStatus.STATUS_CANCELED
     finally:
         gate.set()
 
