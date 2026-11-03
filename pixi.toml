@@ -26,6 +26,9 @@ geographiclib-cpp = "*"
 ros-jazzy-velodyne = "*"
 ros-jazzy-nmea-navsat-driver = "*"
 
+[feature.gui.dependencies]
+ros-jazzy-rviz2 = "*"
+
 [feature.eval.dependencies]
 rosbags = "*"
 evo = "*"
@@ -34,6 +37,7 @@ matplotlib = "*"
 [environments]
 hardware = ["hardware"]
 eval = ["eval"]
+gui = ["gui"]
 
 [activation]
 # Skipped when install/ does not exist yet (before the first build).
@@ -43,11 +47,16 @@ env = { ROS_DOMAIN_ID = "43", ROS_AUTOMATIC_DISCOVERY_RANGE = "LOCALHOST" }
 [tasks]
 # No --symlink-install: it fails with recent setuptools.
 build = "colcon build --merge-install --base-paths src --cmake-args -DCMAKE_BUILD_TYPE=Release -DPython3_FIND_STRATEGY=LOCATION -DPython3_ROOT_DIR=$CONDA_PREFIX -DPython3_FIND_FRAMEWORK=NEVER"
-# Default (activation) is domain 43, localhost only, so nothing reaches a real robot on domain 42.
-test = { cmd = "colcon test --merge-install --base-paths src --return-code-on-test-failure && colcon test-result --verbose", depends-on = ["build"], env = { DYLD_LIBRARY_PATH = "$PIXI_PROJECT_ROOT/install/lib" } }
+# Tests run on domain 44 (localhost only), never on 42 (robot) or 43 (GUI / default), so a running GUI
+# cannot mix TF into tests. The task env overrides the [activation] env (checked with pixi 0.59), and the
+# plugin aborts the run unless the value is exactly 44. colcon and SIP strip DYLD_LIBRARY_PATH, so it is
+# passed as LIGHTNAV_DYLD_LIBRARY_PATH and restored by the plugin (see CLAUDE.md).
+test = { cmd = "PYTHONPATH=$PIXI_PROJECT_ROOT/tools/pytest_plugins:$PYTHONPATH colcon test --merge-install --base-paths src --return-code-on-test-failure && colcon test-result --verbose", depends-on = ["build"], env = { ROS_DOMAIN_ID = "44", ROS_AUTOMATIC_DISCOVERY_RANGE = "LOCALHOST", PYTEST_PLUGINS = "lightnav_test_environment", LIGHTNAV_DYLD_LIBRARY_PATH = "$PIXI_PROJECT_ROOT/install/lib" } }
 lint = "ruff check src"
 # macOS SIP strips DYLD_LIBRARY_PATH set by activation, so pass it as task env.
 # `pixi run ros2 run|launch ...` resolves to this task, so follow-up PRs need nothing special.
 ros2 = { cmd = "ros2", env = { DYLD_LIBRARY_PATH = "$PIXI_PROJECT_ROOT/install/lib" } }
 # The only way to reach a real robot (domain 42). Needs human approval every time; agents must not use it.
 ros2-robot = { cmd = "ros2", env = { ROS_DOMAIN_ID = "42", ROS_AUTOMATIC_DISCOVERY_RANGE = "SUBNET", DYLD_LIBRARY_PATH = "$PIXI_PROJECT_ROOT/install/lib" } }
+# RViz2 + simulator in one command. Run as `pixi run -e gui sim-gui` after `pixi run build`.
+sim-gui = { cmd = "ros2 launch lightnav_sim sim_gui.launch.py", env = { DYLD_LIBRARY_PATH = "$PIXI_PROJECT_ROOT/install/lib" } }
