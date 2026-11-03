@@ -34,6 +34,7 @@ struct GpsParameters {
   double max_hdop = 3.0;
   double gate_mahalanobis = 3.0;
   double gps_trusted_std_m = 0.3;
+  double gps_absolute_gate_m = 2.0;
   double altitude_sigma_scale = 3.0;
   double altitude_sigma_floor_m = 1.0;
   Eigen::Vector3d antenna_in_base = Eigen::Vector3d::Zero();
@@ -50,6 +51,8 @@ enum class GpsRejection { kNone, kNoFix, kHdop, kGate, kInvalid };
 struct GpsDecision {
   GpsRejection rejection = GpsRejection::kNone;
   std::optional<GpsMeasurement> measurement;
+  // nullopt for quality rejection; otherwise the ordinary gate diagnostic.
+  std::optional<bool> gate_would_reject;
 };
 
 // Fraction of gate rejections in a complete recent observation window.

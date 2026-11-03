@@ -94,6 +94,7 @@ struct Scenario {
   bool has_real_map_hole = false;  // remove map points inside the hole instead of faking a failed match
   double wheel_scale = 1.05;
   double ramp_blend_m = 0.6;  // 0 = pitch steps 10 degrees at once
+  double open_corridor_length_m = 120.0;
   bool is_open_corridor = false;  // 120 m straight, no end caps
   double map_rebuild_distance_m = 50.0;
   int rebuild_failure_mode = 0;
@@ -153,7 +154,8 @@ struct Report {
 };
 
 Report run(const Scenario& scenario) {
-  const Course& course = scenario.is_open_corridor ? kOpenCorridor : (scenario.use_spec_course ? kSpecCourse : kShortCourse);
+  const Course open_corridor{{scenario.open_corridor_length_m}, {}};
+  const Course& course = scenario.is_open_corridor ? open_corridor : (scenario.use_spec_course ? kSpecCourse : kShortCourse);
   SyntheticWorld world(course.centerline(), !scenario.is_open_corridor);
   if (scenario.has_pillars) world.add_pillars();
   constexpr double kRampAngleRad = 10.0 * M_PI / 180.0;
@@ -365,7 +367,7 @@ Report run(const Scenario& scenario) {
   report.last_error = localizer.last_error();
   report.wheel_only_end_error_m = (wheel_only.translation() - truth_at(course.total_sec()).translation()).head<2>().norm();
   const auto* test_info = ::testing::UnitTest::GetInstance()->current_test_info();
-  std::printf("[ MEASURED ] scenario=%s error_m=%.9g final_error_m=%.9g pitch_error_ramp_deg=%.9g pitch_step_recovery_sec=%.9g pitch_error_after_step_entry_deg=%.9g pitch_error_after_step_exit_deg=%.9g pitch_samples_after_step_entry=%d pitch_samples_after_step_exit=%d scan_period_sec=%.9g wheel_sigma=%.9g gps_sigma=%.9g degeneracy_ratio=%.9g pillars=%d gps_accepted_before_10s=%d gps_accepted_10_to_20s=%d gps_accepted_after_20s=%d gps_submitted_count=%d gps_acceptance_ratio=%.9g gps_time_gap_rejection_count=%zu gps_gate_rejection_count=%zu max_keyframe_interval_sec=%.9g saw_conflict=%d samples=time_sec,truth_x_m,pitch_error_deg,along_track_error_m,position_std_m,eigen_ratio,weak_axis_x,weak_axis_y,weak_axis_z:",
+  std::printf("[ MEASURED ] scenario=%s error_m=%.9g final_error_m=%.9g pitch_error_ramp_deg=%.9g pitch_step_recovery_sec=%.9g pitch_error_after_step_entry_deg=%.9g pitch_error_after_step_exit_deg=%.9g pitch_samples_after_step_entry=%d pitch_samples_after_step_exit=%d scan_period_sec=%.9g wheel_sigma=%.9g gps_sigma=%.9g degeneracy_ratio=%.9g pillars=%d gps_accepted_before_10s=%d gps_accepted_10_to_20s=%d gps_accepted_after_20s=%d gps_submitted_count=%d gps_acceptance_ratio=%.9g gps_time_gap_rejection_count=%zu gps_gate_rejection_count=%zu max_keyframe_interval_sec=%.9g max_gps_factors_per_keyframe=%zu saw_conflict=%d samples=time_sec,truth_x_m,pitch_error_deg,along_track_error_m,position_std_m,eigen_ratio,weak_axis_x,weak_axis_y,weak_axis_z:",
       test_info->name(), report.max_position_error_m, report.final_position_error_m,
       report.max_pitch_error_on_ramp_deg, report.pitch_step_recovery_sec,
       report.max_pitch_error_after_step_entry_deg, report.max_pitch_error_after_step_exit_deg,
@@ -376,7 +378,7 @@ Report run(const Scenario& scenario) {
       report.gps_accepted_by_interval[1], report.gps_accepted_by_interval[2],
       report.gps_submitted_count, report.gps_acceptance_ratio,
       report.gps_time_gap_rejection_count, localizer.gps_gate_rejection_count(),
-      localizer.max_keyframe_interval_sec(), report.saw_conflict);
+      localizer.max_keyframe_interval_sec(), localizer.max_gps_factors_per_keyframe(), report.saw_conflict);
   for (const auto& sample : report.samples) {
     std::printf("%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g;", sample.time_sec,
         sample.truth_x_m, sample.pitch_error_deg, sample.along_track_error_m, sample.position_std_m,
@@ -639,7 +641,7 @@ TEST(LocalizerMeasurements, PillarsAppearInMapAndScan) {
   EXPECT_TRUE(scan_changed);
 }
 
-TEST(Localizer, RejectsGpsBeyondHalfSecondFromKeyframe) {
+TEST(Localizer, RejectsGpsBeyondKeyframeIntervalAndMargin) {
   Localizer localizer(LocalizerParameters{}, PointList{}, kOrigin);
   const Eigen::Isometry3d stationary_pose = Eigen::Isometry3d::Identity();
   localizer.initialize(stationary_pose);
@@ -649,14 +651,14 @@ TEST(Localizer, RejectsGpsBeyondHalfSecondFromKeyframe) {
   GpsFix fix = fix_at_enu(0.0, 0.0);
   fix.has_known_covariance = true;
   fix.known_std_m = 0.1;
-  localizer.on_gps(0.5, fix);
-  localizer.on_wheel_odom(0.5, stationary_pose);
+  localizer.on_gps(1.2, fix);
+  localizer.on_wheel_odom(1.2, stationary_pose);
   EXPECT_EQ(localizer.gps_time_gap_rejection_count(), 0u);
-  EXPECT_DOUBLE_EQ(localizer.last_accepted_gps_stamp_sec(), 0.5);
-  localizer.on_gps(0.51, fix);
-  localizer.on_wheel_odom(0.51, stationary_pose);
+  EXPECT_DOUBLE_EQ(localizer.last_accepted_gps_stamp_sec(), 1.2);
+  localizer.on_gps(1.21, fix);
+  localizer.on_wheel_odom(1.21, stationary_pose);
   EXPECT_EQ(localizer.gps_time_gap_rejection_count(), 1u);
-  EXPECT_DOUBLE_EQ(localizer.last_accepted_gps_stamp_sec(), 0.5);
+  EXPECT_DOUBLE_EQ(localizer.last_accepted_gps_stamp_sec(), 1.2);
 }
 
 TEST(Localizer, CompensatesWheelDisplacementBetweenGpsAndKeyframe) {
@@ -729,4 +731,81 @@ TEST(Localizer, KeyframeTimeComparisonToleratesTimestampRounding) {
     if (stamp == 1.1999) EXPECT_DOUBLE_EQ(localizer.max_keyframe_interval_sec(), 0.0);
   }
   EXPECT_NEAR(localizer.max_keyframe_interval_sec(), 1.0, 1e-12);
+}
+
+TEST(Localizer, AcceptsOneHertzGpsAtLateKeyframePhases) {
+  for (const double phase : {0.6, 0.7, 0.8, 0.9}) {
+    Localizer localizer(LocalizerParameters{}, PointList{}, kOrigin);
+    const auto pose = Eigen::Isometry3d::Identity();
+    localizer.initialize(pose);
+    GpsFix fix = fix_at_enu(0.0, 0.0);
+    fix.has_known_covariance = true;
+    fix.known_std_m = 0.1;
+    int accepted = 0;
+    for (int second = 0; second < 10; ++second) {
+      localizer.on_wheel_odom(second, pose);
+      localizer.on_scan(second, std::vector<TimedPoint>(10, TimedPoint{Eigen::Vector3f(1, 0, 0), 0.0F}));
+      localizer.on_wheel_odom(second, pose);
+      localizer.on_gps(second + phase, fix);
+      localizer.on_wheel_odom(second + phase, pose);
+      if (localizer.last_accepted_gps_stamp_sec() == second + phase) ++accepted;
+    }
+    EXPECT_GE(accepted, 8);
+    std::printf("[ MEASURED ] gps_phase_sec=%.1f accepted=%d submitted=10\n", phase, accepted);
+  }
+}
+
+TEST(Localizer, PreciseBiasedGpsConflictsWithoutQualityRejectionsDilutingWindow) {
+  LocalizerParameters parameters;
+  parameters.gps_conflict_window = 4;
+  Localizer localizer(parameters, PointList{}, kOrigin);
+  const auto pose = Eigen::Isometry3d::Identity();
+  localizer.initialize(pose);
+  GpsFix fix = fix_at_enu(3.0, 0.0);
+  fix.has_known_covariance = true;
+  fix.known_std_m = 0.1;
+  std::optional<LocalizerOutput> output;
+  for (int index = 0; index < 10; ++index) {
+    const double stamp = index * 0.1;
+    localizer.on_wheel_odom(stamp, pose);
+    localizer.on_scan(stamp, std::vector<TimedPoint>(10, TimedPoint{Eigen::Vector3f(1, 0, 0), 0.0F}));
+    fix.status = (index == 1 || index == 4 || index == 7 || index == 9) ? GpsFixStatus::kFix : GpsFixStatus::kNoFix;
+    localizer.on_gps(stamp, fix);
+    output = localizer.on_wheel_odom(stamp, pose);
+  }
+  ASSERT_TRUE(output);
+  EXPECT_EQ(localizer.gps_gate_rejection_count(), 4u);
+  EXPECT_TRUE(output->is_gps_conflict);
+  EXPECT_LT(localizer.last_accepted_gps_stamp_sec(), 0.0);
+}
+
+TEST(LocalizerMeasurements, TenHertzGpsFactorsAccumulateOnOneKeyframe) {
+  Localizer localizer(LocalizerParameters{}, PointList{}, kOrigin);
+  const auto pose = Eigen::Isometry3d::Identity();
+  localizer.initialize(pose);
+  localizer.on_wheel_odom(0.0, pose);
+  localizer.on_scan(0.0, std::vector<TimedPoint>(10, TimedPoint{Eigen::Vector3f(1, 0, 0), 0.0F}));
+  localizer.on_wheel_odom(0.0, pose);
+  GpsFix fix = fix_at_enu(0.0, 0.0);
+  for (int index = 0; index < 12; ++index) {
+    const double stamp = index * 0.1;
+    localizer.on_gps(stamp, fix);
+    localizer.on_wheel_odom(stamp, pose);
+  }
+  EXPECT_EQ(localizer.max_gps_factors_per_keyframe(), 12u);
+  std::printf("[ MEASURED ] gps_hz=10 keyframes=1 duration_sec=1.1 max_gps_factors_per_keyframe=%zu\n", localizer.max_gps_factors_per_keyframe());
+}
+
+TEST(Localizer, DegenerateCorridorWithoutGpsDoesNotBecomeLostOver150Meters) {
+  Scenario scenario;
+  scenario.is_open_corridor = true;
+  scenario.open_corridor_length_m = 150.0;
+  // Isolate uncertainty growth while map matches remain fresh; wheel drift is tested separately.
+  scenario.wheel_scale = 1.0;
+  scenario.is_gps_enabled = false;
+  const Report report = run(scenario);
+  EXPECT_TRUE(report.is_tracking_at_end);
+  ASSERT_FALSE(report.samples.empty());
+  EXPECT_GT(report.samples.back().time_sec, 249.0);
+  EXPECT_GT(report.samples.back().position_std_m, 2.0);
 }

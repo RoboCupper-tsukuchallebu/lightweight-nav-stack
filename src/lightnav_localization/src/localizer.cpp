@@ -88,6 +88,8 @@ struct Localizer::Implementation {
   double last_gps_sec = kNeverSec;
   std::size_t gps_time_gap_rejections = 0;
   std::size_t gps_gate_rejections = 0;
+  std::map<int, std::size_t> gps_factors_per_keyframe;
+  std::size_t max_gps_factors_per_keyframe = 0;
   double max_keyframe_interval_sec = 0.0;
   double last_match_attempt_sec = kNeverSec;
   double absolute_reference_sec = 0.0;
@@ -132,6 +134,7 @@ struct Localizer::Implementation {
       graph = std::make_unique<PoseGraph>(parameters.graph);
       graph->add_first_node(latest_node.stamp, current, parameters.initial_sigma_xy_m,
                             parameters.initial_sigma_yaw_rad);
+      gps_factors_per_keyframe.clear();
       nodes.clear();
       nodes.push_back({0, latest_node.stamp, latest_node.odom_to_base});
       lidar = LidarOdometry(parameters.lidar_odometry);
@@ -153,6 +156,7 @@ struct Localizer::Implementation {
       corrector.set_target(optimized_target);
     }
     while (nodes.size() > 1 && nodes.front().stamp < nodes.back().stamp - parameters.graph.window_s) {
+      gps_factors_per_keyframe.erase(nodes.front().index);
       pose_cache.erase(nodes.front().index);
       nodes.pop_front();
     }
@@ -353,8 +357,9 @@ struct Localizer::Implementation {
     const Eigen::Isometry3d predicted = keyframe_pose * nearest->odom_to_base.inverse() * *odom_at_fix;
     const GpsDecision decision = gps->evaluate(pending.fix, predicted, position_std_m);
     if (decision.rejection == GpsRejection::kGate) ++gps_gate_rejections;
-    conflict.record(decision.rejection == GpsRejection::kGate);
+    if (decision.gate_would_reject) conflict.record(*decision.gate_would_reject);
     if (decision.measurement) {
+      max_gps_factors_per_keyframe = std::max(max_gps_factors_per_keyframe, ++gps_factors_per_keyframe[node_index]);
       const Eigen::Vector3d displacement = predicted.translation() - keyframe_pose.translation();
       graph->add_gps_factor(node_index, decision.measurement->base_position - displacement,
                             decision.measurement->sigma_m);
@@ -366,6 +371,7 @@ struct Localizer::Implementation {
 
   StateInputs make_state_inputs(double now_sec) const {
     StateInputs inputs;
+    inputs.allow_uncertain_map_tracking = true;
     inputs.now_sec = now_sec;
     inputs.last_wheel_sec = last_wheel_sec;
     inputs.last_scan_sec = last_scan_sec;
@@ -460,6 +466,7 @@ std::optional<Eigen::Vector3d> Localizer::last_match_weakest_axis() const {
 double Localizer::last_accepted_gps_stamp_sec() const { return implementation_->last_gps_sec; }
 std::size_t Localizer::gps_time_gap_rejection_count() const { return implementation_->gps_time_gap_rejections; }
 std::size_t Localizer::gps_gate_rejection_count() const { return implementation_->gps_gate_rejections; }
+std::size_t Localizer::max_gps_factors_per_keyframe() const { return implementation_->max_gps_factors_per_keyframe; }
 double Localizer::max_keyframe_interval_sec() const { return implementation_->max_keyframe_interval_sec; }
 double Localizer::last_absolute_observation_stamp_sec() const { return implementation_->absolute_reference_sec; }
 

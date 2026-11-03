@@ -73,3 +73,15 @@ TEST(StateMachine, LargePositionStdIsLostEvenWhileTrackingOrGpsOnly) {
     EXPECT_EQ(machine.update(inputs), LocalizationState::kLost);
   }
 }
+
+TEST(StateMachine, LocalizerMayTrackUncertainMapUntilTheMatchExpires) {
+  StateMachine machine(StateMachineParameters{});
+  machine.start_tracking();
+  StateInputs inputs = fresh_inputs(5.0);
+  inputs.allow_uncertain_map_tracking = true;
+  inputs.last_map_match_sec = 5.0;
+  inputs.position_std_m = 3.0;
+  EXPECT_EQ(machine.update(inputs), LocalizationState::kTracking);
+  inputs.now_sec = inputs.last_wheel_sec = inputs.last_scan_sec = 11.0;
+  EXPECT_EQ(machine.update(inputs), LocalizationState::kLost);
+}

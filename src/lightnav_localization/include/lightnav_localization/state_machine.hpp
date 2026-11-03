@@ -24,6 +24,7 @@ struct StateInputs {
   double odom_only_distance_m = 0.0;  // distance since the last map match or GPS
   double odom_only_duration_s = 0.0;
   bool requires_scans = true;
+  bool allow_uncertain_map_tracking = false;  // temporary localizer policy pending field trials
 };
 
 // LOST latches until reset(); output is withheld in INITIALIZING, LOST and INPUT_STALE.
@@ -40,11 +41,11 @@ class StateMachine {
         (inputs.requires_scans && inputs.now_sec - inputs.last_scan_sec > parameters_.scan_timeout_s)) {
       return state_ = LocalizationState::kInputStale;
     }
-    // Position uncertainty applies in every state, not only when nothing absolute is available.
-    if (inputs.position_std_m > parameters_.lost_position_std_m) {
+    const bool has_map = inputs.now_sec - inputs.last_map_match_sec <= parameters_.tracking_window_s;
+    if (inputs.position_std_m > parameters_.lost_position_std_m &&
+        !(inputs.allow_uncertain_map_tracking && has_map)) {
       return state_ = LocalizationState::kLost;
     }
-    const bool has_map = inputs.now_sec - inputs.last_map_match_sec <= parameters_.tracking_window_s;
     const bool has_gps = inputs.now_sec - inputs.last_gps_sec <= parameters_.gps_timeout_s;
     if (has_map) return state_ = LocalizationState::kTracking;
     if (has_gps) return state_ = LocalizationState::kGpsOnly;

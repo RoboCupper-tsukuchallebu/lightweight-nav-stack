@@ -68,7 +68,17 @@ GpsDecision GpsConverter::evaluate(const GpsFix& fix, const Eigen::Isometry3d& p
   const bool trusted_fix = fix.has_known_covariance && std::isfinite(fix.known_std_m) &&
                            fix.known_std_m > 0.0 &&
                            fix.known_std_m <= parameters_.gps_trusted_std_m;
-  if (!trusted_fix && difference.head<2>().norm() / combined_std > parameters_.gate_mahalanobis) {
+  const double horizontal_distance = difference.head<2>().norm();
+  const bool absolute_rejection = horizontal_distance > parameters_.gps_absolute_gate_m;
+  const bool mahalanobis_rejection = horizontal_distance / combined_std > parameters_.gate_mahalanobis;
+  decision.gate_would_reject = absolute_rejection || mahalanobis_rejection;
+  // Keep the conflict diagnostic independent of the recovery allowance.
+  const double trusted_gate_distance_m = std::max(
+      parameters_.gps_absolute_gate_m, parameters_.gate_mahalanobis * predicted_position_std_m);
+  const bool reject_measurement = trusted_fix
+      ? horizontal_distance > trusted_gate_distance_m
+      : mahalanobis_rejection;
+  if (reject_measurement) {
     decision.rejection = GpsRejection::kGate;
     return decision;
   }

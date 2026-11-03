@@ -87,7 +87,9 @@ TEST(GpsInput, RejectsNanAndFallsBackWhenKnownStdIsZero) {
 }
 
 TEST(GpsInput, TrustedKnownCovarianceBypassesOnlyGate) {
-  const GpsConverter converter(kOrigin, GpsParameters{});
+  GpsParameters parameters;
+  parameters.gps_absolute_gate_m = 200.0;  // isolate the Mahalanobis bypass
+  const GpsConverter converter(kOrigin, parameters);
   const Eigen::Isometry3d predicted = Eigen::Isometry3d::Identity();
   GpsFix fix = fix_at_enu(100.0, 0.0);
   fix.has_known_covariance = true;
@@ -143,4 +145,55 @@ TEST(GpsInput, ConflictDefaultsToHalfOfTenObservations) {
   EXPECT_TRUE(counter.is_conflict());
   counter.record(false);
   EXPECT_FALSE(counter.is_conflict());
+}
+
+TEST(GpsInput, TrustedFixReportsOrdinaryGateAndObeysAbsoluteGate) {
+  const GpsConverter converter(kOrigin, GpsParameters{});
+  GpsFix fix = fix_at_enu(1.0, 0.0);
+  fix.has_known_covariance = true;
+  fix.known_std_m = 0.1;
+  const auto accepted = converter.evaluate(fix, Eigen::Isometry3d::Identity(), 0.1);
+  EXPECT_TRUE(accepted.measurement);
+  ASSERT_TRUE(accepted.gate_would_reject);
+  EXPECT_TRUE(*accepted.gate_would_reject);
+  fix = fix_at_enu(3.0, 0.0);
+  fix.has_known_covariance = true;
+  fix.known_std_m = 0.1;
+  // A confident prediction must still reject a precise fix biased by three metres.
+  const auto rejected = converter.evaluate(fix, Eigen::Isometry3d::Identity(), 0.1);
+  EXPECT_EQ(rejected.rejection, GpsRejection::kGate);
+  ASSERT_TRUE(rejected.gate_would_reject);
+  EXPECT_TRUE(*rejected.gate_would_reject);
+  fix.status = GpsFixStatus::kNoFix;
+  EXPECT_FALSE(converter.evaluate(fix, Eigen::Isometry3d::Identity(), 0.1).gate_would_reject);
+}
+
+
+TEST(GpsInput, TrustedFixRecoversWhenPredictionIsUncertain) {
+  const GpsConverter converter(kOrigin, GpsParameters{});
+  GpsFix fix = fix_at_enu(0.0, 0.0);
+  fix.has_known_covariance = true;
+  fix.known_std_m = 0.1;
+  Eigen::Isometry3d prediction = Eigen::Isometry3d::Identity();
+  prediction.translation().x() = 3.0;
+  const auto decision = converter.evaluate(fix, prediction, 1.5);
+  ASSERT_TRUE(decision.measurement);
+  EXPECT_EQ(decision.rejection, GpsRejection::kNone);
+  ASSERT_TRUE(decision.gate_would_reject);
+  EXPECT_TRUE(*decision.gate_would_reject);  // recovery does not hide the conflict diagnostic
+  EXPECT_EQ(converter.evaluate(fix, prediction, 0.1).rejection, GpsRejection::kGate);
+  prediction.translation().x() = 5.0;
+  EXPECT_EQ(converter.evaluate(fix, prediction, 1.5).rejection, GpsRejection::kGate);
+}
+
+TEST(GpsInput, OrdinaryFixUsesMahalanobisGateBeyondTwoMeters) {
+  const GpsConverter converter(kOrigin, GpsParameters{});
+  GpsFix fix = fix_at_enu(2.5, 0.0);
+  fix.has_known_covariance = true;
+  fix.known_std_m = 1.0;
+  const auto decision = converter.evaluate(fix, Eigen::Isometry3d::Identity(), 0.1);
+  EXPECT_TRUE(decision.measurement);
+  EXPECT_EQ(decision.rejection, GpsRejection::kNone);
+  ASSERT_TRUE(decision.gate_would_reject);
+  EXPECT_TRUE(*decision.gate_would_reject);
 }
