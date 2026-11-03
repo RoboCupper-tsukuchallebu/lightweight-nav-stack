@@ -32,11 +32,12 @@ def call_plan_path(planner_node, client_node, client):
     return {
         "answered": response is not None,
         "success": bool(response and response.success),
+        "pose_count": len(response.path.poses) if response else 0,
         "waypoint_indices": list(response.waypoint_indices) if response else [],
     }
 
 
-def wait_until_service_gone(planner_node, client_node, client):
+def is_service_still_ready_after_wait(planner_node, client_node, client):
     """Spin so graph updates arrive, then report whether the client still sees the service."""
     executor = SingleThreadedExecutor()
     executor.add_node(planner_node)
@@ -54,8 +55,8 @@ def main(shutdown_from_active):
     planner_node = PlannerNode()
     client_node = rclpy.create_node("planner_probe_client")
     client = client_node.create_client(PlanPath, SERVICE_NAME)
-    report = {"ready_before_activate": client.service_is_ready()}
     planner_node.trigger_configure()
+    report = {"ready_after_configure": client.wait_for_service(timeout_sec=1.0)}
     planner_node.trigger_activate()
     report["ready_when_active"] = client.wait_for_service(timeout_sec=CALL_TIMEOUT_S)
     report["round_trip"] = call_plan_path(planner_node, client_node, client)
@@ -63,7 +64,7 @@ def main(shutdown_from_active):
         planner_node.trigger_shutdown()
     else:
         planner_node.trigger_deactivate()
-    report["ready_after_exit"] = wait_until_service_gone(planner_node, client_node, client)
+    report["ready_after_exit"] = is_service_still_ready_after_wait(planner_node, client_node, client)
     if not shutdown_from_active:
         planner_node.trigger_activate()
         report["ready_after_reactivate"] = client.wait_for_service(timeout_sec=CALL_TIMEOUT_S)

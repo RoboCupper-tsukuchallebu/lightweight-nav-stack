@@ -131,12 +131,12 @@ def run_real_service_probe(exit_mode):
     return json.loads(completed.stdout.strip().splitlines()[-1])
 
 
-SUCCESS_ROUND_TRIP = {"answered": True, "success": True, "waypoint_indices": [5]}
+SUCCESS_ROUND_TRIP = {"answered": True, "success": True, "pose_count": 6, "waypoint_indices": [5]}
 
 
 def test_deactivate_removes_service_and_reactivate_restores_it():
     report = run_real_service_probe("deactivate")
-    assert report["ready_before_activate"] is False
+    assert report["ready_after_configure"] is False
     assert report["ready_when_active"] is True
     assert report["round_trip"] == SUCCESS_ROUND_TRIP
     assert report["ready_after_exit"] is False
@@ -146,6 +146,7 @@ def test_deactivate_removes_service_and_reactivate_restores_it():
 
 def test_shutdown_from_active_removes_service():
     report = run_real_service_probe("shutdown")
+    assert report["ready_after_configure"] is False
     assert report["ready_when_active"] is True
     assert report["round_trip"] == SUCCESS_ROUND_TRIP
     assert report["ready_after_exit"] is False
