@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -52,9 +53,9 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
     declare_parameter("grid_timeout_s", 0.5);
     declare_parameter("v_avoid", 0.25);
     declare_parameter("arc_candidate_count", 15);
-    declare_parameter("arc_length_m", 1.0);
+    declare_parameter("arc_length_m", 2.0);
     declare_parameter("arc_step_m", 0.1);
-    declare_parameter("max_path_deviation_m", 1.5);
+    declare_parameter("max_path_deviation_m", std::numeric_limits<double>::quiet_NaN());
     declare_parameter("w_path", 1.0);
     declare_parameter("w_heading", 0.5);
     declare_parameter("w_smooth", 0.2);
@@ -66,11 +67,18 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
   }
 
   CallbackReturn on_configure(const rclcpp_lifecycle::State&) override {
+    const double max_path_deviation_m = get_parameter("max_path_deviation_m").as_double();
+    if (!std::isfinite(max_path_deviation_m) || max_path_deviation_m <= 0.0) {
+      RCLCPP_ERROR(get_logger(),
+                   "Specify max_path_deviation_m in the course-specific yaml; "
+                   "the value must be finite and positive (got %f)", max_path_deviation_m);
+      return CallbackReturn::FAILURE;
+    }
     const std::vector<std::string> positive_names = {
         "control_hz", "lookahead_m", "search_window_m", "v_max", "v_min", "v_slow",
         "w_max", "w_rotate", "k_end", "goal_tolerance_m", "rotate_in_place_heading_rad",
         "pose_timeout_s", "obstacle_status_timeout_s", "grid_timeout_s",
-        "v_avoid", "arc_length_m", "arc_step_m", "max_path_deviation_m", "w_path", "w_heading",
+        "v_avoid", "arc_length_m", "arc_step_m", "w_path", "w_heading",
         "w_smooth", "avoid_trigger_m", "avoid_release_m", "rejoin_distance_m",
         "avoid_release_hold_s", "stuck_timeout_s"};
     for (const std::string& name : positive_names) {
@@ -107,7 +115,7 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
     }
     avoid_parameters.arc_length_m = get_parameter("arc_length_m").as_double();
     avoid_parameters.arc_step_m = get_parameter("arc_step_m").as_double();
-    avoid_parameters.max_path_deviation_m = get_parameter("max_path_deviation_m").as_double();
+    avoid_parameters.max_path_deviation_m = max_path_deviation_m;
     avoid_parameters.w_path = get_parameter("w_path").as_double();
     avoid_parameters.w_heading = get_parameter("w_heading").as_double();
     avoid_parameters.w_smooth = get_parameter("w_smooth").as_double();

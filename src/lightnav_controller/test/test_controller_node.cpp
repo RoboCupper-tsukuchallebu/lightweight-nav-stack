@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -15,7 +16,10 @@ class ControllerNodeLifecycle : public ::testing::Test {
   static void SetUpTestSuite() { rclcpp::init(0, nullptr); }
   static void TearDownTestSuite() { rclcpp::shutdown(); }
 
-  void SetUp() override { node_ = std::make_shared<lightnav_controller::ControllerNode>(); }
+  void SetUp() override {
+    node_ = std::make_shared<lightnav_controller::ControllerNode>();
+    node_->set_parameter(rclcpp::Parameter("max_path_deviation_m", 2.5));
+  }
 
   void configureAndActivate() {
     ASSERT_EQ(node_->configure().label(), "inactive");
@@ -60,6 +64,25 @@ TEST_F(ControllerNodeLifecycle, CleanupReleasesOutputs) {
 TEST_F(ControllerNodeLifecycle, ConfigureFailsOnNonPositiveParameter) {
   node_->set_parameter(rclcpp::Parameter("v_max", -1.0));
   EXPECT_EQ(node_->configure().label(), "unconfigured");
+}
+
+TEST_F(ControllerNodeLifecycle, ConfigureFailsWithoutMaxPathDeviation) {
+  node_ = std::make_shared<lightnav_controller::ControllerNode>();
+  EXPECT_EQ(node_->configure().label(), "unconfigured");
+}
+
+TEST_F(ControllerNodeLifecycle, ConfigureSucceedsWithMaxPathDeviation) {
+  EXPECT_EQ(node_->configure().label(), "inactive");
+}
+
+TEST_F(ControllerNodeLifecycle, ConfigureFailsWithInvalidMaxPathDeviation) {
+  for (const double max_path_deviation_m :
+       {0.0, -1.0, std::numeric_limits<double>::quiet_NaN(),
+        std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity()}) {
+    SCOPED_TRACE(max_path_deviation_m);
+    node_->set_parameter(rclcpp::Parameter("max_path_deviation_m", max_path_deviation_m));
+    EXPECT_EQ(node_->configure().label(), "unconfigured");
+  }
 }
 
 namespace {

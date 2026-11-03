@@ -131,7 +131,8 @@ std::vector<ArcCandidate> evaluateArcCandidates(const LocalGrid& grid, const Pos
                                                 double previous_curvature_per_m,
                                                 const AvoidParameters& parameters) {
   std::vector<ArcCandidate> candidates;
-  if (parameters.arc_candidate_count < 1 || path_points.empty()) {
+  if (parameters.arc_candidate_count < 1 || path_points.empty() ||
+      !std::isfinite(parameters.max_path_deviation_m) || parameters.max_path_deviation_m <= 0.0) {
     return candidates;
   }
   const double curvature_limit = parameters.w_max_rps / parameters.v_avoid_mps;

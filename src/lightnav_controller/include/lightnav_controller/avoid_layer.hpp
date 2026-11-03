@@ -29,9 +29,9 @@ struct AvoidParameters {
   double v_avoid_mps{0.25};
   double w_max_rps{0.4};
   int arc_candidate_count{15};
-  double arc_length_m{1.0};
+  double arc_length_m{2.0};
   double arc_step_m{0.1};
-  double max_path_deviation_m{1.5};
+  double max_path_deviation_m{std::numeric_limits<double>::quiet_NaN()};
   double w_path{1.0};
   double w_heading{0.5};
   double w_smooth{0.2};

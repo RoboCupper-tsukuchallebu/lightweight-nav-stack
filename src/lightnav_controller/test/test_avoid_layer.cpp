@@ -44,6 +44,12 @@ std::vector<Point2D> makeStraightPath() {
   return path;
 }
 
+AvoidParameters makeAvoidParameters() {
+  AvoidParameters parameters;
+  parameters.max_path_deviation_m = 2.5;
+  return parameters;
+}
+
 const Pose2D kOrigin{0.0, 0.0, 0.0};
 
 AvoidContext makeContext(const std::vector<Point2D>& path, const LocalGrid* grid, double now_s,
@@ -55,7 +61,7 @@ AvoidContext makeContext(const std::vector<Point2D>& path, const LocalGrid* grid
 
 TEST(EvaluateArcCandidates, FreeGridMakesStraightArcTheBest) {
   const auto path = makeStraightPath();
-  const auto candidates = evaluateArcCandidates(makeEmptyGrid(), kOrigin, path, 0, 0.0, AvoidParameters{});
+  const auto candidates = evaluateArcCandidates(makeEmptyGrid(), kOrigin, path, 0, 0.0, makeAvoidParameters());
   ASSERT_EQ(candidates.size(), 15u);
   const auto best = selectBestCandidate(candidates);
   ASSERT_TRUE(best.has_value());
@@ -64,7 +70,7 @@ TEST(EvaluateArcCandidates, FreeGridMakesStraightArcTheBest) {
 
 TEST(EvaluateArcCandidates, CurvatureRangeMatchesWMaxOverVAvoid) {
   const auto candidates =
-      evaluateArcCandidates(makeEmptyGrid(), kOrigin, makeStraightPath(), 0, 0.0, AvoidParameters{});
+      evaluateArcCandidates(makeEmptyGrid(), kOrigin, makeStraightPath(), 0, 0.0, makeAvoidParameters());
   EXPECT_NEAR(candidates.front().curvature_per_m, -1.6, 1e-9);
   EXPECT_NEAR(candidates.back().curvature_per_m, 1.6, 1e-9);
 }
@@ -72,7 +78,7 @@ TEST(EvaluateArcCandidates, CurvatureRangeMatchesWMaxOverVAvoid) {
 TEST(EvaluateArcCandidates, OccupiedCellOnArcRejectsIt) {
   LocalGrid grid = makeEmptyGrid();
   fillRectangle(grid, 1.0, 1.2, -0.1, 0.1);  // straight ahead
-  const auto candidates = evaluateArcCandidates(grid, kOrigin, makeStraightPath(), 0, 0.0, AvoidParameters{});
+  const auto candidates = evaluateArcCandidates(grid, kOrigin, makeStraightPath(), 0, 0.0, makeAvoidParameters());
   EXPECT_FALSE(candidates[7].is_feasible);
   const auto best = selectBestCandidate(candidates);
   ASSERT_TRUE(best.has_value());
@@ -80,7 +86,7 @@ TEST(EvaluateArcCandidates, OccupiedCellOnArcRejectsIt) {
 }
 
 TEST(EvaluateArcCandidates, ArcsEndingBeyondMaxPathDeviationAreRejected) {
-  AvoidParameters parameters;
+  AvoidParameters parameters = makeAvoidParameters();
   parameters.max_path_deviation_m = 0.2;
   const auto candidates = evaluateArcCandidates(makeEmptyGrid(), kOrigin, makeStraightPath(), 0, 0.0, parameters);
   for (const ArcCandidate& candidate : candidates) {
@@ -94,14 +100,14 @@ TEST(EvaluateArcCandidates, ArcsEndingBeyondMaxPathDeviationAreRejected) {
 TEST(EvaluateArcCandidates, AllBlockedSelectsNothing) {
   LocalGrid grid = makeEmptyGrid();
   fillRectangle(grid, 0.3, 0.4, -3.9, 3.9);  // wall across every arc
-  const auto candidates = evaluateArcCandidates(grid, kOrigin, makeStraightPath(), 0, 0.0, AvoidParameters{});
+  const auto candidates = evaluateArcCandidates(grid, kOrigin, makeStraightPath(), 0, 0.0, makeAvoidParameters());
   EXPECT_FALSE(selectBestCandidate(candidates).has_value());
 }
 
 TEST(EvaluateArcCandidates, SmoothnessTermPrefersPreviousCurvatureOnTie) {
   // Symmetric free grid: left and right arcs score the same except for w_smooth.
   const auto candidates =
-      evaluateArcCandidates(makeEmptyGrid(), kOrigin, makeStraightPath(), 0, 0.4, AvoidParameters{});
+      evaluateArcCandidates(makeEmptyGrid(), kOrigin, makeStraightPath(), 0, 0.4, makeAvoidParameters());
   EXPECT_LT(candidates[8].score, candidates[6].score);  // +0.2286 vs -0.2286
 }
 
@@ -110,14 +116,14 @@ TEST(EvaluateArcCandidates, LocalMinimumInConcavePocketHasNoFeasibleArc) {
   fillRectangle(grid, 0.6, 0.7, -1.5, 1.5);   // front
   fillRectangle(grid, 0.3, 0.7, 1.4, 1.5);    // left wall
   fillRectangle(grid, 0.3, 0.7, -1.5, -1.4);  // right wall
-  AvoidParameters parameters;
+  AvoidParameters parameters = makeAvoidParameters();
   parameters.arc_length_m = 2.0;
   const auto candidates = evaluateArcCandidates(grid, kOrigin, makeStraightPath(), 0, 0.0, parameters);
   EXPECT_FALSE(selectBestCandidate(candidates).has_value());
 }
 
 TEST(ArcAvoidLayer, DoesNotAssertWhenPathAheadIsFree) {
-  ArcAvoidLayer layer{AvoidParameters{}};
+  ArcAvoidLayer layer{makeAvoidParameters()};
   const auto path = makeStraightPath();
   const LocalGrid grid = makeEmptyGrid();
   EXPECT_FALSE(layer.compute(makeContext(path, &grid, 0.0)).is_asserted);
@@ -125,7 +131,7 @@ TEST(ArcAvoidLayer, DoesNotAssertWhenPathAheadIsFree) {
 }
 
 TEST(ArcAvoidLayer, TriggersAndSteersAroundObstacleOnPath) {
-  ArcAvoidLayer layer{AvoidParameters{}};
+  ArcAvoidLayer layer{makeAvoidParameters()};
   const auto path = makeStraightPath();
   LocalGrid grid = makeEmptyGrid();
   fillRectangle(grid, 1.0, 1.4, -0.3, 0.3);
@@ -138,7 +144,7 @@ TEST(ArcAvoidLayer, TriggersAndSteersAroundObstacleOnPath) {
 }
 
 TEST(ArcAvoidLayer, GridLossReleasesImmediatelyAndDoesNotAssert) {
-  ArcAvoidLayer layer{AvoidParameters{}};
+  ArcAvoidLayer layer{makeAvoidParameters()};
   const auto path = makeStraightPath();
   LocalGrid grid = makeEmptyGrid();
   fillRectangle(grid, 1.0, 1.4, -0.3, 0.3);
@@ -149,7 +155,7 @@ TEST(ArcAvoidLayer, GridLossReleasesImmediatelyAndDoesNotAssert) {
 }
 
 TEST(ArcAvoidLayer, BlockedWaitsThenReportsStuckAndRecovers) {
-  ArcAvoidLayer layer{AvoidParameters{}};
+  ArcAvoidLayer layer{makeAvoidParameters()};
   const auto path = makeStraightPath();
   LocalGrid wall = makeEmptyGrid();
   fillRectangle(wall, 0.5, 0.7, -3.9, 3.9);
@@ -167,7 +173,7 @@ TEST(ArcAvoidLayer, BlockedWaitsThenReportsStuckAndRecovers) {
 }
 
 TEST(ArcAvoidLayer, ReleasesToFollowAfterHoldWhenClearAndOnPath) {
-  ArcAvoidLayer layer{AvoidParameters{}};
+  ArcAvoidLayer layer{makeAvoidParameters()};
   const auto path = makeStraightPath();
   LocalGrid blocked = makeEmptyGrid();
   fillRectangle(blocked, 1.0, 1.4, -0.3, 0.3);
@@ -179,7 +185,7 @@ TEST(ArcAvoidLayer, ReleasesToFollowAfterHoldWhenClearAndOnPath) {
 }
 
 TEST(ArcAvoidLayer, DoesNotReleaseWhileFarFromPath) {
-  ArcAvoidLayer layer{AvoidParameters{}};
+  ArcAvoidLayer layer{makeAvoidParameters()};
   const auto path = makeStraightPath();
   LocalGrid blocked = makeEmptyGrid();
   fillRectangle(blocked, 1.0, 1.4, -0.3, 0.3);
@@ -191,7 +197,7 @@ TEST(ArcAvoidLayer, DoesNotReleaseWhileFarFromPath) {
 }
 
 TEST(ArcAvoidLayer, FlickeringObstacleDoesNotChatterBetweenAvoidAndFollow) {
-  ArcAvoidLayer layer{AvoidParameters{}};
+  ArcAvoidLayer layer{makeAvoidParameters()};
   const auto path = makeStraightPath();
   LocalGrid blocked = makeEmptyGrid();
   fillRectangle(blocked, 1.0, 1.4, -0.3, 0.3);
@@ -284,10 +290,13 @@ ClosedLoopResult runClosedLoop(const AvoidParameters& parameters, const Point2D&
 
 }  // namespace
 
-// Acceptance H with the default parameters, inflation 0.5 and the gate model.
-TEST(ArcAvoidLayer, DetoursOffsetObstacleWithoutEnteringStopZoneAndRejoins) {
-  const AvoidParameters parameters;
-  const ClosedLoopResult result = runClosedLoop(parameters, Point2D{6.0, 0.3});
+// Acceptance H with arc length 2.0 m, inflation 0.5 m and the gate model.
+class ArcAvoidClosedLoop : public ::testing::TestWithParam<double> {};
+
+TEST_P(ArcAvoidClosedLoop, DetoursOffsetObstacleWithoutEnteringStopZoneAndRejoins) {
+  AvoidParameters parameters = makeAvoidParameters();
+  parameters.arc_length_m = 2.0;
+  const ClosedLoopResult result = runClosedLoop(parameters, Point2D{6.0, GetParam()});
   EXPECT_TRUE(result.did_avoid);
   EXPECT_FALSE(result.did_enter_stop_zone);
   EXPECT_FALSE(result.did_report_stuck);
@@ -296,8 +305,31 @@ TEST(ArcAvoidLayer, DetoursOffsetObstacleWithoutEnteringStopZoneAndRejoins) {
   EXPECT_LT(std::fabs(result.final_pose.y_m), 0.3);
 }
 
+INSTANTIATE_TEST_SUITE_P(ObstacleOffsets, ArcAvoidClosedLoop, ::testing::Values(0.0, 0.1, 0.2, 0.3));
+
+TEST(ArcAvoidLayer, NarrowCourseStopsBeforeCenteredObstacle) {
+  AvoidParameters parameters = makeAvoidParameters();
+  parameters.arc_length_m = 2.0;
+  parameters.max_path_deviation_m = 1.5;
+  const ClosedLoopResult result = runClosedLoop(parameters, Point2D{6.0, 0.0});
+  EXPECT_FALSE(result.did_enter_stop_zone);
+  EXPECT_TRUE(result.did_report_stuck);
+  EXPECT_LE(result.max_deviation_m, parameters.max_path_deviation_m);
+  EXPECT_LT(result.final_pose.x_m, 6.0);
+}
+
+TEST(EvaluateArcCandidates, MissingOrInvalidDeviationRejectsAllCandidates) {
+  for (const double deviation_m : {std::numeric_limits<double>::quiet_NaN(),
+                                   std::numeric_limits<double>::infinity(), 0.0, -1.0}) {
+    AvoidParameters parameters;
+    parameters.max_path_deviation_m = deviation_m;
+    EXPECT_TRUE(evaluateArcCandidates(makeEmptyGrid(), kOrigin, makeStraightPath(), 0, 0.0,
+                                      parameters).empty());
+  }
+}
+
 TEST(ArcAvoidLayer, StopZoneOccupiedMakesLayerWaitAndEventuallyReportStuck) {
-  ArcAvoidLayer layer{AvoidParameters{}};
+  ArcAvoidLayer layer{makeAvoidParameters()};
   const auto path = makeStraightPath();
   LocalGrid grid = makeEmptyGrid();
   fillRectangle(grid, 1.0, 1.4, -0.3, 0.3);
@@ -312,7 +344,7 @@ TEST(ArcAvoidLayer, StopZoneOccupiedMakesLayerWaitAndEventuallyReportStuck) {
 }
 
 TEST(ArcAvoidLayer, StaleObstacleStatusWaitsWithObstacleStaleReason) {
-  ArcAvoidLayer layer{AvoidParameters{}};
+  ArcAvoidLayer layer{makeAvoidParameters()};
   const auto path = makeStraightPath();
   LocalGrid grid = makeEmptyGrid();
   fillRectangle(grid, 1.0, 1.4, -0.3, 0.3);
@@ -325,7 +357,7 @@ TEST(ArcAvoidLayer, StaleObstacleStatusWaitsWithObstacleStaleReason) {
 }
 
 TEST(ArcAvoidLayer, AtPathEndHandsOverUnlessEndIsOccupied) {
-  ArcAvoidLayer layer{AvoidParameters{}};
+  ArcAvoidLayer layer{makeAvoidParameters()};
   std::vector<Point2D> path;
   for (int index = 0; index <= 10; ++index) {
     path.push_back(Point2D{0.1 * index, 0.0});
@@ -348,7 +380,8 @@ TEST(ArcAvoidLayer, AtPathEndHandsOverUnlessEndIsOccupied) {
 
 TEST(EvaluateArcCandidates, DeviationIsCheckedAlongTheArcNotOnlyAtTheEnd) {
   // 1.4 m off the path heading away: the end point is within 1.5 m but a middle sample is not.
-  AvoidParameters parameters;
+  AvoidParameters parameters = makeAvoidParameters();
+  parameters.max_path_deviation_m = 1.5;
   parameters.arc_length_m = 2.0;
   const Pose2D pose{0.0, 1.4, 1.5708};
   const auto candidates = evaluateArcCandidates(makeEmptyGrid(), pose, makeStraightPath(), 0, 0.0, parameters);
@@ -360,7 +393,7 @@ TEST(EvaluateArcCandidates, DeviationIsCheckedAlongTheArcNotOnlyAtTheEnd) {
 }
 
 TEST(ArcAvoidLayer, CycleWithFifteenArcsOnEightyByEightyGridIsFast) {
-  AvoidParameters parameters;
+  AvoidParameters parameters = makeAvoidParameters();
   const auto path = makeStraightPath();
   LocalGrid grid = makeEmptyGrid();
   fillRectangle(grid, 1.0, 1.4, -0.3, 0.3);
