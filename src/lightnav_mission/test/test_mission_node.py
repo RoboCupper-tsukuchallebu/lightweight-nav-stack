@@ -6,6 +6,7 @@ import time
 
 import pytest
 import rclpy
+from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped
 from lifecycle_msgs.msg import Transition
 from lifecycle_msgs.srv import ChangeState
@@ -205,15 +206,23 @@ def test_cancel_during_planning_is_prompt(rig):
     _mission, harness = rig
     gate = threading.Event()
     harness.planner_behaviors[0] = {"wait": gate}
-    goal_handle = harness.send_goal([5.0])
-    assert wait_until(lambda: harness.planner_requests)
-    started = time.monotonic()
-    cancel_future = goal_handle.cancel_goal_async()
-    assert wait_until(cancel_future.done)
-    result = harness.result_of(goal_handle, timeout_s=1.0)
-    assert time.monotonic() - started < 0.5
-    assert not result.result.success
-    gate.set()
+    try:
+        goal_handle = harness.send_goal([5.0])
+        assert wait_until(lambda: harness.planner_requests)
+        path_count = len(harness.received_paths)
+        started = time.monotonic()
+        cancel_future = goal_handle.cancel_goal_async()
+        # fixture は tick_hz=20.0（周期 0.05 s）で次の tick に cancel を検知し、その場で停止経路を出すため 0.3 s を上限とする。
+        assert wait_until(
+            lambda: any(not path.path.poses for path in harness.received_paths[path_count:]),
+            timeout_s=0.3)
+        assert time.monotonic() - started < 0.3
+        assert wait_until(cancel_future.done)
+        result = harness.result_of(goal_handle, timeout_s=WAIT_TIMEOUT_S)
+        assert not result.result.success
+        assert result.status == GoalStatus.STATUS_CANCELED
+    finally:
+        gate.set()
 
 
 def test_preempted_plan_does_not_override_new_goal(rig):
