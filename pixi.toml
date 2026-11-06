@@ -53,7 +53,9 @@ build = "colcon build --merge-install --base-paths src --cmake-args -DCMAKE_BUIL
 # passed as LIGHTNAV_DYLD_LIBRARY_PATH and restored by the plugin (see CLAUDE.md).
 # Packages run one at a time: all package tests share domain 44 and the same topic and service names
 # (e.g. /lightnav/planner/plan_path, /lightnav/path, /lightnav/pose), so parallel packages see each other.
-test = { cmd = "PYTHONPATH=$PIXI_PROJECT_ROOT/tools/pytest_plugins:$PYTHONPATH colcon test --merge-install --base-paths src --executor sequential --return-code-on-test-failure && colcon test-result --verbose", depends-on = ["build"], env = { ROS_DOMAIN_ID = "44", ROS_AUTOMATIC_DISCOVERY_RANGE = "LOCALHOST", PYTEST_PLUGINS = "lightnav_test_environment", LIGHTNAV_DYLD_LIBRARY_PATH = "$PIXI_PROJECT_ROOT/install/lib" } }
+# A test (including setup/teardown) that takes over 120 s dumps all thread stacks to stderr
+# without stopping the test, so a hung test leaves a traceback instead of stalling the whole run (#17).
+test = { cmd = "PYTHONPATH=$PIXI_PROJECT_ROOT/tools/pytest_plugins:$PYTHONPATH colcon test --merge-install --base-paths src --executor sequential --return-code-on-test-failure && colcon test-result --verbose", depends-on = ["build"], env = { ROS_DOMAIN_ID = "44", ROS_AUTOMATIC_DISCOVERY_RANGE = "LOCALHOST", PYTEST_PLUGINS = "lightnav_test_environment", LIGHTNAV_DYLD_LIBRARY_PATH = "$PIXI_PROJECT_ROOT/install/lib", PYTEST_ADDOPTS = "-o faulthandler_timeout=120" } }
 lint = "ruff check src"
 # macOS SIP strips DYLD_LIBRARY_PATH set by activation, so pass it as task env.
 # `pixi run ros2 run|launch ...` resolves to this task, so follow-up PRs need nothing special.
