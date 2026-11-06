@@ -65,7 +65,7 @@ RunResult run_line(int outlier_every) {
     double east = true_x + noise(random_generator);
     double north = noise(random_generator);
     if (outlier_every > 0 && step % outlier_every == 0) east += 20.0;
-    const Eigen::Isometry3d guess = *graph.pose(index);
+    const Eigen::Isometry3d guess = *previous_estimate * wheel_relative;  // the new node is not optimized yet
     const GpsDecision decision = converter.evaluate(fix_at_enu(east, north), guess, 0.5);
     if (decision.measurement) {
       graph.add_gps_factor(index, decision.measurement->base_position, decision.measurement->sigma_m);
