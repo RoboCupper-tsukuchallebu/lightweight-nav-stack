@@ -415,20 +415,38 @@ TEST(Localizer, FusionStaysCloseToTruthAtTenHertz) {
   scenario.pillar_both_sides = true;
   const Report report = run(scenario);
   double min_eigen_ratio = std::numeric_limits<double>::infinity();
+  int finite_count = 0;
+  int nan_after_first_finite = 0;
+  double first_nan_after_finite_sec = std::numeric_limits<double>::quiet_NaN();
+  double last_nan_after_finite_sec = std::numeric_limits<double>::quiet_NaN();
   for (const Measurement& sample : report.samples) {
     if (std::isfinite(sample.eigenvalue_ratio)) {
+      ++finite_count;
       min_eigen_ratio = std::min(min_eigen_ratio, sample.eigenvalue_ratio);
+    } else if (finite_count > 0) {
+      // localizer.cpp leaves the ratio empty when the Hessian is non-finite or its largest
+      // eigenvalue is <= 0. After the first match, that is exactly the degeneracy to catch.
+      ++nan_after_first_finite;
+      if (!std::isfinite(first_nan_after_finite_sec)) first_nan_after_finite_sec = sample.time_sec;
+      last_nan_after_finite_sec = sample.time_sec;
     }
   }
   std::printf("A: max pos err %.3f m, max yaw err %.2f deg, wheel-only end err %.2f m, "
-              "min eigen ratio %.4f, scan max %.1f ms\n",
+              "min eigen ratio %.4f (finite %d, nan after first finite %d), scan max %.1f ms\n",
               report.max_position_error_m, report.max_yaw_error_deg,
-              report.wheel_only_end_error_m, min_eigen_ratio, report.scan_ms_max);
+              report.wheel_only_end_error_m, min_eigen_ratio, finite_count,
+              nan_after_first_finite, report.scan_ms_max);
+  if (nan_after_first_finite > 0) {
+    std::printf("A: non-finite eigen_ratio after the first finite sample: %d samples, t=%.3f..%.3f s\n",
+                nan_after_first_finite, first_nan_after_finite_sec, last_nan_after_finite_sec);
+  }
   EXPECT_GT(report.wheel_only_end_error_m, 2.0);  // the Issue's condition: drift exists
   EXPECT_LT(report.max_position_error_m, 0.2);
   EXPECT_LT(report.max_yaw_error_deg, 2.0);
   EXPECT_TRUE(report.is_tracking_at_end);
   EXPECT_LT(report.scan_ms_max, 450.0);
+  EXPECT_GT(finite_count, 0);
+  EXPECT_EQ(nan_after_first_finite, 0);
   EXPECT_GE(min_eigen_ratio, 0.02);  // the scene keeps the along-track direction observable
 }
 
@@ -560,6 +578,7 @@ TEST(Localizer, ClimbsA10DegreeRampAtTenHertz) {
   const Report report = run(scenario);
   std::printf("H: max pos err %.3f m, pitch err over x in [5, 15] m: %.2f deg\n",
               report.max_position_error_m, report.max_pitch_error_on_ramp_deg);
+  EXPECT_FALSE(report.samples.empty());
   EXPECT_LE(report.max_pitch_error_on_ramp_deg, 2.0);  // the Issue's +-2 deg over the whole climb
   EXPECT_LT(report.max_position_error_m, 0.2);
   EXPECT_TRUE(report.is_tracking_at_end);
@@ -598,6 +617,8 @@ TEST(Localizer, OpenCorridorIsCorrectedByGpsNotFrozenByMap) {
   const Report report = run(scenario);
   std::printf("open corridor: wheel-only end err %.2f m, max pos err %.2f m, final %.2f m\n",
               report.wheel_only_end_error_m, report.max_position_error_m, report.final_position_error_m);
+  EXPECT_FALSE(report.samples.empty());
+  EXPECT_TRUE(report.is_tracking_at_end);
   EXPECT_GT(report.wheel_only_end_error_m, 1.0);
   EXPECT_LT(report.final_position_error_m, 1.0);
   EXPECT_LT(report.max_position_error_m, 1.0);

@@ -40,12 +40,14 @@ class SyntheticWorld {
     }
   }
 
-  // Boxes along each leg at `spacing_m` intervals, starting half an interval from the leg start.
-  // `half_length_m` is half the size along the travel direction, `half_width_m` half the size
-  // across it. The defaults (0.2 m both, left side) give the 0.4 m pillars used by
-  // PillarsAppearInMapAndScan. A thin, wide box (small half_length_m, large half_width_m) adds
-  // faces perpendicular to the travel direction without adding much lateral surface, which is what
-  // raises the along-track translation eigenvalue ratio in a straight corridor.
+  // Boxes along each leg at `spacing_m` intervals, starting half an interval from the leg start
+  // (with the default 10 m spacing that is 5 m, not the old 10 m start). `half_length_m` is half
+  // the size along the travel direction, `half_width_m` half the size across it. The defaults
+  // (0.2 m both, left side) give 0.4 m pillars for PillarsAppearInMapAndScan; the start offset
+  // changed, so the default layout is not the old 10 m-start pillar set. A thin, wide box (small
+  // half_length_m, large half_width_m) adds faces perpendicular to the travel direction without
+  // adding much lateral surface, which is what raises the along-track translation eigenvalue ratio
+  // in a straight corridor.
   void add_pillars(double half_length_m = 0.2, double half_width_m = 0.2, double spacing_m = 10.0,
                    double lateral_offset_m = 1.5, bool both_sides = false) {
     for (std::size_t leg = 0; leg + 1 < centerline_.size(); ++leg) {
