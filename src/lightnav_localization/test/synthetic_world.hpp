@@ -29,12 +29,14 @@ class SyntheticWorld {
   // the corridor axis unobservable for scan matching.
   explicit SyntheticWorld(const std::vector<Eigen::Vector2d>& centerline, bool has_end_caps = true) {
     centerline_ = centerline;
-    for (std::size_t leg = 0; leg + 1 < centerline.size(); ++leg) {
-      add_leg_walls(centerline, leg);
+    // Use the stored copy: reading the caller's vector (often a two-point initializer_list) here
+    // makes GCC 15 report a false -Warray-bounds for Eigen's vectorized 2-vector operations.
+    for (std::size_t leg = 0; leg + 1 < centerline_.size(); ++leg) {
+      add_leg_walls(centerline_, leg);
     }
     if (has_end_caps) {
-      walls_.push_back({front_cap_start(centerline), front_cap_end(centerline)});
-      walls_.push_back({back_cap_start(centerline), back_cap_end(centerline)});
+      walls_.push_back({front_cap_start(centerline_), front_cap_end(centerline_)});
+      walls_.push_back({back_cap_start(centerline_), back_cap_end(centerline_)});
     }
   }
 

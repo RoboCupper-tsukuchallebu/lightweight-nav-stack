@@ -367,7 +367,7 @@ Report run(const Scenario& scenario) {
   report.last_error = localizer.last_error();
   report.wheel_only_end_error_m = (wheel_only.translation() - truth_at(course.total_sec()).translation()).head<2>().norm();
   const auto* test_info = ::testing::UnitTest::GetInstance()->current_test_info();
-  std::printf("[ MEASURED ] scenario=%s error_m=%.9g final_error_m=%.9g pitch_error_ramp_deg=%.9g pitch_step_recovery_sec=%.9g pitch_error_after_step_entry_deg=%.9g pitch_error_after_step_exit_deg=%.9g pitch_samples_after_step_entry=%d pitch_samples_after_step_exit=%d scan_period_sec=%.9g wheel_sigma=%.9g gps_sigma=%.9g degeneracy_ratio=%.9g pillars=%d gps_accepted_before_10s=%d gps_accepted_10_to_20s=%d gps_accepted_after_20s=%d gps_submitted_count=%d gps_acceptance_ratio=%.9g gps_time_gap_rejection_count=%zu gps_gate_rejection_count=%zu max_keyframe_interval_sec=%.9g max_gps_factors_per_keyframe=%zu saw_conflict=%d samples=time_sec,truth_x_m,pitch_error_deg,along_track_error_m,position_std_m,eigen_ratio,weak_axis_x,weak_axis_y,weak_axis_z:",
+  std::printf("[ MEASURED ] scenario=%s error_m=%.9g final_error_m=%.9g pitch_error_ramp_deg=%.9g pitch_step_recovery_sec=%.9g pitch_error_after_step_entry_deg=%.9g pitch_error_after_step_exit_deg=%.9g pitch_samples_after_step_entry=%d pitch_samples_after_step_exit=%d scan_period_sec=%.9g wheel_sigma=%.9g gps_sigma=%.9g degeneracy_ratio=%.9g pillars=%d gps_accepted_before_10s=%d gps_accepted_10_to_20s=%d gps_accepted_after_20s=%d gps_submitted_count=%d gps_acceptance_ratio=%.9g gps_time_gap_rejection_count=%zu gps_gate_rejection_count=%zu max_keyframe_interval_sec=%.9g max_gps_factors_per_keyframe=%zu saw_conflict=%d sample_columns=time_sec,truth_x_m,pitch_error_deg,along_track_error_m,position_std_m,eigen_ratio,weak_axis_x,weak_axis_y,weak_axis_z\n",
       test_info->name(), report.max_position_error_m, report.final_position_error_m,
       report.max_pitch_error_on_ramp_deg, report.pitch_step_recovery_sec,
       report.max_pitch_error_after_step_entry_deg, report.max_pitch_error_after_step_exit_deg,
@@ -380,11 +380,11 @@ Report run(const Scenario& scenario) {
       report.gps_time_gap_rejection_count, localizer.gps_gate_rejection_count(),
       localizer.max_keyframe_interval_sec(), localizer.max_gps_factors_per_keyframe(), report.saw_conflict);
   for (const auto& sample : report.samples) {
-    std::printf("%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g;", sample.time_sec,
-        sample.truth_x_m, sample.pitch_error_deg, sample.along_track_error_m, sample.position_std_m,
-        sample.eigenvalue_ratio, sample.weakest_axis.x(), sample.weakest_axis.y(), sample.weakest_axis.z());
+    std::printf("[ SAMPLE ] scenario=%s %.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g\n",
+        test_info->name(), sample.time_sec, sample.truth_x_m, sample.pitch_error_deg,
+        sample.along_track_error_m, sample.position_std_m, sample.eigenvalue_ratio,
+        sample.weakest_axis.x(), sample.weakest_axis.y(), sample.weakest_axis.z());
   }
-  std::printf("\n");
   return report;
 }
 
@@ -728,7 +728,9 @@ TEST(Localizer, KeyframeTimeComparisonToleratesTimestampRounding) {
     localizer.on_wheel_odom(stamp, stationary_pose);
     localizer.on_scan(stamp, std::vector<TimedPoint>(10, TimedPoint{Eigen::Vector3f(1, 0, 0), 0.0F}));
     localizer.on_wheel_odom(stamp, stationary_pose);
-    if (stamp == 1.1999) EXPECT_DOUBLE_EQ(localizer.max_keyframe_interval_sec(), 0.0);
+    if (stamp == 1.1999) {
+      EXPECT_DOUBLE_EQ(localizer.max_keyframe_interval_sec(), 0.0);
+    }
   }
   EXPECT_NEAR(localizer.max_keyframe_interval_sec(), 1.0, 1e-12);
 }

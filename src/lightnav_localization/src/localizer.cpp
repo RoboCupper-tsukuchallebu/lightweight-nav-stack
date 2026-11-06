@@ -29,10 +29,20 @@ double rotation_angle_rad(const Eigen::Isometry3d& transform) {
   return Eigen::AngleAxisd(transform.rotation()).angle();
 }
 
+// Eigen's Isometry inverse() leaves its local result matrix uninitialized until makeAffine()
+// fills the last row, which GCC reports as -Wmaybe-uninitialized under -Werror. Build the same
+// inverse explicitly from an Identity-initialized transform instead.
+Eigen::Isometry3d invert_isometry(const Eigen::Isometry3d& transform) {
+  Eigen::Isometry3d inverse = Eigen::Isometry3d::Identity();
+  inverse.linear() = transform.linear().transpose();
+  inverse.translation() = -(inverse.linear() * transform.translation());
+  return inverse;
+}
+
 struct NodeRecord {
   int index;
   double stamp;
-  Eigen::Isometry3d odom_to_base;
+  Eigen::Isometry3d odom_to_base = Eigen::Isometry3d::Identity();
 };
 struct PendingScan {
   double stamp;
@@ -149,7 +159,7 @@ struct Localizer::Implementation {
     if (const auto std_values = graph->position_and_yaw_std(latest)) {
       position_std_m = std::max((*std_values)[0], (*std_values)[1]);
     }
-    const Eigen::Isometry3d optimized_target = pose_cache[latest] * nodes.back().odom_to_base.inverse();
+    const Eigen::Isometry3d optimized_target = pose_cache[latest] * invert_isometry(nodes.back().odom_to_base);
     if (preserve_target_tilt) {
       corrector.set_planar_target(optimized_target, last_wheel_pose);
     } else {
@@ -252,7 +262,7 @@ struct Localizer::Implementation {
     // Without a map match or GPS the estimate is less certain, so the gate widens with it.
     const bool is_tracking = stamp - last_map_sec <= parameters.state.tracking_window_s;
     const double gate_scale = is_tracking ? 1.0 : std::max(1.0, 3.0 * position_std_m);
-    const Eigen::Isometry3d difference = estimate.inverse() * result.target_to_source;
+    const Eigen::Isometry3d difference = invert_isometry(estimate) * result.target_to_source;
     const bool is_accepted = result.converged && result.inlier_ratio >= parameters.map_matcher.inlier_ratio_min &&
                              difference.translation().norm() <= parameters.map_matcher.gate_translation_m * gate_scale &&
                              rotation_angle_rad(difference) <= parameters.map_matcher.gate_rotation_rad * gate_scale;
@@ -292,19 +302,19 @@ struct Localizer::Implementation {
 
     const NodeRecord last = nodes.back();
     const Eigen::Isometry3d last_pose = pose_of(last.index);
-    const Eigen::Isometry3d wheel_relative = last.odom_to_base.inverse() * *odom_now;
+    const Eigen::Isometry3d wheel_relative = invert_isometry(last.odom_to_base) * *odom_now;
     const Eigen::Isometry3d prediction = corrector.target() * *odom_now;
 
     Eigen::Isometry3d best = prediction;
     std::optional<MatchResult> lidar_result;
     if (lidar.has_submap()) {
       // Keep the gate's scan-to-scan wheel distance independent of the optimized prediction.
-      const Eigen::Isometry3d scan_relative = last_scan_odom_for_gate.inverse() * *odom_now;
+      const Eigen::Isometry3d scan_relative = invert_isometry(last_scan_odom_for_gate) * *odom_now;
       MatchResult result = lidar.match(cloud, prediction, scan_relative.translation().norm());
       if (result.is_accepted) {
         best = result.target_to_source;
         lidar_result = result;
-        corrector.set_target(best * odom_now->inverse());
+        corrector.set_target(best * invert_isometry(*odom_now));
       }
     }
 
@@ -319,7 +329,7 @@ struct Localizer::Implementation {
       const int index = graph->add_node_with_wheel_factor(pending.stamp, best, wheel_relative);
       if (lidar_result) {
         graph->add_lidar_odometry_factor(
-            last.index, index, last_pose.inverse() * best,
+            last.index, index, invert_isometry(last_pose) * best,
             information_from_hessian(lidar_result->information, parameters.lidar_odometry_information));
       }
       nodes.push_back({index, pending.stamp, *odom_now});
@@ -354,7 +364,7 @@ struct Localizer::Implementation {
     if (!odom_at_fix) return;
     const int node_index = nearest->index;
     const Eigen::Isometry3d keyframe_pose = pose_of(node_index);
-    const Eigen::Isometry3d predicted = keyframe_pose * nearest->odom_to_base.inverse() * *odom_at_fix;
+    const Eigen::Isometry3d predicted = keyframe_pose * invert_isometry(nearest->odom_to_base) * *odom_at_fix;
     const GpsDecision decision = gps->evaluate(pending.fix, predicted, position_std_m);
     if (decision.rejection == GpsRejection::kGate) ++gps_gate_rejections;
     if (decision.gate_would_reject) conflict.record(*decision.gate_would_reject);
@@ -484,7 +494,7 @@ std::optional<LocalizerOutput> Localizer::on_wheel_odom(double stamp_sec,
   }
   const double elapsed_sec = self.last_wheel_sec > kNeverSec ? stamp_sec - self.last_wheel_sec : 0.0;
   if (!self.is_started) {
-    self.corrector.reset(*self.requested_initial_pose * odom_to_base.inverse());
+    self.corrector.reset(*self.requested_initial_pose * invert_isometry(odom_to_base));
     self.machine.start_tracking();
     self.last_scan_sec = stamp_sec;
     self.absolute_reference_sec = stamp_sec;
