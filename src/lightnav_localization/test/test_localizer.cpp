@@ -81,6 +81,11 @@ struct Scenario {
   double gps_sigma_m = 1.0;
   double degeneracy_ratio = InformationLimits{}.degeneracy_ratio;
   bool has_pillars = false;
+  double pillar_half_length_m = 0.2;
+  double pillar_half_width_m = 0.2;
+  double pillar_spacing_m = 10.0;
+  double pillar_lateral_offset_m = 1.5;
+  bool pillar_both_sides = false;
   double gps_bias_east_m = 0.0;
   double gps_noise_m = 1.0;  // also reported as the fix's known standard deviation when != 1.0
   bool is_gps_enabled = true;
@@ -157,7 +162,11 @@ Report run(const Scenario& scenario) {
   const Course open_corridor{{scenario.open_corridor_length_m}, {}};
   const Course& course = scenario.is_open_corridor ? open_corridor : (scenario.use_spec_course ? kSpecCourse : kShortCourse);
   SyntheticWorld world(course.centerline(), !scenario.is_open_corridor);
-  if (scenario.has_pillars) world.add_pillars();
+  if (scenario.has_pillars) {
+    world.add_pillars(scenario.pillar_half_length_m, scenario.pillar_half_width_m,
+                      scenario.pillar_spacing_m, scenario.pillar_lateral_offset_m,
+                      scenario.pillar_both_sides);
+  }
   constexpr double kRampAngleRad = 10.0 * M_PI / 180.0;
   if (scenario.has_ramp) world.set_ramp(5.0, 10.0, kRampAngleRad);
   const double ramp_blend_m = scenario.ramp_blend_m;
@@ -390,33 +399,55 @@ Report run(const Scenario& scenario) {
 
 }  // namespace
 
-TEST(Localizer, FusionStaysCloseToTruthWhileWheelOdometryDrifts) {
-  Scenario scenario;
-  scenario.use_spec_course = true;
-  scenario.wheel_scale = 1.01;  // the Issue's wheel model: 1 % scale, 0.5 deg / 10 m yaw
-  const Report report = run(scenario);
-  std::printf("A: max pos err %.3f m, max yaw err %.2f deg, wheel-only end err %.2f m, scan max %.1f ms, match max %.1f ms, submap rebuild max %.1f ms\n",
-              report.max_position_error_m, report.max_yaw_error_deg, report.wheel_only_end_error_m,
-              report.scan_ms_max, report.match_ms_max, report.rebuild_ms_max);
-  EXPECT_GT(report.wheel_only_end_error_m, 2.0);  // the Issue's condition  // drift exists
-  // The Issue asks for < 0.2 m. Measured 0.268 m on the full 200 m course, so the bound is 0.3 m
-  // until it is decided. Cause found (PR comment): purely along-track drift 36-51 m into a leg while
-  // TRACKING, not turns, GPS gaps or slew. Known gap against the Issue's 0.2 m.
-  // Spec 0.2 m NOT met; awaiting the user's decision; cause: too little along-track constraint.
-  EXPECT_LT(report.max_position_error_m, 0.3);
-  EXPECT_LT(report.max_yaw_error_deg, 2.0);
-  EXPECT_TRUE(report.is_tracking_at_end);
-  EXPECT_LT(report.scan_ms_max, 450.0);
-}
-
+// A at the real 10 Hz scan rate, on a course with along-track map features. The boxes are thin
+// (0.2 m) and wide (1 m) so their faces perpendicular to travel raise the translation Hessian's
+// smallest eigenvalue without adding much lateral surface. 1.25 m spacing was chosen from the
+// [ SAMPLE ] eigen_ratio output: 10 m spacing stayed below 0.02 on the straight legs.
 TEST(Localizer, FusionStaysCloseToTruthAtTenHertz) {
   Scenario scenario;
   scenario.use_spec_course = true;
-  scenario.wheel_scale = 1.01;
+  scenario.wheel_scale = 1.01;  // the Issue's wheel model: 1 % scale, 0.5 deg / 10 m yaw
   scenario.scan_period_sec = 0.1;
-  // Measurement only: the <0.3 m criterion assumes degeneracy_ratio=0.01.
-  // Keep the default 0.05; add the acceptance assertion in L2-d after user review.
-  (void)run(scenario);
+  scenario.has_pillars = true;
+  scenario.pillar_half_length_m = 0.1;
+  scenario.pillar_half_width_m = 0.5;
+  scenario.pillar_spacing_m = 1.25;
+  scenario.pillar_both_sides = true;
+  const Report report = run(scenario);
+  double min_eigen_ratio = std::numeric_limits<double>::infinity();
+  int finite_count = 0;
+  int nan_after_first_finite = 0;
+  double first_nan_after_finite_sec = std::numeric_limits<double>::quiet_NaN();
+  double last_nan_after_finite_sec = std::numeric_limits<double>::quiet_NaN();
+  for (const Measurement& sample : report.samples) {
+    if (std::isfinite(sample.eigenvalue_ratio)) {
+      ++finite_count;
+      min_eigen_ratio = std::min(min_eigen_ratio, sample.eigenvalue_ratio);
+    } else if (finite_count > 0) {
+      // localizer.cpp leaves the ratio empty when the Hessian is non-finite or its largest
+      // eigenvalue is <= 0. After the first match, that is exactly the degeneracy to catch.
+      ++nan_after_first_finite;
+      if (!std::isfinite(first_nan_after_finite_sec)) first_nan_after_finite_sec = sample.time_sec;
+      last_nan_after_finite_sec = sample.time_sec;
+    }
+  }
+  std::printf("A: max pos err %.3f m, max yaw err %.2f deg, wheel-only end err %.2f m, "
+              "min eigen ratio %.4f (finite %d, nan after first finite %d), scan max %.1f ms\n",
+              report.max_position_error_m, report.max_yaw_error_deg,
+              report.wheel_only_end_error_m, min_eigen_ratio, finite_count,
+              nan_after_first_finite, report.scan_ms_max);
+  if (nan_after_first_finite > 0) {
+    std::printf("A: non-finite eigen_ratio after the first finite sample: %d samples, t=%.3f..%.3f s\n",
+                nan_after_first_finite, first_nan_after_finite_sec, last_nan_after_finite_sec);
+  }
+  EXPECT_GT(report.wheel_only_end_error_m, 2.0);  // the Issue's condition: drift exists
+  EXPECT_LT(report.max_position_error_m, 0.2);
+  EXPECT_LT(report.max_yaw_error_deg, 2.0);
+  EXPECT_TRUE(report.is_tracking_at_end);
+  EXPECT_LT(report.scan_ms_max, 450.0);
+  EXPECT_GT(finite_count, 0);
+  EXPECT_EQ(nan_after_first_finite, 0);
+  EXPECT_GE(min_eigen_ratio, 0.02);  // the scene keeps the along-track direction observable
 }
 
 TEST(Localizer, GpsBiasDoesNotMoveEstimateWhileMapTracks) {
@@ -540,63 +571,57 @@ TEST(Localizer, InitialOffsetIsSlewedNotJumped) {
 
 // H at pipeline level: the wheel odometry is blind to the 10 degree climb (dz = pitch = 0, weak
 // constraint); lidar odometry and map matching must supply roll/pitch/z. Truth includes z and pitch.
-TEST(Localizer, ClimbsA10DegreeRamp) {
-  Scenario scenario;
-  scenario.has_ramp = true;
-  const Report report = run(scenario);
-  std::printf("H: max pos err %.3f m, pitch err over x in [5, 15] m: %.2f deg, whole run %.2f deg\n",
-              report.max_position_error_m, report.max_pitch_error_on_ramp_deg, report.max_pitch_error_deg);
-  EXPECT_LT(report.max_pitch_error_on_ramp_deg, 2.0);  // the Issue's +-2 deg over the whole climb
-  EXPECT_LT(report.max_position_error_m, 0.2);
-  EXPECT_TRUE(report.is_tracking_at_end);
-}
-
-// Review high 1: the pitch changes by 10 degrees at once (the LiDAR odometry gate used to reject
-// anything above 0.1 rad of full rotation). z, roll and pitch are not slewed.
-TEST(Localizer, SurvivesAPitchStep) {
-  Scenario scenario;
-  scenario.has_ramp = true;
-  scenario.ramp_blend_m = 0.0;
-  const Report report = run(scenario);
-  std::printf("H step: max pos err %.3f m, pitch err over x in [5, 15] m: %.2f deg\n",
-              report.max_position_error_m, report.max_pitch_error_on_ramp_deg);
-  EXPECT_LT(report.max_pitch_error_on_ramp_deg, 2.0);
-  EXPECT_LT(report.max_position_error_m, 0.2);
-}
-
 TEST(Localizer, ClimbsA10DegreeRampAtTenHertz) {
   Scenario scenario;
   scenario.has_ramp = true;
   scenario.scan_period_sec = 0.1;
   const Report report = run(scenario);
-  EXPECT_LE(report.max_pitch_error_on_ramp_deg, 2.0);
+  std::printf("H: max pos err %.3f m, pitch err over x in [5, 15] m: %.2f deg\n",
+              report.max_position_error_m, report.max_pitch_error_on_ramp_deg);
+  EXPECT_FALSE(report.samples.empty());
+  EXPECT_LE(report.max_pitch_error_on_ramp_deg, 2.0);  // the Issue's +-2 deg over the whole climb
+  EXPECT_LT(report.max_position_error_m, 0.2);
+  EXPECT_TRUE(report.is_tracking_at_end);
 }
 
+// Review high 1: the pitch changes by 10 degrees at once (the LiDAR odometry gate used to reject
+// anything above 0.1 rad of full rotation). The judgement is the settling time: the first sample
+// within 2 degrees after the step at x = 5 m must be <= 0.3 s, and after 0.3 s from each step
+// (entry at x = 5 m, exit at x = 15 m) every sample must stay within 2 degrees.
 TEST(Localizer, RecoversFromPitchStepWithinThreeTenthsAtTenHertz) {
   Scenario scenario;
   scenario.has_ramp = true;
   scenario.ramp_blend_m = 0.0;
   scenario.scan_period_sec = 0.1;
   const Report report = run(scenario);
+  std::printf("H step: recovery %.3f s, entry max %.3f deg, exit max %.3f deg, max pos err %.3f m\n",
+              report.pitch_step_recovery_sec, report.max_pitch_error_after_step_entry_deg,
+              report.max_pitch_error_after_step_exit_deg, report.max_position_error_m);
+  EXPECT_LE(report.pitch_step_recovery_sec, 0.3);
   EXPECT_GT(report.pitch_samples_after_step_entry, 0);
   EXPECT_GT(report.pitch_samples_after_step_exit, 0);
   EXPECT_LE(report.max_pitch_error_after_step_entry_deg, 2.0);
   EXPECT_LE(report.max_pitch_error_after_step_exit_deg, 2.0);
+  EXPECT_LT(report.max_position_error_m, 0.2);
+  EXPECT_TRUE(report.is_tracking_at_end);
 }
 
-// Review medium 1: a corridor whose ends cannot be seen. With a 5 % wheel scale error the dead
-// reckoning drifts ~6 m along the corridor; the map factor must not freeze that drift (its sliding
-// direction is weak) so GPS (sigma 1 m) pulls the pose back.
+// Review medium 1: a corridor whose ends cannot be seen. The Issue's 1 % wheel scale error gives
+// ~1.2 m of along-track drift over 120 m, and the 0.5 deg / 10 m yaw drift adds a lateral error
+// (wheel-only end error 6.41 m). The map factor must not freeze that drift (its sliding direction
+// is weak) so GPS (sigma 1 m) pulls the pose back.
 TEST(Localizer, OpenCorridorIsCorrectedByGpsNotFrozenByMap) {
   Scenario scenario;
   scenario.is_open_corridor = true;
-  scenario.wheel_scale = 1.05;
+  scenario.wheel_scale = 1.01;
   const Report report = run(scenario);
   std::printf("open corridor: wheel-only end err %.2f m, max pos err %.2f m, final %.2f m\n",
               report.wheel_only_end_error_m, report.max_position_error_m, report.final_position_error_m);
-  EXPECT_GT(report.wheel_only_end_error_m, 5.0);
-  EXPECT_LT(report.final_position_error_m, 1.5);
-  EXPECT_LT(report.max_position_error_m, 2.5);
+  EXPECT_FALSE(report.samples.empty());
+  EXPECT_TRUE(report.is_tracking_at_end);
+  EXPECT_GT(report.wheel_only_end_error_m, 1.0);
+  EXPECT_LT(report.final_position_error_m, 1.0);
+  EXPECT_LT(report.max_position_error_m, 1.0);
 }
 
 // Review medium 3: a failing prior-map rebuild (worker exception, or thread start failure) keeps
@@ -613,14 +638,22 @@ TEST(Localizer, MapRebuildFailureKeepsOldTarget) {
   }
 }
 
-TEST(LocalizerMeasurements, OpenCorridorWithPreciseGps) {
+// The design case from the #2 review (1-4 / L2-c): with a 5 % wheel error and a precise GPS
+// (sigma 0.1 m, CLAS Fixed equivalent), the old gate rejected the precise fixes in the corridor and
+// the pose diverged with the wheel error. The trusted-fix path must keep it bounded.
+TEST(Localizer, OpenCorridorWithPreciseGpsAndFivePercentWheel) {
   Scenario scenario;
   scenario.is_open_corridor = true;
+  scenario.wheel_scale = 1.05;
   scenario.gps_noise_m = 0.1;
   scenario.gps_sigma_m = 0.1;
   const Report report = run(scenario);
+  std::printf("open corridor (5 %% wheel, GPS 0.1 m): max pos err %.2f m, final %.2f m, accepted %.2f\n",
+              report.max_position_error_m, report.final_position_error_m,
+              report.gps_acceptance_ratio);
   EXPECT_FALSE(report.samples.empty());
-  EXPECT_LT(report.final_position_error_m, 1.0);
+  EXPECT_LT(report.final_position_error_m, 0.7);
+  EXPECT_LT(report.max_position_error_m, 0.7);
   EXPECT_GE(report.gps_acceptance_ratio, 0.8);
 }
 

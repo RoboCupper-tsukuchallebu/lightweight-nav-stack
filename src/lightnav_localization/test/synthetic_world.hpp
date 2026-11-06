@@ -40,23 +40,41 @@ class SyntheticWorld {
     }
   }
 
-  void add_pillars() {
+  // Boxes along each leg at `spacing_m` intervals, starting half an interval from the leg start
+  // (with the default 10 m spacing that is 5 m, not the old 10 m start). `half_length_m` is half
+  // the size along the travel direction, `half_width_m` half the size across it. The defaults
+  // (0.2 m both, left side) give 0.4 m pillars for PillarsAppearInMapAndScan; the start offset
+  // changed, so the default layout is not the old 10 m-start pillar set. A thin, wide box (small
+  // half_length_m, large half_width_m) adds faces perpendicular to the travel direction without
+  // adding much lateral surface, which is what raises the along-track translation eigenvalue ratio
+  // in a straight corridor.
+  void add_pillars(double half_length_m = 0.2, double half_width_m = 0.2, double spacing_m = 10.0,
+                   double lateral_offset_m = 1.5, bool both_sides = false) {
     for (std::size_t leg = 0; leg + 1 < centerline_.size(); ++leg) {
       const Eigen::Vector2d displacement = centerline_[leg + 1] - centerline_[leg];
       const double length = displacement.norm();
       if (length <= 0.0) continue;
       const Eigen::Vector2d direction = displacement / length;
       const Eigen::Vector2d normal(-direction.y(), direction.x());
-      for (double distance = 10.0; distance < length; distance += 10.0) {
-        const Eigen::Vector2d center = centerline_[leg] + distance * direction + 1.5 * normal;
-        const Eigen::Vector2d front_left = center + 0.2 * direction + 0.2 * normal;
-        const Eigen::Vector2d front_right = center + 0.2 * direction - 0.2 * normal;
-        const Eigen::Vector2d back_left = center - 0.2 * direction + 0.2 * normal;
-        const Eigen::Vector2d back_right = center - 0.2 * direction - 0.2 * normal;
-        walls_.push_back({front_left, front_right});
-        walls_.push_back({front_right, back_right});
-        walls_.push_back({back_right, back_left});
-        walls_.push_back({back_left, front_left});
+      for (double distance = 0.5 * spacing_m; distance < length; distance += spacing_m) {
+        const int side_count = both_sides ? 2 : 1;
+        for (int side_index = 0; side_index < side_count; ++side_index) {
+          const double side = side_index == 0 ? 1.0 : -1.0;
+          const Eigen::Vector2d center =
+              centerline_[leg] + distance * direction + side * lateral_offset_m * normal;
+          const Eigen::Vector2d front_left =
+              center + half_length_m * direction + half_width_m * normal;
+          const Eigen::Vector2d front_right =
+              center + half_length_m * direction - half_width_m * normal;
+          const Eigen::Vector2d back_left =
+              center - half_length_m * direction + half_width_m * normal;
+          const Eigen::Vector2d back_right =
+              center - half_length_m * direction - half_width_m * normal;
+          walls_.push_back({front_left, front_right});
+          walls_.push_back({front_right, back_right});
+          walls_.push_back({back_right, back_left});
+          walls_.push_back({back_left, front_left});
+        }
       }
     }
   }
