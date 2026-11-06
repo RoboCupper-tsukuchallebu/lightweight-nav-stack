@@ -25,14 +25,54 @@ constexpr double kCorridorHalfWidthM = 2.0;
 class SyntheticWorld {
  public:
   // `centerline` must have axis-aligned legs. Walls end flush at the course ends (closed by caps).
-  explicit SyntheticWorld(const std::vector<Eigen::Vector2d>& centerline) {
+  // `has_end_caps = false` leaves the ends open (only the max range limits the view), which makes
+  // the corridor axis unobservable for scan matching.
+  explicit SyntheticWorld(const std::vector<Eigen::Vector2d>& centerline, bool has_end_caps = true) {
     centerline_ = centerline;
     for (std::size_t leg = 0; leg + 1 < centerline.size(); ++leg) {
       add_leg_walls(centerline, leg);
     }
-    walls_.push_back({front_cap_start(centerline), front_cap_end(centerline)});
-    walls_.push_back({back_cap_start(centerline), back_cap_end(centerline)});
+    if (has_end_caps) {
+      walls_.push_back({front_cap_start(centerline), front_cap_end(centerline)});
+      walls_.push_back({back_cap_start(centerline), back_cap_end(centerline)});
+    }
   }
+
+  void add_pillars() {
+    for (std::size_t leg = 0; leg + 1 < centerline_.size(); ++leg) {
+      const Eigen::Vector2d displacement = centerline_[leg + 1] - centerline_[leg];
+      const double length = displacement.norm();
+      if (length <= 0.0) continue;
+      const Eigen::Vector2d direction = displacement / length;
+      const Eigen::Vector2d normal(-direction.y(), direction.x());
+      for (double distance = 10.0; distance < length; distance += 10.0) {
+        const Eigen::Vector2d center = centerline_[leg] + distance * direction + 1.5 * normal;
+        const Eigen::Vector2d front_left = center + 0.2 * direction + 0.2 * normal;
+        const Eigen::Vector2d front_right = center + 0.2 * direction - 0.2 * normal;
+        const Eigen::Vector2d back_left = center - 0.2 * direction + 0.2 * normal;
+        const Eigen::Vector2d back_right = center - 0.2 * direction - 0.2 * normal;
+        walls_.push_back({front_left, front_right});
+        walls_.push_back({front_right, back_right});
+        walls_.push_back({back_right, back_left});
+        walls_.push_back({back_left, front_left});
+      }
+    }
+  }
+
+  // Floor rises at `angle_rad` from x = begin_x over `horizontal_length_m`, then stays level.
+  void set_max_range(double range_m) { max_range_m_ = range_m; }
+  void set_ramp(double begin_x, double horizontal_length_m, double angle_rad) {
+    ramp_begin_x_ = begin_x;
+    ramp_end_x_ = begin_x + horizontal_length_m;
+    ramp_slope_ = std::tan(angle_rad);
+    has_ramp_ = true;
+  }
+  double floor_height(double x) const {
+    if (!has_ramp_ || x <= ramp_begin_x_) return 0.0;
+    return ramp_slope_ * (std::min(x, ramp_end_x_) - ramp_begin_x_);
+  }
+  bool is_on_ramp(double x) const { return has_ramp_ && x > ramp_begin_x_ && x < ramp_end_x_; }
+  double ramp_angle_rad() const { return std::atan(ramp_slope_); }
 
   // Wall and floor surface samples at `spacing_m`, world frame (floor at z = 0).
   PointList sample_map(double spacing_m) const {
@@ -42,7 +82,7 @@ class SyntheticWorld {
       for (double along = 0.0; along <= length; along += spacing_m) {
         const Eigen::Vector2d xy = wall.start + (wall.end - wall.start) * (along / length);
         for (double height = 0.0; height <= kWallHeightM; height += spacing_m) {
-          points.emplace_back(xy.x(), xy.y(), height);
+          points.emplace_back(xy.x(), xy.y(), height + floor_height(xy.x()));
         }
       }
     }
@@ -90,7 +130,7 @@ class SyntheticWorld {
       for (double along = begin; along <= end; along += spacing_m) {
         for (double across = -kCorridorHalfWidthM; across <= kCorridorHalfWidthM; across += spacing_m) {
           const Eigen::Vector2d xy = centerline_[leg] + along * direction + across * normal;
-          points.emplace_back(xy.x(), xy.y(), 0.0);
+          points.emplace_back(xy.x(), xy.y(), floor_height(xy.x()));
         }
       }
     }
@@ -140,7 +180,7 @@ class SyntheticWorld {
   // Nearest hit distance of a ray against walls and floor; infinity if nothing is hit.
   double cast_ray(const Eigen::Vector3d& origin, const Eigen::Vector3d& direction) const {
     double nearest = std::numeric_limits<double>::infinity();
-    if (direction.z() < -1e-9) nearest = -origin.z() / direction.z();  // floor at z = 0
+    nearest = std::min(nearest, cast_floor(origin, direction));
     for (const WallSegment& wall : walls_) {
       const Eigen::Vector2d edge = wall.end - wall.start;
       const Eigen::Vector2d ray_xy = direction.head<2>();
@@ -149,16 +189,43 @@ class SyntheticWorld {
       const Eigen::Vector2d to_start = wall.start - origin.head<2>();
       const double range = (to_start.x() * edge.y() - to_start.y() * edge.x()) / denominator;
       const double edge_ratio = (to_start.x() * ray_xy.y() - to_start.y() * ray_xy.x()) / denominator;
-      const double hit_height = origin.z() + range * direction.z();
+      const double hit_height = origin.z() + range * direction.z() -
+                                floor_height(origin.x() + range * direction.x());
       if (range > 0.0 && edge_ratio >= 0.0 && edge_ratio <= 1.0 && hit_height >= 0.0 &&
           hit_height <= kWallHeightM) {
         nearest = std::min(nearest, range);
       }
     }
-    return nearest < kMaxRangeM ? nearest : std::numeric_limits<double>::infinity();
+    return nearest < max_range_m_ ? nearest : std::numeric_limits<double>::infinity();
   }
 
-  static constexpr double kMaxRangeM = 60.0;
+  // Floor pieces: level before the ramp, the ramp plane, level after it (z = slope * x + offset).
+  double cast_floor(const Eigen::Vector3d& origin, const Eigen::Vector3d& direction) const {
+    struct Piece { double slope; double offset; double x_min; double x_max; };
+    const double inf = std::numeric_limits<double>::infinity();
+    std::vector<Piece> pieces{{0.0, 0.0, -inf, inf}};
+    if (has_ramp_) {
+      const double top = ramp_slope_ * (ramp_end_x_ - ramp_begin_x_);
+      pieces = {{0.0, 0.0, -inf, ramp_begin_x_},
+                {ramp_slope_, -ramp_slope_ * ramp_begin_x_, ramp_begin_x_, ramp_end_x_},
+                {0.0, top, ramp_end_x_, inf}};
+    }
+    double nearest = inf;
+    for (const Piece& piece : pieces) {
+      const double denominator = direction.z() - piece.slope * direction.x();
+      if (std::abs(denominator) < 1e-12) continue;
+      const double range = (piece.slope * origin.x() + piece.offset - origin.z()) / denominator;
+      const double hit_x = origin.x() + range * direction.x();
+      if (range > 0.0 && hit_x >= piece.x_min && hit_x <= piece.x_max) nearest = std::min(nearest, range);
+    }
+    return nearest;
+  }
+
+  double max_range_m_ = 60.0;
+  bool has_ramp_ = false;
+  double ramp_begin_x_ = 0.0;
+  double ramp_end_x_ = 0.0;
+  double ramp_slope_ = 0.0;
   std::vector<WallSegment> walls_;
   std::vector<Eigen::Vector2d> centerline_;
 };
