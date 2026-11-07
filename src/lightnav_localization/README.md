@@ -1,36 +1,113 @@
 # lightnav_localization
 
-LiDAR・車輪オドメトリ・GPSを使った自己位置推定。GTSAMの固定長窓の姿勢グラフとsmall_gicpによる地図照合を組み合わせる。
+LiDAR・車輪オドメトリ・GPSをGTSAMの固定長窓の姿勢グラフで融合し、`map` 座標の `base_footprint`
+姿勢を出す自己位置推定パッケージ。Issue #29 の L3 では **localization モード**の lifecycle
+ノード（`localization_node`）を実装する。mapping モード（保存時のバッチ再最適化、
+`map.pcd` / `map.yaml` / `trajectory.csv`）は L3-b の別 Issue。
 
-## GPSの時刻と因子
+## 起動
 
-グラフのノードはキーフレームだけとし、GPS専用ノードは作らない。GPS fixは処理時点で最も近いキーフレームに付け、fix時刻とキーフレーム時刻の車輪変位を補正する。GPS因子はmap座標のx/yだけを拘束し、高度は拘束しない。
+```bash
+pixi run build
+pixi run ros2 launch lightnav_localization localization.launch.py \
+  map_file:=/absolute/path/map.pcd \
+  map_yaml:=/absolute/path/map.yaml
+```
 
-| パラメータ | 既定値 | 意味 |
+launch は lifecycle を `configure` → `activate` まで自動で進める。`map_file` は localization
+モードでは必須で、読めない・空の場合は `configure` が失敗する。`map_yaml` は任意で、無い
+（または原点が無い）場合は GPS を無効化し `last_error` に残す。`params_file:=...` で
+`config/localization.yaml` を差し替えられる。
+
+ノード単体で動かす場合:
+
+```bash
+pixi run ros2 run lightnav_localization localization_node --ros-args \
+  -p map_file:=/absolute/path/map.pcd -p map_yaml:=/absolute/path/map.yaml
+pixi run ros2 lifecycle set /localization_node configure
+pixi run ros2 lifecycle set /localization_node activate
+```
+
+## フレームと外部パラメータ
+
+TF の木は `map → odom → base_footprint → base_link → velodyne / gnss`。本ノードは
+`map→odom` だけを配信し、`odom→base_footprint`（車輪オドメトリ）と
+`base_footprint→base_link→velodyne / gnss`（`robot_state_publisher`）は出さない。
+
+LiDAR の外部パラメータ（`base_frame→点群の frame_id`）と GPS アンテナの位置
+（`base_frame→gps_frame`、既定 `gnss`）はパラメータではなく **TF から読む**。最初に必要に
+なったとき（`on_activate` 後）に lookup し、取れるまでは `INITIALIZING` のまま
+`last_error` を出す。`lidar_to_base_xyz_rpy` / `gps_antenna_xyz` パラメータは持たない。
+
+## トピック・サービス
+
+| 名前 | 型 | QoS | 備考 |
+|---|---|---|---|
+| `/wheel/odom`（`wheel_odom_topic`） | `nav_msgs/Odometry` | reliable, depth 50 | `odom`→`base_footprint`、50 Hz |
+| `/velodyne_points`（`points_topic`） | `sensor_msgs/PointCloud2` | reliable, depth 5 | organized / `is_dense: false` / NaN 可。`x,y,z,time` を読み、`time` が無ければ 0、非有限の点は捨てる |
+| `/gps/fix`（`gps_topic`） | `sensor_msgs/NavSatFix` | reliable, depth 10 | ENU は `map.yaml` の原点基準 |
+| `/lightnav/localization/odom` | `nav_msgs/Odometry` | reliable, depth 10 | `map`→`base_footprint`、共分散あり、stamp は入力 `/wheel/odom` と同一 |
+| `/lightnav/localization/status` | `lightnav_msgs/LocalizationStatus` | reliable, transient_local, depth 1 | `status_rate_hz`（既定 2 Hz）+ 状態変化時 |
+| `/lightnav/localization/aligned_scan` | `sensor_msgs/PointCloud2` | SensorDataQoS | デバッグ（`map` 座標） |
+| `/tf` `map→odom` | TF | — | `publish_tf: false` で停止 |
+| `~/set_initial_pose` | `lightnav_msgs/SetInitialPose` | 既定 | `frame_id=map`。orientation が単位元かつ `covariance[35] < 0` なら yaw 未指定 |
+| `~/reload_map` | `std_srvs/Trigger` | 既定 | `map_file` / `map_yaml` を読み直して再初期化 |
+
+## 初期位置合わせ（localization モード）
+
+1. 位置: `~/set_initial_pose` があればその位置。無ければ GPS fix（`init_gps_max_std_m`
+   以下の標準偏差）の ENU。
+2. 向き: service に yaw があればそれ。無ければ静止スキャンを `init_scan_count` 個ため、
+   `init_yaw_step_deg` 刻みの粗照合 → 精照合を行い、`init_inlier_ratio_min` 以上で採用する。
+3. 失敗・TF 待ち・GPS 待ちの間は `INITIALIZING` のまま `last_error` を出す。odom は出さない。
+
+入力途絶はタイマで `Localizer::poll_state` を呼んで判定する。`/wheel/odom` が
+`wheel_timeout_s` 途絶すると odom の出版を止め、status を `INPUT_STALE` にする。
+
+## パラメータ
+
+既定値は `config/localization.yaml`。主なもの:
+
+| パラメータ | 既定 | 意味 |
 |---|---:|---|
-| `keyframe_time_s` | 1.0 s | 時間によるキーフレーム生成間隔 |
-| `gps_keyframe_max_gap_s` | 1.2 s | GPSを付けられるキーフレームとの最大時刻差 |
-| `gps_absolute_gate_m` | 2.0 m | trusted fix専用の受理距離ゲートの下限・矛盾診断の固定閾値 |
-| `gps_trusted_std_m` | 0.3 m | 信頼する既知のGPS標準偏差の上限 |
-| `gps_conflict_window` | 10件 | 矛盾検知に使う直近の観測数 |
-| `gps_conflict_ratio` | 0.5 | 窓が埋まった後に矛盾とするゲート棄却相当の割合（以上） |
+| `mode` | `localization` | `mapping` は L3-b まで `on_configure` で明示的に失敗 |
+| `map_file` / `map_yaml` | `""` | 地図 PCD / 原点 yaml（`map_file` は必須） |
+| `map_frame` / `odom_frame` / `base_frame` | `map` / `odom` / `base_footprint` | |
+| `gps_frame` | `gnss` | GPS アンテナの frame |
+| `wheel_timeout_s` / `scan_timeout_s` / `gps_timeout_s` | 0.2 / 0.5 / 3.0 | 入力の鮮度 |
+| `init_gps_max_std_m` / `init_scan_count` / `init_yaw_step_deg` | 3.0 / 3 / 15 | 初期位置合わせ |
+| `init_coarse_corr_m` / `init_fine_corr_m` / `init_inlier_ratio_min` | 2.0 / 0.5 / 0.6 | 初期 yaw 照合 |
+| `publish_tf` / `status_rate_hz` | true / 2.0 | |
+| `window_s` / `huber_k` | 30.0 / 1.0 | 姿勢グラフ |
+| `voxel_size_m` / `keyframe_distance_m` / `keyframe_time_s` | 0.5 / 1.0 / 1.0 | LiDAR オドメトリ |
+| `map_inlier_ratio_min` / `map_gate_translation_m` / `map_gate_rotation_rad` | 0.5 / 1.0 / 0.2 | 事前地図照合 |
+| `gps_std_m_by_status` | `[2.0, 1.0, 0.3]` | GST 無しの FIX / SBAS / GBAS |
+| `gps_gate_mahalanobis` / `gps_trusted_std_m` / `gps_absolute_gate_m` | 3.0 / 0.3 / 2.0 | GPS ゲート |
+| `correction_slew_mps` / `correction_slew_rps` / `large_correction_threshold_m` | 0.2 / 0.1 / 1.0 | 補正の平滑化 |
+| `tracking_window_s` / `lost_position_std_m` | 5.0 / 2.0 | 状態判定 |
+| `odom_only_max_distance_m` / `odom_only_max_s` / `drift_rate` | 50 / 60 / 0.02 | ODOM_ONLY の上限 |
 
-`gps_keyframe_max_gap_s`の既定1.2 sは、キーフレーム間隔1.0 sに余裕0.2 sを加えた値。ただし両者は独立したパラメータであり、`keyframe_time_s`を変更しても自動では追従しない。最大時刻差を超えるfixは捨て、時刻差による棄却数として計測する。
+## 既知の限界
 
-## GPSの受理と矛盾検知
+- **GPS が無く、地図が進行方向を拘束しない区間では、TRACKING のまま進行方向が車輪の
+  スケール誤差どおりにずれる**（Issue #2 の決定 7）。v1 はこれを既知の限界として受け入れ、
+  README に明記する（縮退した照合を絶対観測に数えない扱いのため、`position_std_m` を見て
+  下流が信頼度を判断する）。
+- GPS の高度は拘束しない。坂・段差の roll/pitch は LiDAR オドメトリ由来で、IMU は使わない。
+- 初期 yaw の粗照合は 15° 刻み・静止スキャン前提。走行しながらの初期化は対象外。
+- mapping モード、`~/save_map`、`trajectory.csv` は L3-b（別 Issue）。
+- ループ閉じ込み・動的物体除去・地図更新は v1 の非スコープ。
 
-既知の標準偏差が有効な正の有限値で、`gps_trusted_std_m`以下のfixは、マハラノビスゲートだけを省略する。trusted fixには水平距離ゲートを適用し、閾値を`max(gps_absolute_gate_m, gate_mahalanobis × predicted_position_std_m)`とする。推定の標準偏差が1.5 mなら既定の閾値は4.5 mとなり、3 mずれた推定から正しい精密GPSで復帰できる。trustedでないfixには従来のマハラノビスゲートだけを適用する。矛盾検知の窓は受理判断と分離する。trustedでないfixはマハラノビスゲートの判定だけを記録し、2 mを超えてもマハラノビスで受理されたfixは矛盾に数えない。trusted fixは「通常のマハラノビスゲートで棄却相当、または水平距離がgps_absolute_gate_mを超える」の判定結果を記録する。推定の不確かさによる距離閾値の拡大は、この診断には適用しない。したがって、信頼するfixを受理しながら`is_gps_conflict`が立つ場合がある。受理率と矛盾率は別の指標となる。
+## 試験
 
-窓に入れるのは位置ゲートまで進んだfixだけ。無効な座標、測位なし、HDOP不適合、キーフレームとの時刻差超過など、位置ゲートより前に除外したfixは窓に入れない。窓が10件そろい、そのうち上記の診断で棄却相当となる観測の割合が0.5以上になると`is_gps_conflict`を立てる。新しい観測が入ると古い観測を窓から外す。
+```bash
+pixi run build
+pixi run test    # domain 44, localhost。test_pose_graph の既知 2 件は #24 の判断待ち
+pixi run lint
+```
 
-矛盾検知は**全区間**で行う。ここで全区間とは、地図照合によるtrackingの有無にかかわらず、位置ゲートまで進んだGPS観測を窓に入れるという意味である。
-
-## 縮退と現在の限界
-
-`degeneracy_ratio`の既定は**0.05**。縮退した地図照合は絶対観測の時刻・距離をリセットしない。位置の標準偏差はmap座標のx/yで評価する。
-
-**縮退区間ではposition_stdは増えるがLOSTにはしない（実走で再検討）。** この扱いは、受理した地図照合が`tracking_window_s`以内にあり、地図照合が新鮮な間だけに適用する。地図照合が古くなった後までLOSTを抑止するものではなく、入力のタイムアウト判定も別に行う。
-
-縮退した地図照合が続く間は、廊下の軸方向のずれが大きくてもLOSTにならずTRACKINGのまま出力されるため、下流は`position_std_m`を見て信頼度を判断すること。
-
-10 Hzでの観測に伴う因子の重複・相関への対策は未実施。測定結果は[test/MEASUREMENTS.md](test/MEASUREMENTS.md)に記録する。
+`test_localization_node` は合成環境（`test/synthetic_world.hpp`）の地図・organized な
+NaN 入り点群・`/wheel/odom`・`/gps/fix`・静的 TF を流し、GPS + 未知 yaw からの
+`TRACKING`、`set_initial_pose`、入力途絶（G）、出力の契約（N）、地図ファイル無しの
+configure 失敗を確認する。`test_initial_alignment` / `test_point_cloud_extraction` が
+純ロジックと非有限点の除去を単体で確認する。

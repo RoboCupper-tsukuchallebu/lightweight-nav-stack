@@ -121,6 +121,9 @@ struct Localizer::Implementation {
   double scan_time_ms = 0.0;
   double match_time_ms = 0.0;
   double submap_rebuild_time_ms = 0.0;
+  double last_inlier_ratio = 0.0;
+  double last_lidar_odom_inlier_ratio = 0.0;
+  std::optional<Eigen::Vector3d> latest_position_and_yaw_std;
   std::optional<double> match_eigenvalue_ratio;
   std::optional<Eigen::Vector3d> match_weakest_axis;
 
@@ -158,6 +161,7 @@ struct Localizer::Implementation {
     if (const auto pose = graph->pose(latest)) pose_cache[latest] = *pose;
     if (const auto std_values = graph->position_and_yaw_std(latest)) {
       position_std_m = std::max((*std_values)[0], (*std_values)[1]);
+      latest_position_and_yaw_std = *std_values;
     }
     const Eigen::Isometry3d optimized_target = pose_cache[latest] * invert_isometry(nodes.back().odom_to_base);
     if (preserve_target_tilt) {
@@ -247,6 +251,7 @@ struct Localizer::Implementation {
     const auto start = Clock::now();
     MatchResult result = match_scan(map_target, cloud, estimate, parameters.map_matcher);
     match_time_ms = elapsed_ms(start);
+    last_inlier_ratio = result.inlier_ratio;
     if (map_match_hook) map_match_hook(result);
     match_eigenvalue_ratio.reset();
     match_weakest_axis.reset();
@@ -288,6 +293,9 @@ struct Localizer::Implementation {
       graph->add_first_node(pending.stamp, initial, parameters.initial_sigma_xy_m,
                             parameters.initial_sigma_yaw_rad);
       graph->optimize();
+      if (const auto std_values = graph->position_and_yaw_std(0)) {
+        latest_position_and_yaw_std = *std_values;
+      }
       pose_cache[0] = initial;
       nodes.push_back({0, pending.stamp, *odom_now});
       lidar.add_keyframe(initial, cloud);
@@ -311,6 +319,7 @@ struct Localizer::Implementation {
       // Keep the gate's scan-to-scan wheel distance independent of the optimized prediction.
       const Eigen::Isometry3d scan_relative = invert_isometry(last_scan_odom_for_gate) * *odom_now;
       MatchResult result = lidar.match(cloud, prediction, scan_relative.translation().norm());
+      last_lidar_odom_inlier_ratio = result.inlier_ratio;
       if (result.is_accepted) {
         best = result.target_to_source;
         lidar_result = result;
@@ -467,6 +476,17 @@ void Localizer::inject_optimization_failure_for_test() { implementation_->graph-
 double Localizer::last_scan_time_ms() const { return implementation_->scan_time_ms; }
 double Localizer::last_match_time_ms() const { return implementation_->match_time_ms; }
 double Localizer::last_submap_rebuild_time_ms() const { return implementation_->submap_rebuild_time_ms; }
+double Localizer::last_inlier_ratio() const { return implementation_->last_inlier_ratio; }
+double Localizer::last_lidar_odom_inlier_ratio() const {
+  return implementation_->last_lidar_odom_inlier_ratio;
+}
+double Localizer::last_map_match_stamp_sec() const { return implementation_->last_map_sec; }
+double Localizer::odom_only_distance_m() const {
+  return implementation_->distance_since_absolute_m;
+}
+std::optional<Eigen::Vector3d> Localizer::latest_position_and_yaw_std() const {
+  return implementation_->latest_position_and_yaw_std;
+}
 std::optional<double> Localizer::last_match_eigenvalue_ratio() const {
   return implementation_->match_eigenvalue_ratio;
 }

@@ -85,6 +85,13 @@ class Localizer {
   double last_scan_time_ms() const;
   double last_match_time_ms() const;
   double last_submap_rebuild_time_ms() const;
+  // Read-only diagnostics for LocalizationStatus.
+  double last_inlier_ratio() const;
+  double last_lidar_odom_inlier_ratio() const;
+  double last_map_match_stamp_sec() const;
+  double odom_only_distance_m() const;
+  // map-frame (x, y) standard deviations and the local yaw standard deviation of the latest node.
+  std::optional<Eigen::Vector3d> latest_position_and_yaw_std() const;
   // Raw translation Hessian diagnostics; absent before a valid match. Axis is in the scan frame
   // and its sign is arbitrary. initialize() clears both values.
   std::optional<double> last_match_eigenvalue_ratio() const;
