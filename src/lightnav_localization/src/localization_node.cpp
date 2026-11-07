@@ -22,6 +22,7 @@
 
 #include "lightnav_localization/deskew.hpp"
 #include "lightnav_localization/downsample.hpp"
+#include "lightnav_localization/mapping_initialization.hpp"
 #include "lightnav_localization/point_cloud_extraction.hpp"
 
 namespace lightnav_localization {
@@ -483,9 +484,9 @@ void LocalizationNode::reset_runtime_state() {
   gps_antenna_in_base_ = Eigen::Vector3d::Zero();
   map_has_no_gps_origin_ = false;
   mapping_has_gps_origin_ = false;
-  mapping_started_ = false;
   mapping_interrupted_ = false;
-  mapping_started_without_gps_ = false;
+  has_mapping_activation_time_ = false;
+  mapping_activation_sec_ = 0.0;
   mapping_reference_odom_.reset();
   mapping_reference_enu_.reset();
   latest_mapping_gps_enu_.reset();
@@ -589,6 +590,8 @@ LocalizationNode::CallbackReturn LocalizationNode::on_activate(
   aligned_scan_publisher_->on_activate();
   has_status_publish_time_ = false;
   last_status_state_ = LocalizationState::kInitializing;
+  has_mapping_activation_time_ = true;
+  mapping_activation_sec_ = get_clock()->now().seconds();
   watchdog_timer_ = create_wall_timer(
       std::chrono::duration_cast<std::chrono::nanoseconds>(
           std::chrono::duration<double>(kDefaultWatchdogPeriodSec)),
@@ -648,12 +651,14 @@ LocalizationNode::CallbackReturn LocalizationNode::on_cleanup(
 }
 
 LocalizationNode::CallbackReturn LocalizationNode::on_shutdown(
-    const rclcpp_lifecycle::State& /*state*/) {
+    const rclcpp_lifecycle::State& state) {
   if (watchdog_timer_) {
     watchdog_timer_->cancel();
     watchdog_timer_.reset();
   }
-  if (is_mapping() && is_active() && localizer_) {
+  const bool was_active =
+      state.id() == lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE;
+  if (is_mapping() && was_active && localizer_) {
     std::string message;
     if (!save_mapping_outputs(message)) {
       RCLCPP_WARN(get_logger(), "mapping map could not be saved on shutdown: %s",
@@ -990,6 +995,11 @@ void LocalizationNode::handle_nav_sat_fix(
       RCLCPP_INFO(get_logger(), "mapping origin set at lat %.8f, lon %.8f, alt %.3f",
                   origin.latitude_deg, origin.longitude_deg, origin.altitude_m);
     } else if (gps_converter_) {
+      if (!is_usable_mapping_fix(fix)) {
+        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                             "ignoring an unusable GPS fix while waiting for the mapping start");
+        return;
+      }
       latest_mapping_gps_enu_ = gps_converter_->to_enu(fix);
     }
     maybe_start_mapping();
@@ -1005,6 +1015,10 @@ void LocalizationNode::handle_nav_sat_fix(
     if (!resolve_gps_extrinsic(error)) {
       if (is_mapping()) {
         // Mapping must not depend on an antenna TF that bringup may not provide.
+        RCLCPP_WARN_THROTTLE(
+            get_logger(), *get_clock(), 2000,
+            "GPS antenna TF missing in mapping mode; using a zero lever arm: %s",
+            error.c_str());
         gps_antenna_in_base_ = Eigen::Vector3d::Zero();
         has_gps_antenna_to_base_ = true;
       } else {
@@ -1047,6 +1061,10 @@ bool LocalizationNode::try_start_initialization() {
         node_error_ = error;
         return false;
       }
+      RCLCPP_WARN_THROTTLE(
+          get_logger(), *get_clock(), 2000,
+          "GPS antenna TF missing in mapping mode; using a zero lever arm: %s",
+          error.c_str());
       gps_antenna_in_base_ = Eigen::Vector3d::Zero();
       has_gps_antenna_to_base_ = true;
     }
@@ -1081,7 +1099,6 @@ bool LocalizationNode::try_start_initialization() {
   last_output_.reset();
   last_output_map_to_base_.reset();
   node_error_.clear();
-  if (is_mapping()) mapping_started_ = true;
   RCLCPP_INFO(get_logger(), "initialized %s at (%.3f, %.3f, %.3f), yaw %.3f rad",
               mode_.c_str(), position.x(), position.y(), position.z(), *initial_yaw_);
   return true;
@@ -1111,17 +1128,22 @@ void LocalizationNode::maybe_start_mapping() {
         node_error_ = "mapping: GPS displacement is too small to determine the initial yaw";
         return;
       }
-      const double gps_yaw = std::atan2(gps_delta.y(), gps_delta.x());
-      const double wheel_yaw =
-          std::atan2(wheel_delta.translation().y(), wheel_delta.translation().x());
-      initial_yaw_ = gps_yaw - wheel_yaw;
+      initial_yaw_ = mapping_initial_yaw(gps_delta, wheel_delta);
       initial_position_ = *latest_mapping_gps_enu_;
       initial_position_from_gps_ = true;
     } else if (!mapping_has_gps_origin_ && allow_mapping_without_gps_) {
+      const double waited_sec =
+          has_mapping_activation_time_
+              ? get_clock()->now().seconds() - mapping_activation_sec_
+              : 0.0;
+      if (!has_mapping_activation_time_ ||
+          waited_sec < localizer_parameters_.state.gps_timeout_s) {
+        node_error_ = "mapping: waiting for gps_timeout_s before starting without GPS";
+        return;
+      }
       initial_position_ = Eigen::Vector3d::Zero();
       initial_yaw_ = 0.0;
       initial_position_from_gps_ = false;
-      mapping_started_without_gps_ = true;
       map_has_no_gps_origin_ = true;
     } else {
       node_error_ = "waiting for a GPS fix for the mapping origin";
@@ -1323,7 +1345,6 @@ void LocalizationNode::publish_status() {
     last_status_state_ = state;
     if (is_mapping() && state == LocalizationState::kLost && !mapping_interrupted_) {
       mapping_interrupted_ = true;
-      mapping_started_ = false;
       node_error_ = "mapping interrupted: localization LOST; the partial map can be saved";
       if (localizer_) localizer_->interrupt_mapping();
       RCLCPP_ERROR(get_logger(), "%s", node_error_.c_str());

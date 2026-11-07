@@ -49,6 +49,12 @@ class PoseGraph {
   // First node. roll/pitch ~ 0 +- 0.1 rad and z ~ 0 +- 1 m are added as in the spec.
   int add_first_node(double stamp_sec, const Eigen::Isometry3d& pose, double sigma_xy_m,
                      double sigma_yaw_rad);
+  // Mapping recovery: replaces the fixed-lag window with a new node at `pose`, keeping the
+  // recorded factor history (when enabled) and continuing with a non-reused node index. A weak
+  // between factor connects `previous_pose` (the last estimate) to the new node.
+  int restart_window(double stamp_sec, const Eigen::Isometry3d& pose,
+                     const Eigen::Isometry3d& previous_pose, double sigma_xy_m,
+                     double sigma_yaw_rad);
   // Wheel odometry: relative motion (2D lifted to 3D) from the previous node to the new one.
   int add_node_with_wheel_factor(double stamp_sec, const Eigen::Isometry3d& guess,
                                  const Eigen::Isometry3d& wheel_relative);

@@ -46,6 +46,13 @@ gtsam::Key key_of(int index) { return gtsam::Symbol('x', static_cast<std::uint64
 
 gtsam::Pose3 to_gtsam(const Eigen::Isometry3d& pose) { return gtsam::Pose3(pose.matrix()); }
 
+Eigen::Isometry3d invert_isometry(const Eigen::Isometry3d& transform) {
+  Eigen::Isometry3d inverse = Eigen::Isometry3d::Identity();
+  inverse.linear() = transform.linear().transpose();
+  inverse.translation() = -(inverse.linear() * transform.translation());
+  return inverse;
+}
+
 Eigen::Isometry3d from_gtsam(const gtsam::Pose3& pose) {
   Eigen::Isometry3d result;
   result.matrix() = pose.matrix();
@@ -68,9 +75,10 @@ gtsam::SharedNoiseModel robust(const gtsam::SharedNoiseModel& base, double huber
 
 struct PoseGraph::Implementation {
   explicit Implementation(const PoseGraphParameters& parameters_in)
-      : parameters(parameters_in), smoother(parameters_in.window_s) {}
+      : parameters(parameters_in),
+        smoother(std::make_unique<gtsam::IncrementalFixedLagSmoother>(parameters_in.window_s)) {}
   PoseGraphParameters parameters;
-  gtsam::IncrementalFixedLagSmoother smoother;
+  std::unique_ptr<gtsam::IncrementalFixedLagSmoother> smoother;
   gtsam::NonlinearFactorGraph pending_factors;
   gtsam::Values pending_values;
   gtsam::FixedLagSmoother::KeyTimestampMap pending_stamps;
@@ -106,6 +114,47 @@ int PoseGraph::add_first_node(double stamp_sec, const Eigen::Isometry3d& pose, d
     graph.history_stamps[0] = stamp_sec;
   }
   return 0;
+}
+
+int PoseGraph::restart_window(double stamp_sec, const Eigen::Isometry3d& pose,
+                              const Eigen::Isometry3d& previous_pose, double sigma_xy_m,
+                              double sigma_yaw_rad) {
+  Implementation& graph = *implementation_;
+  const int previous_index = latest_index_;
+  const int index = previous_index + 1;
+  latest_index_ = index;
+  graph.smoother = std::make_unique<gtsam::IncrementalFixedLagSmoother>(
+      graph.parameters.window_s);
+  graph.pending_factors.resize(0);
+  graph.pending_values.clear();
+  graph.pending_stamps.clear();
+  graph.estimate = gtsam::Values();
+  graph.stamps.clear();
+
+  graph.pending_values.insert(key_of(index), to_gtsam(pose));
+  graph.pending_stamps[key_of(index)] = stamp_sec;
+  graph.stamps[index] = stamp_sec;
+  boost::shared_ptr<gtsam::PriorFactor<gtsam::Pose3>> prior(
+      new gtsam::PriorFactor<gtsam::Pose3>(
+          key_of(index), to_gtsam(pose),
+          pose_noise({0.1, 0.1, sigma_yaw_rad}, {sigma_xy_m, sigma_xy_m, 1.0})));
+  graph.pending_factors.push_back(prior);
+  if (graph.parameters.record_history) {
+    graph.history_factors.push_back(prior);
+    graph.history_values.insert(key_of(index), to_gtsam(pose));
+    graph.history_stamps[index] = stamp_sec;
+  }
+
+  if (previous_index >= 0) {
+    const Eigen::Isometry3d inverse_previous = invert_isometry(previous_pose);
+    boost::shared_ptr<gtsam::BetweenFactor<gtsam::Pose3>> connection(
+        new gtsam::BetweenFactor<gtsam::Pose3>(
+            key_of(previous_index), key_of(index), to_gtsam(inverse_previous * pose),
+            pose_noise({0.1, 0.1, sigma_yaw_rad}, {sigma_xy_m, sigma_xy_m, 1.0})));
+    graph.pending_factors.push_back(connection);
+    if (graph.parameters.record_history) graph.history_factors.push_back(connection);
+  }
+  return index;
 }
 
 int PoseGraph::add_node_with_wheel_factor(double stamp_sec, const Eigen::Isometry3d& guess,
@@ -188,8 +237,8 @@ bool PoseGraph::optimize() {
       should_fail_once_ = false;
       throw std::runtime_error("injected optimization failure");
     }
-    graph.smoother.update(graph.pending_factors, graph.pending_values, graph.pending_stamps);
-    graph.estimate = graph.smoother.calculateEstimate();
+    graph.smoother->update(graph.pending_factors, graph.pending_values, graph.pending_stamps);
+    graph.estimate = graph.smoother->calculateEstimate();
     if (graph.parameters.record_history) {
       // Keep the batch initial values close to the latest window estimate: nodes leave the
       // fixed-lag window after window_s, and their creation guesses would otherwise keep the
@@ -278,7 +327,7 @@ std::optional<Eigen::Vector3d> PoseGraph::position_and_yaw_std(int index) const 
   if (!estimate.exists(key_of(index))) return std::nullopt;
   gtsam::Matrix covariance;
   try {
-    covariance = implementation_->smoother.getISAM2().marginalCovariance(key_of(index));
+    covariance = implementation_->smoother->getISAM2().marginalCovariance(key_of(index));
   } catch (const std::exception& exception) {
     covariance_error_ = exception.what();
     return std::nullopt;

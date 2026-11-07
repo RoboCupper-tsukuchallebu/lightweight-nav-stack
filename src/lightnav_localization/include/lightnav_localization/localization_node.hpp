@@ -135,9 +135,9 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
   std::optional<double> initial_yaw_;
   bool initial_position_from_gps_ = false;
   bool mapping_has_gps_origin_ = false;
-  bool mapping_started_ = false;
   bool mapping_interrupted_ = false;
-  bool mapping_started_without_gps_ = false;
+  bool has_mapping_activation_time_ = false;
+  double mapping_activation_sec_ = 0.0;
   std::optional<Eigen::Isometry3d> mapping_reference_odom_;
   std::optional<Eigen::Vector3d> mapping_reference_enu_;
   std::optional<Eigen::Vector3d> latest_mapping_gps_enu_;

@@ -30,6 +30,7 @@ add_library(lightnav_localization_core
   src/pcd_io.cpp
   src/map_metadata.cpp
   src/map_builder.cpp
+  src/mapping_initialization.cpp
   src/deskew.cpp
   src/downsample.cpp
   src/matcher.cpp

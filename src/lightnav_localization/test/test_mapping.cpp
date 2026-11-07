@@ -16,6 +16,7 @@
 #include "lightnav_localization/localizer.hpp"
 #include "lightnav_localization/map_builder.hpp"
 #include "lightnav_localization/map_metadata.hpp"
+#include "lightnav_localization/mapping_initialization.hpp"
 #include "lightnav_localization/pcd_io.hpp"
 #include "synthetic_world.hpp"
 
@@ -73,7 +74,7 @@ struct Course {
 };
 
 const Course kKCourse{{20.0, 20.0}, {1.0}};
-const Course kK2Course{{70.0, 60.0, 70.0}, {1.0, -1.0}};
+const Course kSpecCourse{{70.0, 60.0, 70.0}, {1.0, -1.0}};
 const Course kLoopCourse{{40.0, 40.0, 40.0, 40.0}, {1.0, 1.0, 1.0, 1.0}};
 
 GpsFix fix_at_enu(double east_m, double north_m) {
@@ -133,7 +134,8 @@ struct MappingRun {
 MappingRun run_mapping(const Course& course, bool has_pillars,
                        double gps_off_begin_sec, double gps_off_end_sec,
                        bool gps_enabled, double wheel_scale, double gps_noise_m,
-                       const std::filesystem::path& output_directory) {
+                       const std::filesystem::path& output_directory,
+                       double fail_optimization_at_sec = -1.0) {
   SyntheticWorld world(course.centerline(), true);
   if (has_pillars) {
     world.add_pillars(0.1, 0.5, 1.25, 1.5, true);
@@ -191,6 +193,10 @@ MappingRun run_mapping(const Course& course, bool has_pillars,
       GpsFix fix = fix_at_enu(truth.translation().x() + gps_noise_m * noise(random_generator),
                               truth.translation().y() + gps_noise_m * noise(random_generator));
       localizer.on_gps(time_sec, fix);
+    }
+    if (fail_optimization_at_sec >= 0.0 &&
+        std::abs(time_sec - fail_optimization_at_sec) < kDt / 2) {
+      localizer.inject_optimization_failure_for_test();
     }
     const auto output = localizer.on_wheel_odom(time_sec, odom);
     if (output) {
@@ -271,6 +277,8 @@ ErrorSummary summarize_error_in_window(const Course& course,
 
 struct LocalizationRun {
   double max_error_m = 0.0;
+  double max_yaw_error_deg = 0.0;
+  double wheel_only_end_error_m = 0.0;
   bool published = false;
 };
 
@@ -289,6 +297,7 @@ LocalizationRun run_localization(const Course& course, const PointList& map_poin
   std::mt19937 random_generator(41);
   std::normal_distribution<double> noise(0.0, 1.0);
   Eigen::Isometry3d odom = Eigen::Isometry3d::Identity();
+  Eigen::Isometry3d wheel_only = truth_at(0.0);
   Eigen::Isometry3d previous_truth = truth_at(0.0);
   LocalizationRun result;
   const int step_count = static_cast<int>(course.total_sec() / kDt);
@@ -307,6 +316,7 @@ LocalizationRun run_localization(const Course& course, const PointList& map_poin
                             Eigen::Vector3d::UnitZ())
               .toRotationMatrix();
       odom = odom * drifted;
+      wheel_only = wheel_only * drifted;
     }
     previous_truth = truth;
     if (step > 0 && step % static_cast<int>(0.1 / kDt) == 0 && time_sec >= kScanDuration) {
@@ -325,8 +335,15 @@ LocalizationRun run_localization(const Course& course, const PointList& map_poin
       const double error =
           (output->map_to_base.translation() - truth.translation()).head<2>().norm();
       result.max_error_m = std::max(result.max_error_m, error);
+      const Eigen::Matrix3d rotation_error =
+          truth.rotation().transpose() * output->map_to_base.rotation();
+      const double yaw_error =
+          std::abs(std::atan2(rotation_error(1, 0), rotation_error(0, 0))) * 180.0 / M_PI;
+      result.max_yaw_error_deg = std::max(result.max_yaw_error_deg, yaw_error);
     }
   }
+  result.wheel_only_end_error_m =
+      (wheel_only.translation() - truth_at(course.total_sec()).translation()).head<2>().norm();
   return result;
 }
 
@@ -373,61 +390,50 @@ double start_cap_double_wall_gap(const PointList& map_points) {
 
 }  // namespace
 
-TEST(MapBuilder, K_MappingMapLocalizesAndTrajectoryMatchesTruth) {
-  const std::string output_directory = unique_directory("k");
+TEST(MapBuilder, K_ClasSigma0p2_ShortCourse) {
+  const std::string output_directory = unique_directory("k_clas");
   const MappingRun mapping =
       run_mapping(kKCourse, true, -1.0, -1.0, true, 1.01, 0.2, output_directory);
   const ErrorSummary summary = summarize_trajectory_error(kKCourse, mapping.trajectory);
-  const double trajectory_error = summary.maximum;
   const LocalizationRun localization =
       run_localization(kKCourse, mapping.map_points, true, 1.01);
   std::printf(
-      "[ K ] keyframes=%zu map_points=%zu trajectory_errors_max=%.6f "
-      "trajectory_max_stamp=%.3f first_quarter=%.6f middle=%.6f last_quarter=%.6f "
-      "stamps=[%.3f,%.3f] localization_max_error=%.6f online_max_error=%.6f\n",
-      mapping.trajectory.size(), mapping.map_points.size(), trajectory_error,
-      summary.maximum_stamp_sec, summary.first_quarter_maximum, summary.middle_maximum,
-      summary.last_quarter_maximum,
-      mapping.trajectory.empty() ? 0.0 : mapping.trajectory.front().stamp_sec,
-      mapping.trajectory.empty() ? 0.0 : mapping.trajectory.back().stamp_sec,
-      localization.max_error_m, mapping.online_max_error_m);
+      "[ K_CLAS ] keyframes=%zu map_points=%zu trajectory_errors_max=%.6f "
+      "localization_max_error=%.6f localization_max_yaw_deg=%.6f\n",
+      mapping.trajectory.size(), mapping.map_points.size(), summary.maximum,
+      localization.max_error_m, localization.max_yaw_error_deg);
   EXPECT_GT(mapping.trajectory.size(), 10U);
   EXPECT_GT(mapping.map_points.size(), 100U);
   EXPECT_TRUE(mapping.metadata.batch_optimized);
-  EXPECT_LT(trajectory_error, 0.2);
+  EXPECT_LT(summary.maximum, 0.2);
   EXPECT_TRUE(localization.published);
   EXPECT_LT(localization.max_error_m, 0.2);
   std::error_code error;
   std::filesystem::remove_all(output_directory, error);
 }
 
-TEST(MapBuilder, K2_BatchFixesGpsDropoutAndReportsLoopSeam) {
-  const std::string dropout_directory = unique_directory("k2_dropout");
+TEST(MapBuilder, K2_ClasSigma0p1_SpecCourse) {
+  const std::string dropout_directory = unique_directory("k2_clas");
   const double gps_off_begin_sec = 50.0 / kSpeed;
   const double gps_off_end_sec = 150.0 / kSpeed;
-  const MappingRun mapping = run_mapping(kK2Course, false, gps_off_begin_sec, gps_off_end_sec,
+  const MappingRun mapping = run_mapping(kSpecCourse, false, gps_off_begin_sec, gps_off_end_sec,
                                          true, 1.01, 0.1, dropout_directory);
-  const ErrorSummary summary = summarize_trajectory_error(kK2Course, mapping.trajectory);
+  const ErrorSummary summary = summarize_trajectory_error(kSpecCourse, mapping.trajectory);
   const ErrorSummary before_dropout =
-      summarize_error_in_window(kK2Course, mapping.trajectory, 0.0, gps_off_begin_sec);
+      summarize_error_in_window(kSpecCourse, mapping.trajectory, 0.0, gps_off_begin_sec);
   const ErrorSummary in_dropout = summarize_error_in_window(
-      kK2Course, mapping.trajectory, gps_off_begin_sec, gps_off_end_sec);
+      kSpecCourse, mapping.trajectory, gps_off_begin_sec, gps_off_end_sec);
   const ErrorSummary after_dropout = summarize_error_in_window(
-      kK2Course, mapping.trajectory, gps_off_end_sec, 1e9);
-  const double batch_error = summary.maximum;
+      kSpecCourse, mapping.trajectory, gps_off_end_sec, 1e9);
   std::printf(
-      "[ K2 ] keyframes=%zu map_points=%zu online_max_error=%.6f "
+      "[ K2_CLAS ] keyframes=%zu map_points=%zu online_max_error=%.6f "
       "online_dropout_max_error=%.6f batch_max_error=%.6f batch_max_stamp=%.3f "
-      "batch_before_dropout=%.6f batch_in_dropout=%.6f batch_after_dropout=%.6f "
-      "dropout_time=[%.3f,%.3f] gps_factors=%zu gps_gate_rejections=%zu "
-      "gps_time_gap_rejections=%zu\n",
+      "batch_before_dropout=%.6f batch_in_dropout=%.6f batch_after_dropout=%.6f\n",
       mapping.trajectory.size(), mapping.map_points.size(), mapping.online_max_error_m,
-      mapping.online_dropout_max_error_m, batch_error, summary.maximum_stamp_sec,
-      before_dropout.maximum, in_dropout.maximum, after_dropout.maximum, gps_off_begin_sec,
-      gps_off_end_sec, mapping.accepted_gps_factors, mapping.gps_gate_rejections,
-      mapping.gps_time_gap_rejections);
+      mapping.online_dropout_max_error_m, summary.maximum, summary.maximum_stamp_sec,
+      before_dropout.maximum, in_dropout.maximum, after_dropout.maximum);
   EXPECT_GT(mapping.online_dropout_max_error_m, 0.5);
-  EXPECT_LT(batch_error, 0.2);
+  EXPECT_LT(summary.maximum, 0.2);
   std::error_code dropout_error;
   std::filesystem::remove_all(dropout_directory, dropout_error);
 
@@ -445,6 +451,68 @@ TEST(MapBuilder, K2_BatchFixesGpsDropoutAndReportsLoopSeam) {
   EXPECT_GT(loop.trajectory.size(), 10U);
   std::error_code seam_error;
   std::filesystem::remove_all(seam_directory, seam_error);
+}
+
+TEST(MapBuilder, K_SpecCourseSigma1p0_MeasurementOnly) {
+  const std::string output_directory = unique_directory("k_spec");
+  const MappingRun mapping =
+      run_mapping(kSpecCourse, true, -1.0, -1.0, true, 1.01, 1.0, output_directory);
+  const ErrorSummary summary = summarize_trajectory_error(kSpecCourse, mapping.trajectory);
+  const LocalizationRun localization =
+      run_localization(kSpecCourse, mapping.map_points, true, 1.01);
+  std::printf(
+      "[ K_SPEC ] keyframes=%zu map_points=%zu trajectory_errors_max=%.6f "
+      "trajectory_max_stamp=%.3f first_quarter=%.6f middle=%.6f last_quarter=%.6f "
+      "localization_max_error=%.6f localization_max_yaw_deg=%.6f "
+      "wheel_only_end_error=%.6f\n",
+      mapping.trajectory.size(), mapping.map_points.size(), summary.maximum,
+      summary.maximum_stamp_sec, summary.first_quarter_maximum, summary.middle_maximum,
+      summary.last_quarter_maximum, localization.max_error_m,
+      localization.max_yaw_error_deg, localization.wheel_only_end_error_m);
+  std::error_code error;
+  std::filesystem::remove_all(output_directory, error);
+}
+
+TEST(MapBuilder, K2_SpecCourseSigma1p0_MeasurementOnly) {
+  const std::string output_directory = unique_directory("k2_spec");
+  const double gps_off_begin_sec = 50.0 / kSpeed;
+  const double gps_off_end_sec = 150.0 / kSpeed;
+  const MappingRun mapping = run_mapping(kSpecCourse, false, gps_off_begin_sec, gps_off_end_sec,
+                                         true, 1.01, 1.0, output_directory);
+  const ErrorSummary summary = summarize_trajectory_error(kSpecCourse, mapping.trajectory);
+  const ErrorSummary before_dropout =
+      summarize_error_in_window(kSpecCourse, mapping.trajectory, 0.0, gps_off_begin_sec);
+  const ErrorSummary in_dropout = summarize_error_in_window(
+      kSpecCourse, mapping.trajectory, gps_off_begin_sec, gps_off_end_sec);
+  const ErrorSummary after_dropout = summarize_error_in_window(
+      kSpecCourse, mapping.trajectory, gps_off_end_sec, 1e9);
+  std::printf(
+      "[ K2_SPEC ] keyframes=%zu map_points=%zu online_max_error=%.6f "
+      "online_dropout_max_error=%.6f batch_max_error=%.6f batch_max_stamp=%.3f "
+      "batch_before_dropout=%.6f batch_in_dropout=%.6f batch_after_dropout=%.6f\n",
+      mapping.trajectory.size(), mapping.map_points.size(), mapping.online_max_error_m,
+      mapping.online_dropout_max_error_m, summary.maximum, summary.maximum_stamp_sec,
+      before_dropout.maximum, in_dropout.maximum, after_dropout.maximum);
+  std::error_code error;
+  std::filesystem::remove_all(output_directory, error);
+}
+
+TEST(MapBuilder, MappingSaveSurvivesOptimizationFailure) {
+  const std::string output_directory = unique_directory("recovery");
+  const MappingRun mapping =
+      run_mapping(kKCourse, true, -1.0, -1.0, true, 1.01, 0.2, output_directory, 20.0);
+  std::printf("[ MAPPING_RECOVERY ] keyframes=%zu first_stamp=%.3f last_stamp=%.3f "
+              "trajectory_errors_max=%.6f\n",
+              mapping.trajectory.size(),
+              mapping.trajectory.empty() ? 0.0 : mapping.trajectory.front().stamp_sec,
+              mapping.trajectory.empty() ? 0.0 : mapping.trajectory.back().stamp_sec,
+              summarize_trajectory_error(kKCourse, mapping.trajectory).maximum);
+  ASSERT_GT(mapping.trajectory.size(), 10U);
+  EXPECT_LT(mapping.trajectory.front().stamp_sec, 20.0);
+  EXPECT_GT(mapping.trajectory.back().stamp_sec, 20.0);
+  EXPECT_TRUE(mapping.metadata.batch_optimized);
+  std::error_code error;
+  std::filesystem::remove_all(output_directory, error);
 }
 
 TEST(MapBuilder, TrajectoryCsvHasContractHeaderAndOneRowPerKeyframe) {
@@ -481,4 +549,54 @@ TEST(MapBuilder, TrajectoryCsvHasContractHeaderAndOneRowPerKeyframe) {
   EXPECT_TRUE(metadata.batch_optimized);
   std::error_code error;
   std::filesystem::remove_all(output_directory, error);
+}
+
+TEST(MapBuilder, MapYamlRecordsGpsOriginAndBatchFlags) {
+  const std::string output_directory = unique_directory("yaml_origin");
+  std::vector<KeyframeCloud> keyframes(1);
+  keyframes.front().node_index = 0;
+  keyframes.front().stamp_sec = 1.0;
+  keyframes.front().points_in_base.push_back(Eigen::Vector3f(0.0F, 0.0F, 0.0F));
+  std::vector<TrajectoryPoint> trajectory(1);
+  trajectory.front().node_index = 0;
+  trajectory.front().stamp_sec = 1.0;
+  trajectory.front().map_to_base.translation() = Eigen::Vector3d(1.0, 2.0, 0.5);
+  trajectory.front().position_std_m = 0.05;
+  MapOutputParameters parameters;
+  parameters.map_output_dir = output_directory;
+  parameters.map_voxel_size_m = 0.2;
+  parameters.has_gps_origin = true;
+  parameters.gps_origin = GpsOrigin{36.123, 140.456, 12.5};
+  parameters.created = "2026-02-03T04:05:06Z";
+  write_map_outputs(parameters, keyframes, trajectory);
+  const MapMetadata metadata =
+      read_map_metadata((std::filesystem::path(output_directory) / "map.yaml").string());
+  EXPECT_TRUE(metadata.has_gps_origin);
+  EXPECT_DOUBLE_EQ(metadata.origin_latitude_deg, 36.123);
+  EXPECT_DOUBLE_EQ(metadata.origin_longitude_deg, 140.456);
+  EXPECT_DOUBLE_EQ(metadata.origin_altitude_m, 12.5);
+  EXPECT_TRUE(metadata.batch_optimized);
+  EXPECT_EQ(metadata.keyframe_count, 1);
+  EXPECT_EQ(metadata.created, "2026-02-03T04:05:06Z");
+  std::error_code error;
+  std::filesystem::remove_all(output_directory, error);
+}
+
+TEST(MappingInitialization, CurvedTravelYieldsCurrentHeading) {
+  constexpr double kReferenceYaw = 0.2;
+  constexpr double kWheelRotation = 0.5;
+  constexpr double kChordRelativeToReference = 0.25;
+  Eigen::Isometry3d wheel_delta = Eigen::Isometry3d::Identity();
+  wheel_delta.linear() =
+      Eigen::AngleAxisd(kWheelRotation, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+  wheel_delta.translation() =
+      Eigen::Vector3d(std::cos(kChordRelativeToReference),
+                      std::sin(kChordRelativeToReference), 0.0);
+  const Eigen::Vector3d gps_displacement(
+      std::cos(kReferenceYaw + kChordRelativeToReference),
+      std::sin(kReferenceYaw + kChordRelativeToReference), 0.0);
+  const double yaw = mapping_initial_yaw(gps_displacement, wheel_delta);
+  std::printf("[ MAPPING_YAW_UNIT ] yaw=%.6f expected=%.6f\n", yaw,
+              kReferenceYaw + kWheelRotation);
+  EXPECT_NEAR(yaw, kReferenceYaw + kWheelRotation, 1e-9);
 }

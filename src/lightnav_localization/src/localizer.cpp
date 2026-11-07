@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <future>
+#include <limits>
 #include <map>
 #include <stdexcept>
 #include <string>
@@ -153,19 +154,33 @@ struct Localizer::Implementation {
       last_error = "pose graph optimization failed, window restarted: " + graph->last_error();
       const Eigen::Isometry3d current = pose_cache.at(nodes.back().index);
       const NodeRecord latest_node = nodes.back();
-      graph = std::make_unique<PoseGraph>(parameters.graph);
-      graph->add_first_node(latest_node.stamp, current, parameters.initial_sigma_xy_m,
-                            parameters.initial_sigma_yaw_rad);
       gps_factors_per_keyframe.clear();
-      nodes.clear();
-      nodes.push_back({0, latest_node.stamp, latest_node.odom_to_base});
-      lidar = LidarOdometry(parameters.lidar_odometry);
-      lidar_nodes.clear();
-      pose_cache.clear();
-      pose_cache[0] = current;
-      if (!graph->optimize()) last_error += " (restart also failed)";
+      if (parameters.mapping) {
+        // Keep the retained factors and keyframe clouds: only the fixed-lag window is rebuilt,
+        // and the new window continues with a fresh node index.
+        const int restarted_index = graph->restart_window(
+            latest_node.stamp, current, current, parameters.initial_sigma_xy_m,
+            parameters.initial_sigma_yaw_rad);
+        nodes.clear();
+        nodes.push_back({restarted_index, latest_node.stamp, latest_node.odom_to_base});
+        lidar = LidarOdometry(parameters.lidar_odometry);
+        lidar_nodes.clear();
+        pose_cache.clear();
+        pose_cache[restarted_index] = current;
+        if (!graph->optimize()) last_error += " (restart also failed)";
+      } else {
+        graph = std::make_unique<PoseGraph>(parameters.graph);
+        graph->add_first_node(latest_node.stamp, current, parameters.initial_sigma_xy_m,
+                              parameters.initial_sigma_yaw_rad);
+        nodes.clear();
+        nodes.push_back({0, latest_node.stamp, latest_node.odom_to_base});
+        lidar = LidarOdometry(parameters.lidar_odometry);
+        lidar_nodes.clear();
+        pose_cache.clear();
+        pose_cache[0] = current;
+        if (!graph->optimize()) last_error += " (restart also failed)";
+      }
       was_restarted = true;
-      if (parameters.mapping) mapping_keyframes.clear();
     }
     const int latest = nodes.back().index;
     if (const auto pose = graph->pose(latest)) pose_cache[latest] = *pose;
@@ -559,6 +574,9 @@ bool Localizer::save_map(const MapOutputParameters& parameters, MapOutputResult&
       point.position_std_m =
           std::max((*found->second->position_and_yaw_std)[0],
                    (*found->second->position_and_yaw_std)[1]);
+    } else {
+      // A failed marginal solve must be visible in trajectory.csv, not read as a perfect 0 m.
+      point.position_std_m = std::numeric_limits<double>::quiet_NaN();
     }
     trajectory.push_back(point);
   }
