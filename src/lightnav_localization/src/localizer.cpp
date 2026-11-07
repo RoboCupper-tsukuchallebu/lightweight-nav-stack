@@ -58,6 +58,12 @@ struct PendingGps {
   GpsFix fix;
 };
 
+PoseGraphParameters history_parameters_for(const LocalizerParameters& parameters) {
+  PoseGraphParameters graph_parameters = parameters.graph;
+  graph_parameters.record_history = parameters.mapping;
+  return graph_parameters;
+}
+
 }  // namespace
 
 struct Localizer::Implementation {
@@ -65,7 +71,7 @@ struct Localizer::Implementation {
                  const std::optional<GpsOrigin>& gps_origin_in)
       : parameters(parameters_in),
         map_points(map_points_in),
-        graph(std::make_unique<PoseGraph>(parameters_in.graph)),
+        graph(std::make_unique<PoseGraph>(history_parameters_for(parameters_in))),
         lidar(parameters_in.lidar_odometry),
         corrector(parameters_in.corrector),
         machine(parameters_in.state),
@@ -100,6 +106,7 @@ struct Localizer::Implementation {
   std::size_t gps_gate_rejections = 0;
   std::map<int, std::size_t> gps_factors_per_keyframe;
   std::size_t max_gps_factors_per_keyframe = 0;
+  std::size_t accepted_gps_factor_count = 0;
   double max_keyframe_interval_sec = 0.0;
   double last_match_attempt_sec = kNeverSec;
   double absolute_reference_sec = 0.0;
@@ -124,6 +131,8 @@ struct Localizer::Implementation {
   double last_inlier_ratio = 0.0;
   double last_lidar_odom_inlier_ratio = 0.0;
   std::optional<Eigen::Vector3d> latest_position_and_yaw_std;
+  std::vector<KeyframeCloud> mapping_keyframes;
+  bool mapping_paused = false;
   std::optional<double> match_eigenvalue_ratio;
   std::optional<Eigen::Vector3d> match_weakest_axis;
 
@@ -156,6 +165,7 @@ struct Localizer::Implementation {
       pose_cache[0] = current;
       if (!graph->optimize()) last_error += " (restart also failed)";
       was_restarted = true;
+      if (parameters.mapping) mapping_keyframes.clear();
     }
     const int latest = nodes.back().index;
     if (const auto pose = graph->pose(latest)) pose_cache[latest] = *pose;
@@ -304,6 +314,10 @@ struct Localizer::Implementation {
       last_keyframe_sec = pending.stamp;
       last_keyframe_odom = *odom_now;
       is_graph_started = true;
+      if (parameters.mapping && !mapping_paused) {
+        mapping_keyframes.push_back(
+            {0, pending.stamp, downsample_voxel(*deskewed, parameters.keyframe_cloud_voxel_m)});
+      }
       scan_time_ms = elapsed_ms(start);
       return;
     }
@@ -355,6 +369,10 @@ struct Localizer::Implementation {
         lidar_nodes.pop_front();
       }
       sync_lidar_submap();
+      if (parameters.mapping && !mapping_paused) {
+        mapping_keyframes.push_back({current_index, pending.stamp,
+                                     downsample_voxel(*deskewed, parameters.keyframe_cloud_voxel_m)});
+      }
     }
     scan_time_ms = elapsed_ms(start);
   }
@@ -378,6 +396,7 @@ struct Localizer::Implementation {
     if (decision.rejection == GpsRejection::kGate) ++gps_gate_rejections;
     if (decision.gate_would_reject) conflict.record(*decision.gate_would_reject);
     if (decision.measurement) {
+      ++accepted_gps_factor_count;
       max_gps_factors_per_keyframe = std::max(max_gps_factors_per_keyframe, ++gps_factors_per_keyframe[node_index]);
       const Eigen::Vector3d displacement = predicted.translation() - keyframe_pose.translation();
       graph->add_gps_factor(node_index, decision.measurement->base_position - displacement,
@@ -499,6 +518,61 @@ std::size_t Localizer::gps_gate_rejection_count() const { return implementation_
 std::size_t Localizer::max_gps_factors_per_keyframe() const { return implementation_->max_gps_factors_per_keyframe; }
 double Localizer::max_keyframe_interval_sec() const { return implementation_->max_keyframe_interval_sec; }
 double Localizer::last_absolute_observation_stamp_sec() const { return implementation_->absolute_reference_sec; }
+
+const std::vector<KeyframeCloud>& Localizer::mapping_keyframes() const {
+  return implementation_->mapping_keyframes;
+}
+
+std::size_t Localizer::mapping_keyframe_count() const {
+  return implementation_->mapping_keyframes.size();
+}
+
+std::size_t Localizer::accepted_gps_factor_count() const {
+  return implementation_->accepted_gps_factor_count;
+}
+
+void Localizer::interrupt_mapping() { implementation_->mapping_paused = true; }
+
+bool Localizer::save_map(const MapOutputParameters& parameters, MapOutputResult& result,
+                         std::string& error) {
+  Implementation& self = *implementation_;
+  if (!self.parameters.mapping) {
+    error = "save_map requires mapping mode";
+    return false;
+  }
+  if (!self.graph->batch_optimize(parameters.batch_max_iterations)) {
+    error = "batch optimization failed: " + self.graph->last_error();
+    return false;
+  }
+  std::map<int, const BatchPose*> poses;
+  for (const BatchPose& pose : self.graph->batch_poses()) poses[pose.index] = &pose;
+  std::vector<TrajectoryPoint> trajectory;
+  trajectory.reserve(self.mapping_keyframes.size());
+  for (const KeyframeCloud& keyframe : self.mapping_keyframes) {
+    const auto found = poses.find(keyframe.node_index);
+    if (found == poses.end()) continue;
+    TrajectoryPoint point;
+    point.node_index = keyframe.node_index;
+    point.stamp_sec = keyframe.stamp_sec;
+    point.map_to_base = found->second->map_to_base;
+    if (found->second->position_and_yaw_std) {
+      point.position_std_m =
+          std::max((*found->second->position_and_yaw_std)[0],
+                   (*found->second->position_and_yaw_std)[1]);
+    }
+    trajectory.push_back(point);
+  }
+  MapOutputParameters output_parameters = parameters;
+  output_parameters.has_gps_origin = self.gps_origin.has_value();
+  if (self.gps_origin) output_parameters.gps_origin = *self.gps_origin;
+  try {
+    result = write_map_outputs(output_parameters, self.mapping_keyframes, trajectory);
+  } catch (const std::exception& exception) {
+    error = exception.what();
+    return false;
+  }
+  return true;
+}
 
 std::optional<LocalizerOutput> Localizer::on_wheel_odom(double stamp_sec,
                                                         const Eigen::Isometry3d& odom_to_base) {
