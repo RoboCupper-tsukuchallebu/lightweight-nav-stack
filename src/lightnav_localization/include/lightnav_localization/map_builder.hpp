@@ -32,6 +32,7 @@ struct MapOutputParameters {
   std::string map_output_dir;
   double map_voxel_size_m = 0.2;
   int batch_max_iterations = 100;
+  bool batch_optimized = false;
   bool has_gps_origin = false;
   GpsOrigin gps_origin;
   std::string created;  // ISO-8601 UTC, e.g. 2026-01-02T03:04:05Z

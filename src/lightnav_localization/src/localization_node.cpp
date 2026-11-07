@@ -590,8 +590,10 @@ LocalizationNode::CallbackReturn LocalizationNode::on_activate(
   aligned_scan_publisher_->on_activate();
   has_status_publish_time_ = false;
   last_status_state_ = LocalizationState::kInitializing;
-  has_mapping_activation_time_ = true;
   mapping_activation_sec_ = get_clock()->now().seconds();
+  // With use_sim_time the clock may still be 0 at activation. Start the gps_timeout_s wait
+  // only once the clock has a real value.
+  has_mapping_activation_time_ = mapping_activation_sec_ > 0.0;
   watchdog_timer_ = create_wall_timer(
       std::chrono::duration_cast<std::chrono::nanoseconds>(
           std::chrono::duration<double>(kDefaultWatchdogPeriodSec)),
@@ -1132,12 +1134,17 @@ void LocalizationNode::maybe_start_mapping() {
       initial_position_ = *latest_mapping_gps_enu_;
       initial_position_from_gps_ = true;
     } else if (!mapping_has_gps_origin_ && allow_mapping_without_gps_) {
-      const double waited_sec =
-          has_mapping_activation_time_
-              ? get_clock()->now().seconds() - mapping_activation_sec_
-              : 0.0;
-      if (!has_mapping_activation_time_ ||
-          waited_sec < localizer_parameters_.state.gps_timeout_s) {
+      const double now_sec = get_clock()->now().seconds();
+      if (!has_mapping_activation_time_) {
+        if (!(now_sec > 0.0)) {
+          node_error_ = "mapping: waiting for the clock before starting without GPS";
+          return;
+        }
+        has_mapping_activation_time_ = true;
+        mapping_activation_sec_ = now_sec;
+      }
+      const double waited_sec = now_sec - mapping_activation_sec_;
+      if (waited_sec < localizer_parameters_.state.gps_timeout_s) {
         node_error_ = "mapping: waiting for gps_timeout_s before starting without GPS";
         return;
       }

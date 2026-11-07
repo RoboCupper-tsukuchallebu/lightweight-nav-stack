@@ -581,6 +581,7 @@ bool Localizer::save_map(const MapOutputParameters& parameters, MapOutputResult&
     trajectory.push_back(point);
   }
   MapOutputParameters output_parameters = parameters;
+  output_parameters.batch_optimized = true;
   output_parameters.has_gps_origin = self.gps_origin.has_value();
   if (self.gps_origin) output_parameters.gps_origin = *self.gps_origin;
   try {

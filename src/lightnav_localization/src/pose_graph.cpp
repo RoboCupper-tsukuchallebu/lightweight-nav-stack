@@ -140,7 +140,8 @@ int PoseGraph::restart_window(double stamp_sec, const Eigen::Isometry3d& pose,
           pose_noise({0.1, 0.1, sigma_yaw_rad}, {sigma_xy_m, sigma_xy_m, 1.0})));
   graph.pending_factors.push_back(prior);
   if (graph.parameters.record_history) {
-    graph.history_factors.push_back(prior);
+    // No prior at the restarted node: its estimate may be exactly what failed. The history is
+    // connected by the between factor below instead.
     graph.history_values.insert(key_of(index), to_gtsam(pose));
     graph.history_stamps[index] = stamp_sec;
   }
@@ -151,7 +152,8 @@ int PoseGraph::restart_window(double stamp_sec, const Eigen::Isometry3d& pose,
         new gtsam::BetweenFactor<gtsam::Pose3>(
             key_of(previous_index), key_of(index), to_gtsam(inverse_previous * pose),
             pose_noise({0.1, 0.1, sigma_yaw_rad}, {sigma_xy_m, sigma_xy_m, 1.0})));
-    graph.pending_factors.push_back(connection);
+    // Only the batch history knows the previous node; the new online smoother must contain just
+    // the new prior, exactly like the localization-mode restart.
     if (graph.parameters.record_history) graph.history_factors.push_back(connection);
   }
   return index;
@@ -252,6 +254,11 @@ bool PoseGraph::optimize() {
     }
   } catch (const std::exception& exception) {
     last_error_ = exception.what();
+    // Never leave a half-consumed batch behind: a later update with the same keys would fail
+    // with "already exists" forever. The caller restarts the window from this estimate.
+    graph.pending_factors.resize(0);
+    graph.pending_values.clear();
+    graph.pending_stamps.clear();
     return false;
   }
   graph.pending_factors.resize(0);

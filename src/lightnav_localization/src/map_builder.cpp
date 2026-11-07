@@ -108,7 +108,7 @@ MapOutputResult write_map_outputs(const MapOutputParameters& parameters,
   metadata.voxel_size_m = parameters.map_voxel_size_m;
   metadata.created = parameters.created;
   metadata.keyframe_count = static_cast<int>(keyframes.size());
-  metadata.batch_optimized = true;
+  metadata.batch_optimized = parameters.batch_optimized;
   write_map_metadata(join_path(parameters.map_output_dir, "map.yaml"), metadata);
   return result;
 }

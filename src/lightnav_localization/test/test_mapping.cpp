@@ -128,6 +128,9 @@ struct MappingRun {
   std::size_t accepted_gps_factors = 0;
   std::size_t gps_gate_rejections = 0;
   std::size_t gps_time_gap_rejections = 0;
+  std::size_t outputs_after_failure = 0;
+  bool online_moved_after_failure = false;
+  std::string last_error;
   std::vector<std::pair<double, Eigen::Isometry3d>> online_poses;
 };
 
@@ -201,6 +204,9 @@ MappingRun run_mapping(const Course& course, bool has_pillars,
     const auto output = localizer.on_wheel_odom(time_sec, odom);
     if (output) {
       result.online_poses.push_back({time_sec, output->map_to_base});
+      if (fail_optimization_at_sec >= 0.0 && time_sec > fail_optimization_at_sec + 1.0) {
+        ++result.outputs_after_failure;
+      }
       const double error =
           (output->map_to_base.translation() - truth.translation()).head<2>().norm();
       result.online_max_error_m = std::max(result.online_max_error_m, error);
@@ -222,6 +228,22 @@ MappingRun run_mapping(const Course& course, bool has_pillars,
   result.accepted_gps_factors = localizer.accepted_gps_factor_count();
   result.gps_gate_rejections = localizer.gps_gate_rejection_count();
   result.gps_time_gap_rejections = localizer.gps_time_gap_rejection_count();
+  result.last_error = localizer.last_error();
+  if (fail_optimization_at_sec >= 0.0) {
+    std::optional<Eigen::Isometry3d> at_failure;
+    for (const auto& entry : result.online_poses) {
+      if (entry.first >= fail_optimization_at_sec) {
+        at_failure = entry.second;
+        break;
+      }
+    }
+    if (at_failure && !result.online_poses.empty()) {
+      result.online_moved_after_failure =
+          (result.online_poses.back().second.translation() - at_failure->translation())
+              .head<2>()
+              .norm() > 1.0;
+    }
+  }
   result.trajectory = read_trajectory((output_directory / "trajectory.csv").string());
   result.map_points = read_pcd((output_directory / "map.pcd").string());
   result.metadata = read_map_metadata((output_directory / "map.yaml").string());
@@ -279,6 +301,7 @@ struct LocalizationRun {
   double max_error_m = 0.0;
   double max_yaw_error_deg = 0.0;
   double wheel_only_end_error_m = 0.0;
+  int published_count = 0;
   bool published = false;
 };
 
@@ -332,6 +355,7 @@ LocalizationRun run_localization(const Course& course, const PointList& map_poin
     const auto output = localizer.on_wheel_odom(time_sec, odom);
     if (output) {
       result.published = true;
+      ++result.published_count;
       const double error =
           (output->map_to_base.translation() - truth.translation()).head<2>().norm();
       result.max_error_m = std::max(result.max_error_m, error);
@@ -464,11 +488,12 @@ TEST(MapBuilder, K_SpecCourseSigma1p0_MeasurementOnly) {
       "[ K_SPEC ] keyframes=%zu map_points=%zu trajectory_errors_max=%.6f "
       "trajectory_max_stamp=%.3f first_quarter=%.6f middle=%.6f last_quarter=%.6f "
       "localization_max_error=%.6f localization_max_yaw_deg=%.6f "
-      "wheel_only_end_error=%.6f\n",
+      "wheel_only_end_error=%.6f published=%d\n",
       mapping.trajectory.size(), mapping.map_points.size(), summary.maximum,
       summary.maximum_stamp_sec, summary.first_quarter_maximum, summary.middle_maximum,
       summary.last_quarter_maximum, localization.max_error_m,
-      localization.max_yaw_error_deg, localization.wheel_only_end_error_m);
+      localization.max_yaw_error_deg, localization.wheel_only_end_error_m,
+      localization.published_count);
   std::error_code error;
   std::filesystem::remove_all(output_directory, error);
 }
@@ -498,21 +523,37 @@ TEST(MapBuilder, K2_SpecCourseSigma1p0_MeasurementOnly) {
 }
 
 TEST(MapBuilder, MappingSaveSurvivesOptimizationFailure) {
+  const std::string baseline_directory = unique_directory("recovery_baseline");
+  const MappingRun baseline =
+      run_mapping(kKCourse, true, -1.0, -1.0, true, 1.01, 0.2, baseline_directory);
+  const double baseline_error =
+      summarize_trajectory_error(kKCourse, baseline.trajectory).maximum;
+
   const std::string output_directory = unique_directory("recovery");
   const MappingRun mapping =
       run_mapping(kKCourse, true, -1.0, -1.0, true, 1.01, 0.2, output_directory, 20.0);
+  const ErrorSummary summary = summarize_trajectory_error(kKCourse, mapping.trajectory);
   std::printf("[ MAPPING_RECOVERY ] keyframes=%zu first_stamp=%.3f last_stamp=%.3f "
-              "trajectory_errors_max=%.6f\n",
+              "trajectory_errors_max=%.6f baseline_max=%.6f outputs_after_failure=%zu "
+              "online_moved_after_failure=%d last_error=%s\n",
               mapping.trajectory.size(),
               mapping.trajectory.empty() ? 0.0 : mapping.trajectory.front().stamp_sec,
               mapping.trajectory.empty() ? 0.0 : mapping.trajectory.back().stamp_sec,
-              summarize_trajectory_error(kKCourse, mapping.trajectory).maximum);
+              summary.maximum, baseline_error, mapping.outputs_after_failure,
+              mapping.online_moved_after_failure ? 1 : 0, mapping.last_error.c_str());
   ASSERT_GT(mapping.trajectory.size(), 10U);
   EXPECT_LT(mapping.trajectory.front().stamp_sec, 20.0);
   EXPECT_GT(mapping.trajectory.back().stamp_sec, 20.0);
   EXPECT_TRUE(mapping.metadata.batch_optimized);
+  EXPECT_GT(mapping.outputs_after_failure, 20U);
+  EXPECT_TRUE(mapping.online_moved_after_failure);
+  EXPECT_EQ(mapping.last_error.find("restart also failed"), std::string::npos)
+      << mapping.last_error;
+  EXPECT_LT(summary.maximum, 0.2);
+  EXPECT_LT(summary.maximum, baseline_error + 0.05);
   std::error_code error;
   std::filesystem::remove_all(output_directory, error);
+  std::filesystem::remove_all(baseline_directory, error);
 }
 
 TEST(MapBuilder, TrajectoryCsvHasContractHeaderAndOneRowPerKeyframe) {
@@ -537,6 +578,7 @@ TEST(MapBuilder, TrajectoryCsvHasContractHeaderAndOneRowPerKeyframe) {
   MapOutputParameters parameters;
   parameters.map_output_dir = output_directory;
   parameters.map_voxel_size_m = 0.2;
+  parameters.batch_optimized = true;
   parameters.created = "2026-01-01T00:00:00Z";
   const MapOutputResult result = write_map_outputs(parameters, keyframes, trajectory);
   EXPECT_EQ(result.keyframe_count, 3U);
@@ -567,6 +609,7 @@ TEST(MapBuilder, MapYamlRecordsGpsOriginAndBatchFlags) {
   parameters.map_voxel_size_m = 0.2;
   parameters.has_gps_origin = true;
   parameters.gps_origin = GpsOrigin{36.123, 140.456, 12.5};
+  parameters.batch_optimized = true;
   parameters.created = "2026-02-03T04:05:06Z";
   write_map_outputs(parameters, keyframes, trajectory);
   const MapMetadata metadata =
