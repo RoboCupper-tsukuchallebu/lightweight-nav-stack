@@ -4,23 +4,20 @@
 #include <cmath>
 #include <limits>
 
-#include "lightnav_localization/matcher.hpp"
-
 namespace lightnav_localization {
 namespace {
 
 bool is_finite_pose(const Eigen::Isometry3d& pose) { return pose.matrix().allFinite(); }
 
-}  // namespace
-
-InitialAlignmentResult align_initial_yaw(const PointList& map_points, const PointList& scan,
-                                         const Eigen::Vector3d& position,
-                                         const InitialAlignmentParameters& parameters) {
+InitialAlignmentResult run_alignment(const PreparedTarget& target, const PointList& scan,
+                                     const Eigen::Vector3d& reference_position,
+                                     const InitialAlignmentParameters& parameters,
+                                     const Eigen::Vector3d& lever_arm_in_base) {
   InitialAlignmentResult result;
   result.map_to_base = Eigen::Isometry3d::Identity();
-  result.map_to_base.translation() = position;
-  if (!position.allFinite()) {
-    result.error = "initial position is not finite";
+  result.map_to_base.translation() = reference_position;
+  if (!reference_position.allFinite() || !lever_arm_in_base.allFinite()) {
+    result.error = "initial position or lever arm is not finite";
     return result;
   }
   if (scan.size() < 10) {
@@ -30,23 +27,6 @@ InitialAlignmentResult align_initial_yaw(const PointList& map_points, const Poin
   if (!(parameters.yaw_step_deg > 0.0) || !(parameters.search_radius_m > 0.0) ||
       !(parameters.inlier_ratio_min > 0.0)) {
     result.error = "invalid initial yaw alignment parameters";
-    return result;
-  }
-
-  PointList cropped_map;
-  for (const Eigen::Vector3f& point : map_points) {
-    if (!point.allFinite()) continue;
-    if ((point.head<2>().cast<double>() - position.head<2>()).norm() <= parameters.search_radius_m) {
-      cropped_map.push_back(point);
-    }
-  }
-  if (cropped_map.size() < 10) {
-    result.error = "not enough map points near the initial position";
-    return result;
-  }
-  PreparedTarget target(cropped_map);
-  if (!target.is_valid()) {
-    result.error = "could not build the initial-alignment target";
     return result;
   }
 
@@ -65,9 +45,11 @@ InitialAlignmentResult align_initial_yaw(const PointList& map_points, const Poin
   for (int candidate = 0; candidate < candidate_count; ++candidate) {
     const double yaw = 2.0 * M_PI * static_cast<double>(candidate) /
                        static_cast<double>(candidate_count);
+    const Eigen::Matrix3d rotation =
+        Eigen::AngleAxisd(yaw, Eigen::Vector3d::UnitZ()).toRotationMatrix();
     Eigen::Isometry3d prediction = Eigen::Isometry3d::Identity();
-    prediction.translation() = position;
-    prediction.linear() = Eigen::AngleAxisd(yaw, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+    prediction.translation() = reference_position - rotation * lever_arm_in_base;
+    prediction.linear() = rotation;
     const MatchResult match = match_scan(target, scan, prediction, coarse_parameters);
     if (!match.converged || !is_finite_pose(match.target_to_source) ||
         !std::isfinite(match.inlier_ratio)) {
@@ -100,6 +82,45 @@ InitialAlignmentResult align_initial_yaw(const PointList& map_points, const Poin
   result.yaw_rad = std::atan2(fine.target_to_source.rotation()(1, 0),
                              fine.target_to_source.rotation()(0, 0));
   return result;
+}
+
+}  // namespace
+
+std::optional<PreparedTarget> build_initial_alignment_target(
+    const PointList& map_points, const Eigen::Vector3d& reference_position, double radius_m) {
+  if (!reference_position.allFinite() || !(radius_m > 0.0)) return std::nullopt;
+  PointList cropped_map;
+  for (const Eigen::Vector3f& point : map_points) {
+    if (!point.allFinite()) continue;
+    if ((point.head<2>().cast<double>() - reference_position.head<2>()).norm() <= radius_m) {
+      cropped_map.push_back(point);
+    }
+  }
+  if (cropped_map.size() < 10) return std::nullopt;
+  PreparedTarget target(cropped_map);
+  if (!target.is_valid()) return std::nullopt;
+  return target;
+}
+
+InitialAlignmentResult align_initial_yaw(const PointList& map_points, const PointList& scan,
+                                         const Eigen::Vector3d& reference_position,
+                                         const InitialAlignmentParameters& parameters,
+                                         const Eigen::Vector3d& lever_arm_in_base) {
+  const std::optional<PreparedTarget> target = build_initial_alignment_target(
+      map_points, reference_position, parameters.search_radius_m);
+  if (!target) {
+    InitialAlignmentResult result;
+    result.error = "not enough map points near the initial position";
+    return result;
+  }
+  return run_alignment(*target, scan, reference_position, parameters, lever_arm_in_base);
+}
+
+InitialAlignmentResult align_initial_yaw(const PreparedTarget& target, const PointList& scan,
+                                         const Eigen::Vector3d& reference_position,
+                                         const InitialAlignmentParameters& parameters,
+                                         const Eigen::Vector3d& lever_arm_in_base) {
+  return run_alignment(target, scan, reference_position, parameters, lever_arm_in_base);
 }
 
 }  // namespace lightnav_localization

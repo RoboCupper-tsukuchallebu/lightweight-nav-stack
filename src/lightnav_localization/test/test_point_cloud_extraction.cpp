@@ -118,3 +118,21 @@ TEST(PointCloudExtraction, RejectsAnInvalidLayoutWithoutReadingOutOfBounds) {
   const auto points = extract_timed_points(buffer.data(), buffer.size(), layout);
   EXPECT_TRUE(points.empty());
 }
+
+TEST(PointCloudExtraction, RejectsWidthTimesPointStepOverflow) {
+  const std::vector<std::uint8_t> buffer(64, 0);
+  // 65536 * 65536 overflows uint32 to 0; the bounds must be checked in 64 bits.
+  PointCloudFieldLayout layout = float_layout(65536, 1, 65536, 65536);
+  const auto points = extract_timed_points(buffer.data(), buffer.size(), layout);
+  EXPECT_TRUE(points.empty());
+}
+
+TEST(PointCloudExtraction, RejectsATruncatedLastRow) {
+  constexpr std::uint32_t kPointStep = 16;
+  constexpr std::uint32_t kRowStep = 32;
+  // Two rows need 64 bytes; only the first row and half of the second are present.
+  const std::vector<std::uint8_t> buffer(48, 0);
+  const auto points = extract_timed_points(
+      buffer.data(), buffer.size(), float_layout(2, 2, kPointStep, kRowStep));
+  EXPECT_TRUE(points.empty());
+}

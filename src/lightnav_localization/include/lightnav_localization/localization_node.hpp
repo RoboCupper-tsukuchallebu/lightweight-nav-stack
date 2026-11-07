@@ -86,6 +86,7 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
   void publish_status();
   void publish_aligned_scan(const PointList& points_in_base, const rclcpp::Time& stamp);
   void update_accepted_gps_diagnostics();
+  std::string composed_last_error() const;
 
   // Parameters.
   std::string mode_;
@@ -110,6 +111,7 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
   MapMetadata map_metadata_;
   std::optional<GpsOrigin> gps_origin_;
   std::optional<GpsConverter> gps_converter_;
+  bool map_has_no_gps_origin_ = false;
 
   // Localizer and initial alignment.
   std::unique_ptr<Localizer> localizer_;
@@ -120,6 +122,8 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
   std::optional<double> initial_yaw_;
   bool initial_position_from_gps_ = false;
   std::deque<PointList> alignment_scans_;
+  std::optional<PreparedTarget> alignment_target_;
+  Eigen::Vector3d alignment_target_center_ = Eigen::Vector3d::Zero();
   double last_alignment_attempt_sec_ = -1e9;
 
   // Extrinsics read from TF after activation.

@@ -9,6 +9,7 @@
 #include <future>
 #include <limits>
 #include <memory>
+#include <random>
 #include <set>
 #include <string>
 #include <utility>
@@ -41,6 +42,7 @@ namespace {
 constexpr double kMetersPerDegreeLatitude = 111320.0;
 const GpsOrigin kOrigin{36.0, 140.0, 0.0};
 const Eigen::Vector3d kTruthPosition(5.0, 0.0, 1.0);
+const Eigen::Vector3d kGpsLeverArm(-0.2, 0.0, 0.7);
 constexpr double kTruthYaw = 0.7;
 constexpr int kInputWheel = 1;
 constexpr int kInputScans = 2;
@@ -74,6 +76,7 @@ class LocalizationNodeTest : public ::testing::Test {
     std::filesystem::create_directories(temp_directory_);
     map_file_ = temp_directory_ / "map.pcd";
     map_yaml_ = temp_directory_ / "map.yaml";
+    no_origin_yaml_ = temp_directory_ / "map_no_origin.yaml";
 
     world_ = std::make_unique<SyntheticWorld>(
         std::vector<Eigen::Vector2d>{Eigen::Vector2d(0.0, 0.0),
@@ -87,6 +90,9 @@ class LocalizationNodeTest : public ::testing::Test {
     metadata.origin_longitude_deg = kOrigin.longitude_deg;
     metadata.origin_altitude_m = kOrigin.altitude_m;
     write_map_metadata(map_yaml_.string(), metadata);
+    MapMetadata no_origin_metadata;
+    no_origin_metadata.has_gps_origin = false;
+    write_map_metadata(no_origin_yaml_.string(), no_origin_metadata);
   }
 
   void TearDown() override {
@@ -164,11 +170,15 @@ class LocalizationNodeTest : public ::testing::Test {
   }
 
   void send_static_transform(const std::string& parent_frame,
-                             const std::string& child_frame) {
+                             const std::string& child_frame,
+                             const Eigen::Vector3d& translation = Eigen::Vector3d::Zero()) {
     geometry_msgs::msg::TransformStamped transform;
     transform.header.stamp = helper_->now();
     transform.header.frame_id = parent_frame;
     transform.child_frame_id = child_frame;
+    transform.transform.translation.x = translation.x();
+    transform.transform.translation.y = translation.y();
+    transform.transform.translation.z = translation.z();
     transform.transform.rotation.w = 1.0;
     static_broadcaster_->sendTransform(transform);
   }
@@ -177,7 +187,7 @@ class LocalizationNodeTest : public ::testing::Test {
     ASSERT_EQ(node_->configure().id(),
               lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE);
     send_static_transform("base_footprint", "velodyne");
-    send_static_transform("base_footprint", "gnss");
+    send_static_transform("base_footprint", "gnss", kGpsLeverArm);
     ASSERT_EQ(node_->activate().id(),
               lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE);
     spin_for(200ms);
@@ -257,19 +267,34 @@ class LocalizationNodeTest : public ::testing::Test {
   }
 
   void publish_gps(const rclcpp::Time& stamp) {
-    const Eigen::Vector2d antenna_position =
-        kTruthPosition.head<2>() + Eigen::Vector2d(0.4, 0.2);
+    Eigen::Isometry3d base_pose = Eigen::Isometry3d::Identity();
+    base_pose.translation() = kTruthPosition;
+    base_pose.linear() =
+        Eigen::AngleAxisd(kTruthYaw, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+    const Eigen::Vector3d antenna_position = base_pose * kGpsLeverArm;
+    double noise_east = gps_normal_(gps_random_);
+    double noise_north = gps_normal_(gps_random_);
+    double noise_up = gps_normal_(gps_random_);
+    if (gps_fix_count_ == 0) {
+      // The first fix is a 1-2 m error sample; the initial alignment must still recover.
+      noise_east += 1.2;
+      noise_north -= 0.6;
+      noise_up += 0.5;
+    }
+    ++gps_fix_count_;
+    const double east = antenna_position.x() + noise_east;
+    const double north = antenna_position.y() + noise_north;
+
     sensor_msgs::msg::NavSatFix message;
     message.header.stamp = stamp;
     message.header.frame_id = "gnss";
     message.status.status = sensor_msgs::msg::NavSatStatus::STATUS_FIX;
-    message.latitude = kOrigin.latitude_deg +
-                       antenna_position.y() / kMetersPerDegreeLatitude;
+    message.latitude =
+        kOrigin.latitude_deg + north / kMetersPerDegreeLatitude;
     message.longitude = kOrigin.longitude_deg +
-                        antenna_position.x() /
-                            (kMetersPerDegreeLatitude *
-                             std::cos(kOrigin.latitude_deg * M_PI / 180.0));
-    message.altitude = kTruthPosition.z();
+                        east / (kMetersPerDegreeLatitude *
+                                std::cos(kOrigin.latitude_deg * M_PI / 180.0));
+    message.altitude = kOrigin.altitude_m + antenna_position.z() + noise_up;
     message.position_covariance_type =
         sensor_msgs::msg::NavSatFix::COVARIANCE_TYPE_KNOWN;
     message.position_covariance[0] = 1.0;
@@ -315,6 +340,7 @@ class LocalizationNodeTest : public ::testing::Test {
   std::filesystem::path temp_directory_;
   std::filesystem::path map_file_;
   std::filesystem::path map_yaml_;
+  std::filesystem::path no_origin_yaml_;
   std::unique_ptr<SyntheticWorld> world_;
   std::shared_ptr<LocalizationNode> node_;
   std::shared_ptr<rclcpp::Node> helper_;
@@ -332,6 +358,9 @@ class LocalizationNodeTest : public ::testing::Test {
   int odom_count_ = 0;
   int status_count_ = 0;
   bool all_odom_stamps_matched_ = true;
+  std::mt19937 gps_random_{20261106};
+  std::normal_distribution<double> gps_normal_{0.0, 1.0};
+  int gps_fix_count_ = 0;
 };
 
 TEST_F(LocalizationNodeTest, ConfigureFailsWithoutMapFile) {
@@ -354,6 +383,18 @@ TEST_F(LocalizationNodeTest, StaysInitializingWithoutGpsOrService) {
   ASSERT_GT(status_count_, 0);
   EXPECT_EQ(last_status_.state, LocalizationStatus::INITIALIZING);
   EXPECT_EQ(odom_count_, 0);
+}
+
+TEST_F(LocalizationNodeTest, ReportsAMapWithoutGpsOriginInLastError) {
+  create_node(make_options(map_file_.string(), no_origin_yaml_.string()));
+  bring_up();
+  ASSERT_TRUE(run_until([this]() { return status_count_ > 0; }, 2000ms,
+                        kInputWheel | kInputScans));
+  EXPECT_EQ(last_status_.state, LocalizationStatus::INITIALIZING);
+  EXPECT_EQ(odom_count_, 0);
+  EXPECT_NE(last_status_.last_error.find("GPS origin"), std::string::npos)
+      << last_status_.last_error;
+  std::printf("[ NO_ORIGIN ] last_error=%s\n", last_status_.last_error.c_str());
 }
 
 TEST_F(LocalizationNodeTest, GpsWithUnknownYawTracksAndWheelStopGoesStale) {
@@ -407,11 +448,16 @@ TEST_F(LocalizationNodeTest, GpsWithUnknownYawTracksAndWheelStopGoesStale) {
   const double yaw_error =
       std::abs(yaw_from_quaternion(last_odom_.pose.pose.orientation) - kTruthYaw);
   EXPECT_LT(yaw_error, 0.1);
+  EXPECT_TRUE(std::isfinite(last_status_.seconds_since_last_match));
+  EXPECT_GE(last_status_.seconds_since_last_match, 0.0F);
+  EXPECT_LT(last_status_.seconds_since_last_match, 2.0F);
+  EXPECT_GT(last_status_.last_inlier_ratio, 0.5F);
   std::printf(
       "[ J ] time_to_tracking_with_error=%.3f s position_error=%.4f m yaw_error=%.4f rad "
-      "inlier_ratio=%.3f\n",
+      "inlier_ratio=%.3f seconds_since_last_match=%.3f\n",
       std::chrono::duration<double>(std::chrono::steady_clock::now() - test_start).count(),
-      position_error.norm(), yaw_error, last_status_.last_inlier_ratio);
+      position_error.norm(), yaw_error, last_status_.last_inlier_ratio,
+      last_status_.seconds_since_last_match);
   std::printf(
       "[ N ] frame_id=%s child_frame_id=%s covariance_diagonal=(%.4f,%.4f,%.4f) "
       "stamp_matched_input=1\n",
@@ -446,10 +492,13 @@ TEST_F(LocalizationNodeTest, SetInitialPoseWithYawTracks) {
 
   auto request = std::make_shared<SetInitialPose::Request>();
   request->pose.header.frame_id = "map";
-  request->pose.pose.pose.position.x = kTruthPosition.x();
-  request->pose.pose.pose.position.y = kTruthPosition.y();
-  request->pose.pose.pose.position.z = kTruthPosition.z();
-  request->pose.pose.pose.orientation = quaternion_from_yaw(kTruthYaw);
+  const Eigen::Vector3d requested_position =
+      kTruthPosition + Eigen::Vector3d(0.3, 0.0, 0.0);
+  const double requested_yaw = kTruthYaw + 0.05;
+  request->pose.pose.pose.position.x = requested_position.x();
+  request->pose.pose.pose.position.y = requested_position.y();
+  request->pose.pose.pose.position.z = requested_position.z();
+  request->pose.pose.pose.orientation = quaternion_from_yaw(requested_yaw);
   request->pose.pose.covariance[35] = 0.0;  // yaw is specified
   auto future = set_initial_pose_client_->async_send_request(request);
   ASSERT_TRUE(run_until(
@@ -459,7 +508,16 @@ TEST_F(LocalizationNodeTest, SetInitialPoseWithYawTracks) {
   ASSERT_EQ(response->accepted, true) << response->message;
 
   const bool is_tracking = run_until(
-      [this]() { return last_status_.state == LocalizationStatus::TRACKING; },
+      [this]() {
+        if (last_status_.state != LocalizationStatus::TRACKING || odom_count_ == 0) {
+          return false;
+        }
+        const Eigen::Vector2d error =
+            Eigen::Vector2d(last_odom_.pose.pose.position.x,
+                            last_odom_.pose.pose.position.y) -
+            kTruthPosition.head<2>();
+        return error.norm() < 0.1;
+      },
       10000ms, kInputWheel | kInputScans);
   ASSERT_TRUE(is_tracking) << "last_error: " << last_status_.last_error;
   ASSERT_GT(odom_count_, 0);

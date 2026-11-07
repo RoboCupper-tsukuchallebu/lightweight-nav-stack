@@ -42,6 +42,28 @@ TEST(InitialAlignment, RecoversUnknownYawFromStaticScan) {
   EXPECT_NEAR(result.yaw_rad, truth_yaw, 5.0 * M_PI / 180.0);
 }
 
+TEST(InitialAlignment, RemovesTheAntennaLeverArmBeforeMatching) {
+  const SyntheticWorld world({Eigen::Vector2d(0.0, 0.0), Eigen::Vector2d(30.0, 0.0)}, true);
+  const PointList map = world.sample_map(0.2);
+  const Eigen::Vector3d base_position(6.0, 0.0, 1.0);
+  const double truth_yaw = 0.7;
+  const PointList scan = make_scan(world, base_position, truth_yaw);
+
+  Eigen::Isometry3d base_pose = Eigen::Isometry3d::Identity();
+  base_pose.translation() = base_position;
+  base_pose.linear() =
+      Eigen::AngleAxisd(truth_yaw, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+  const Eigen::Vector3d lever_arm(-0.2, 0.0, 0.7);
+  const Eigen::Vector3d antenna_position = base_pose * lever_arm;
+
+  InitialAlignmentParameters parameters;
+  const InitialAlignmentResult result =
+      align_initial_yaw(map, scan, antenna_position, parameters, lever_arm);
+  ASSERT_TRUE(result.accepted) << result.error;
+  EXPECT_NEAR(result.yaw_rad, truth_yaw, 5.0 * M_PI / 180.0);
+  EXPECT_LT((result.map_to_base.translation() - base_position).norm(), 0.1);
+}
+
 TEST(InitialAlignment, RejectsWhenTheMapHasNoPointsNearby) {
   const PointList map;
   const PointList scan{Eigen::Vector3f(1.0F, 0.0F, 0.0F),

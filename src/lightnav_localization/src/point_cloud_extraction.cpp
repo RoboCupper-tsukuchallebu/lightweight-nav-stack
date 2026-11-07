@@ -62,7 +62,6 @@ std::vector<TimedPoint> extract_timed_points(const std::uint8_t* data, std::size
                                              const PointCloudFieldLayout& layout) {
   std::vector<TimedPoint> points;
   if (data == nullptr || layout.width == 0 || layout.height == 0 || layout.point_step == 0 ||
-      layout.row_step < layout.width * layout.point_step ||
       !is_supported_float_datatype(layout.x_datatype) ||
       !is_supported_float_datatype(layout.y_datatype) ||
       !is_supported_float_datatype(layout.z_datatype) ||
@@ -71,13 +70,23 @@ std::vector<TimedPoint> extract_timed_points(const std::uint8_t* data, std::size
       !has_room(layout.point_step, layout.z_offset, layout.z_datatype)) {
     return points;
   }
+  // 32-bit width * point_step can overflow (e.g. 65536 * 65536 = 0) and let the bound checks
+  // below pass, so compute the row and buffer sizes in 64 bits.
+  const std::uint64_t minimum_row_bytes =
+      static_cast<std::uint64_t>(layout.width) * static_cast<std::uint64_t>(layout.point_step);
+  const std::uint64_t required_bytes =
+      static_cast<std::uint64_t>(layout.height - 1U) *
+          static_cast<std::uint64_t>(layout.row_step) +
+      minimum_row_bytes;
+  if (static_cast<std::uint64_t>(layout.row_step) < minimum_row_bytes ||
+      required_bytes > static_cast<std::uint64_t>(data_size)) {
+    return points;
+  }
   const bool has_time = layout.time_offset >= 0 &&
                         is_supported_float_datatype(layout.time_datatype) &&
                         has_room(layout.point_step, layout.time_offset, layout.time_datatype);
-  const std::size_t usable_rows = std::min<std::size_t>(layout.height,
-                                                        data_size / std::max(1U, layout.row_step));
-  points.reserve(static_cast<std::size_t>(layout.width) * usable_rows);
-  for (std::size_t row = 0; row < usable_rows; ++row) {
+  points.reserve(static_cast<std::size_t>(layout.width) * layout.height);
+  for (std::size_t row = 0; row < layout.height; ++row) {
     const std::uint8_t* row_data = data + row * layout.row_step;
     for (std::size_t column = 0; column < layout.width; ++column) {
       const std::uint8_t* point = row_data + column * layout.point_step;

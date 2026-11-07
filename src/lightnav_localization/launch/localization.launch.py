@@ -4,7 +4,12 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, EmitEvent, RegisterEventHandler
+from launch.actions import (
+    DeclareLaunchArgument,
+    EmitEvent,
+    OpaqueFunction,
+    RegisterEventHandler,
+)
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import LifecycleNode
 from launch_ros.event_handlers import OnStateTransition
@@ -18,41 +23,47 @@ def generate_launch_description() -> LaunchDescription:
     map_file = LaunchConfiguration("map_file")
     map_yaml = LaunchConfiguration("map_yaml")
 
-    localization_node = LifecycleNode(
-        package="lightnav_localization",
-        executable="localization_node",
-        name="localization_node",
-        namespace="",
-        output="screen",
-        parameters=[
-            params_file,
-            {
-                "map_file": map_file,
-                "map_yaml": map_yaml,
-            },
-        ],
-    )
+    def launch_setup(context, *args, **kwargs):
+        parameters = [params_file.perform(context)]
+        overrides = {}
+        map_file_value = map_file.perform(context)
+        if map_file_value:
+            overrides["map_file"] = map_file_value
+        map_yaml_value = map_yaml.perform(context)
+        if map_yaml_value:
+            overrides["map_yaml"] = map_yaml_value
+        if overrides:
+            parameters.append(overrides)
 
-    configure = EmitEvent(
-        event=ChangeState(
-            lifecycle_node_matcher=localization_node,
-            transition_id=Transition.TRANSITION_CONFIGURE,
+        localization_node = LifecycleNode(
+            package="lightnav_localization",
+            executable="localization_node",
+            name="localization_node",
+            namespace="",
+            output="screen",
+            parameters=parameters,
         )
-    )
-    activate_after_configure = RegisterEventHandler(
-        OnStateTransition(
-            target_lifecycle_node=localization_node,
-            goal_state="inactive",
-            entities=[
-                EmitEvent(
-                    event=ChangeState(
-                        lifecycle_node_matcher=localization_node,
-                        transition_id=Transition.TRANSITION_ACTIVATE,
+        configure = EmitEvent(
+            event=ChangeState(
+                lifecycle_node_matcher=localization_node,
+                transition_id=Transition.TRANSITION_CONFIGURE,
+            )
+        )
+        activate_after_configure = RegisterEventHandler(
+            OnStateTransition(
+                target_lifecycle_node=localization_node,
+                goal_state="inactive",
+                entities=[
+                    EmitEvent(
+                        event=ChangeState(
+                            lifecycle_node_matcher=localization_node,
+                            transition_id=Transition.TRANSITION_ACTIVATE,
+                        )
                     )
-                )
-            ],
+                ],
+            )
         )
-    )
+        return [localization_node, activate_after_configure, configure]
 
     return LaunchDescription(
         [
@@ -71,8 +82,6 @@ def generate_launch_description() -> LaunchDescription:
                 default_value="",
                 description="Absolute path to map.yaml; without it GPS is disabled",
             ),
-            localization_node,
-            activate_after_configure,
-            configure,
+            OpaqueFunction(function=launch_setup),
         ]
     )

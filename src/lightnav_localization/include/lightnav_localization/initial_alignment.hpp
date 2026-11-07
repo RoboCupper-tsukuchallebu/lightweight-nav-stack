@@ -1,8 +1,10 @@
 #pragma once
 
 #include <Eigen/Geometry>
+#include <optional>
 #include <string>
 
+#include "lightnav_localization/matcher.hpp"
 #include "lightnav_localization/pcd_io.hpp"
 
 namespace lightnav_localization {
@@ -23,17 +25,33 @@ struct InitialAlignmentResult {
   bool accepted = false;
   double yaw_rad = 0.0;
   double inlier_ratio = 0.0;
-  // Pose of the accumulated scan in the map frame when accepted; translation is the prediction
-  // passed in (the initial position), only the yaw is searched here.
+  // Refined map->base pose from the fine match. Both the yaw and the translation are used by the
+  // node: the reference position may be a GPS antenna position (see `lever_arm_in_base`).
   Eigen::Isometry3d map_to_base = Eigen::Isometry3d::Identity();
   std::string error;
 };
 
-// Coarse yaw search at `yaw_step_deg` around `position`, then a fine match from the best coarse
-// candidate. `scan` is in the same frame as the map after deskewing (base frame), and `position`
-// is the initial base position in the map frame. Pure logic; no ROS types.
+// Crops the map around `reference_position` and builds the reusable GICP target for the initial
+// alignment. Returns nullopt when there are not enough map points or the target cannot be built.
+std::optional<PreparedTarget> build_initial_alignment_target(
+    const PointList& map_points, const Eigen::Vector3d& reference_position, double radius_m);
+
+// Coarse yaw search at `yaw_step_deg`, then a fine match from the best coarse candidate. `scan` is
+// in the same frame as the map after deskewing (base frame). `reference_position` is the initial
+// position in the map frame; when it is an antenna position, `lever_arm_in_base` is the antenna
+// position in the base frame and is removed for every yaw candidate before matching.
 InitialAlignmentResult align_initial_yaw(const PointList& map_points, const PointList& scan,
-                                         const Eigen::Vector3d& position,
-                                         const InitialAlignmentParameters& parameters);
+                                         const Eigen::Vector3d& reference_position,
+                                         const InitialAlignmentParameters& parameters,
+                                         const Eigen::Vector3d& lever_arm_in_base =
+                                             Eigen::Vector3d::Zero());
+
+// Same search against a prebuilt target (the node caches this while the initial position does not
+// change).
+InitialAlignmentResult align_initial_yaw(const PreparedTarget& target, const PointList& scan,
+                                         const Eigen::Vector3d& reference_position,
+                                         const InitialAlignmentParameters& parameters,
+                                         const Eigen::Vector3d& lever_arm_in_base =
+                                             Eigen::Vector3d::Zero());
 
 }  // namespace lightnav_localization

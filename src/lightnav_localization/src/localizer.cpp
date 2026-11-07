@@ -295,7 +295,6 @@ struct Localizer::Implementation {
       graph->optimize();
       if (const auto std_values = graph->position_and_yaw_std(0)) {
         latest_position_and_yaw_std = *std_values;
-        position_std_m = std::max((*std_values)[0], (*std_values)[1]);
       }
       pose_cache[0] = initial;
       nodes.push_back({0, pending.stamp, *odom_now});

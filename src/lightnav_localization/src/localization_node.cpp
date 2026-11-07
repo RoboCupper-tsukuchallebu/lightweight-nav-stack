@@ -20,6 +20,7 @@
 #include <tf2_eigen/tf2_eigen.hpp>
 
 #include "lightnav_localization/deskew.hpp"
+#include "lightnav_localization/downsample.hpp"
 #include "lightnav_localization/point_cloud_extraction.hpp"
 
 namespace lightnav_localization {
@@ -423,11 +424,7 @@ bool LocalizationNode::load_map_data(std::string& error) {
   map_metadata_ = loaded_metadata;
   gps_origin_ = loaded_origin;
   gps_converter_ = std::move(loaded_converter);
-  if (gps_origin_) {
-    node_error_.clear();
-  } else {
-    node_error_ = "map has no GPS origin: GPS disabled";
-  }
+  map_has_no_gps_origin_ = !gps_origin_.has_value();
   return true;
 }
 
@@ -440,12 +437,15 @@ void LocalizationNode::reset_runtime_state() {
   initial_yaw_.reset();
   initial_position_from_gps_ = false;
   alignment_scans_.clear();
+  alignment_target_.reset();
+  alignment_target_center_ = Eigen::Vector3d::Zero();
   pending_scans_.clear();
   last_alignment_attempt_sec_ = kNeverSec;
   has_lidar_to_base_ = false;
   lidar_to_base_ = Eigen::Isometry3d::Identity();
   has_gps_antenna_to_base_ = false;
   gps_antenna_in_base_ = Eigen::Vector3d::Zero();
+  map_has_no_gps_origin_ = false;
   has_wheel_odom_ = false;
   last_odom_to_base_ = Eigen::Isometry3d::Identity();
   alignment_odom_buffer_ = PoseBuffer();
@@ -617,6 +617,7 @@ bool LocalizationNode::resolve_lidar_extrinsic(const sensor_msgs::msg::PointClou
     }
     lidar_to_base_ = transform;
     has_lidar_to_base_ = true;
+    node_error_.clear();
     return true;
   } catch (const tf2::TransformException& exception) {
     error = std::string("waiting for TF ") + base_frame_ + " -> " + cloud.header.frame_id +
@@ -636,6 +637,7 @@ bool LocalizationNode::resolve_gps_extrinsic(std::string& error) {
     }
     gps_antenna_in_base_ = transform.translation();
     has_gps_antenna_to_base_ = true;
+    node_error_.clear();
     return true;
   } catch (const tf2::TransformException& exception) {
     error = std::string("waiting for TF ") + base_frame_ + " -> " + gps_frame_ + ": " +
@@ -736,16 +738,44 @@ void LocalizationNode::maybe_align_initial_yaw() {
     node_error_ = "initial yaw alignment has no scan points";
     return;
   }
+  const PointList downsampled =
+      downsample_voxel(accumulated, localizer_parameters_.voxel_size_m);
+  if (downsampled.size() < 10) {
+    node_error_ = "initial yaw alignment has too few downsampled scan points";
+    return;
+  }
 
+  // The map target only changes when the initial position moves; rebuilding it on every failed
+  // attempt would block the single-threaded executor for no reason.
+  if (!alignment_target_ ||
+      (alignment_target_center_.head<2>() - initial_position_->head<2>()).norm() > 1.0) {
+    const std::optional<PreparedTarget> target = build_initial_alignment_target(
+        map_points_, *initial_position_, alignment_parameters_.search_radius_m);
+    if (!target) {
+      node_error_ = "initial yaw alignment has no usable map target near the initial position";
+      return;
+    }
+    alignment_target_ = std::move(*target);
+    alignment_target_center_ = *initial_position_;
+  }
+
+  const Eigen::Vector3d lever_arm_in_base =
+      initial_position_from_gps_ ? gps_antenna_in_base_ : Eigen::Vector3d::Zero();
   const InitialAlignmentResult result =
-      align_initial_yaw(map_points_, accumulated, *initial_position_, alignment_parameters_);
+      align_initial_yaw(*alignment_target_, downsampled, *initial_position_,
+                        alignment_parameters_, lever_arm_in_base);
   if (!result.accepted) {
     node_error_ = "initial yaw alignment failed: " + result.error +
                   " (inlier ratio " + std::to_string(result.inlier_ratio) + ")";
     RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "%s", node_error_.c_str());
     return;
   }
+  // The fine match returns the base pose, so use its translation too (a GPS reference is the
+  // antenna position and its 3D error is larger than the map-match gate).
+  initial_position_ = result.map_to_base.translation();
+  initial_position_from_gps_ = false;
   initial_yaw_ = result.yaw_rad;
+  alignment_target_.reset();
   node_error_.clear();
   try_start_initialization();
 }
@@ -846,6 +876,7 @@ void LocalizationNode::handle_nav_sat_fix(
     if (!initial_position_ && is_usable_initial_fix(fix)) {
       initial_position_ = gps_converter_->to_enu(fix);
       initial_position_from_gps_ = true;
+      alignment_target_.reset();
       node_error_.clear();
       maybe_align_initial_yaw();
     }
@@ -899,6 +930,7 @@ bool LocalizationNode::try_start_initialization() {
   is_localizer_initialized_ = true;
   has_localizer_wheel_ = false;
   alignment_scans_.clear();
+  alignment_target_.reset();
   last_output_.reset();
   last_output_map_to_base_.reset();
   node_error_.clear();
@@ -931,6 +963,7 @@ void LocalizationNode::handle_set_initial_pose(
 
   initial_position_ = requested.translation();
   initial_position_from_gps_ = false;
+  alignment_target_.reset();
   if (has_yaw) {
     initial_yaw_ = yaw_of(requested);
   } else {
@@ -1012,6 +1045,18 @@ void LocalizationNode::update_accepted_gps_diagnostics() {
   }
 }
 
+std::string LocalizationNode::composed_last_error() const {
+  std::string error_message = node_error_;
+  const auto append = [&error_message](const std::string& part) {
+    if (part.empty()) return;
+    if (!error_message.empty()) error_message += "; ";
+    error_message += part;
+  };
+  if (map_has_no_gps_origin_) append("map has no GPS origin: GPS disabled");
+  if (localizer_) append(localizer_->last_error());
+  return error_message;
+}
+
 void LocalizationNode::publish_status() {
   using Status = lightnav_msgs::msg::LocalizationStatus;
   if (!status_publisher_ || !status_publisher_->is_activated()) return;
@@ -1065,11 +1110,10 @@ void LocalizationNode::publish_status() {
       status.pending_correction_m =
           static_cast<float>(last_output_->pending_correction_m);
     }
-    const std::string& localizer_error = localizer_->last_error();
-    status.last_error = node_error_.empty() ? localizer_error : node_error_;
+    status.last_error = composed_last_error();
   } else {
     last_status_state_ = LocalizationState::kInitializing;
-    status.last_error = node_error_;
+    status.last_error = composed_last_error();
   }
 
   status_publisher_->publish(status);
