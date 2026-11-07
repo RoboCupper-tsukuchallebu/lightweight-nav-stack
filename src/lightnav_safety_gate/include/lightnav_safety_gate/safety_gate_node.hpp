@@ -56,7 +56,7 @@ public:
     publish_period_s_ = 1.0 / publish_hz;
 
     const bool are_parameters_valid =
-      std::isfinite(publish_hz) && publish_hz > 0.0 &&
+      std::isfinite(publish_hz) && publish_hz > 0.0 && std::isfinite(publish_period_s_) &&
       std::isfinite(timeouts_.command_timeout_s) && timeouts_.command_timeout_s > 0.0 &&
       std::isfinite(timeouts_.obstacle_status_timeout_s) &&
       timeouts_.obstacle_status_timeout_s > 0.0 && areLimitsValid(limits_);
