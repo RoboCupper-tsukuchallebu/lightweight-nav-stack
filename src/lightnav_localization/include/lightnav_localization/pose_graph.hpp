@@ -5,6 +5,7 @@
 #include <memory>
 #include <string>
 #include <optional>
+#include <vector>
 
 namespace lightnav_localization {
 
@@ -25,6 +26,16 @@ struct PoseGraphParameters {
   double planar_sigma_tilt_rad = 0.05;
   double sigma_floor_m = 0.01;  // keeps a stationary wheel factor from becoming a hard constraint
   double sigma_floor_rad = 0.005;
+  // Keeps every factor and initial value so that mapping can batch-optimize the full graph.
+  // Off by default: localization keeps the fixed-lag window only.
+  bool record_history = false;
+};
+
+struct BatchPose {
+  int index = 0;
+  double stamp_sec = 0.0;
+  Eigen::Isometry3d map_to_base = Eigen::Isometry3d::Identity();
+  std::optional<Eigen::Vector3d> position_and_yaw_std;
 };
 
 // Pose3 node chain inside gtsam::IncrementalFixedLagSmoother. GTSAM types stay in the .cpp.
@@ -50,6 +61,9 @@ class PoseGraph {
   void add_gps_factor(int index, const Eigen::Vector3d& position, const Eigen::Vector3d& sigma_m);
   // Optimizes. Returns false if GTSAM threw; the caller then rebuilds from the current estimate.
   bool optimize();
+  // Batch re-optimization of every retained factor (record_history must be on). Fills batch_poses().
+  bool batch_optimize(int max_iterations);
+  const std::vector<BatchPose>& batch_poses() const;
 
   // Estimate of a node; nullopt after it left the window.
   std::optional<Eigen::Isometry3d> pose(int index) const;

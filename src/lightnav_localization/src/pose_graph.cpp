@@ -4,6 +4,8 @@
 #include <gtsam/inference/Symbol.h>
 #include <gtsam/nonlinear/ISAM2.h>
 #include <gtsam_unstable/nonlinear/IncrementalFixedLagSmoother.h>
+#include <gtsam/nonlinear/LevenbergMarquardtOptimizer.h>
+#include <gtsam/nonlinear/Marginals.h>
 #include <gtsam/nonlinear/NonlinearFactor.h>
 #include <gtsam/slam/BetweenFactor.h>
 #include <gtsam/slam/PriorFactor.h>
@@ -74,6 +76,10 @@ struct PoseGraph::Implementation {
   gtsam::FixedLagSmoother::KeyTimestampMap pending_stamps;
   gtsam::Values estimate;
   std::map<int, double> stamps;
+  gtsam::NonlinearFactorGraph history_factors;
+  gtsam::Values history_values;
+  std::map<int, double> history_stamps;
+  std::vector<BatchPose> batch_poses;
 };
 
 PoseGraph::PoseGraph(const PoseGraphParameters& parameters)
@@ -89,9 +95,16 @@ int PoseGraph::add_first_node(double stamp_sec, const Eigen::Isometry3d& pose, d
   graph.pending_values.insert(key_of(0), to_gtsam(pose));
   graph.pending_stamps[key_of(0)] = stamp_sec;
   graph.stamps[0] = stamp_sec;
-  graph.pending_factors.emplace_shared<gtsam::PriorFactor<gtsam::Pose3>>(
-      key_of(0), to_gtsam(pose),
-      pose_noise({0.1, 0.1, sigma_yaw_rad}, {sigma_xy_m, sigma_xy_m, 1.0}));
+  boost::shared_ptr<gtsam::PriorFactor<gtsam::Pose3>> factor(
+      new gtsam::PriorFactor<gtsam::Pose3>(
+          key_of(0), to_gtsam(pose),
+          pose_noise({0.1, 0.1, sigma_yaw_rad}, {sigma_xy_m, sigma_xy_m, 1.0})));
+  graph.pending_factors.push_back(factor);
+  if (graph.parameters.record_history) {
+    graph.history_factors.push_back(factor);
+    graph.history_values.insert(key_of(0), to_gtsam(pose));
+    graph.history_stamps[0] = stamp_sec;
+  }
   return 0;
 }
 
@@ -115,35 +128,57 @@ int PoseGraph::add_node_with_wheel_factor(double stamp_sec, const Eigen::Isometr
   const gtsam::Vector3 rotation_sigma(parameters.planar_sigma_tilt_rad,
                                       parameters.planar_sigma_tilt_rad, sigma_yaw);
   const gtsam::Vector3 translation_sigma(sigma_translation, sigma_translation, sigma_z);
-  graph.pending_factors.emplace_shared<gtsam::BetweenFactor<gtsam::Pose3>>(
-      key_of(previous), key_of(index), to_gtsam(planar), pose_noise(rotation_sigma, translation_sigma));
+  boost::shared_ptr<gtsam::BetweenFactor<gtsam::Pose3>> factor(
+      new gtsam::BetweenFactor<gtsam::Pose3>(
+          key_of(previous), key_of(index), to_gtsam(planar),
+          pose_noise(rotation_sigma, translation_sigma)));
+  graph.pending_factors.push_back(factor);
   graph.pending_values.insert(key_of(index), to_gtsam(guess));
   graph.pending_stamps[key_of(index)] = stamp_sec;
   graph.stamps[index] = stamp_sec;
+  if (graph.parameters.record_history) {
+    graph.history_factors.push_back(factor);
+    graph.history_values.insert(key_of(index), to_gtsam(guess));
+    graph.history_stamps[index] = stamp_sec;
+  }
   return index;
 }
 
 void PoseGraph::add_lidar_odometry_factor(int from_index, int to_index,
                                           const Eigen::Isometry3d& relative,
                                           const Eigen::Matrix<double, 6, 6>& information) {
-  implementation_->pending_factors.emplace_shared<gtsam::BetweenFactor<gtsam::Pose3>>(
-      key_of(from_index), key_of(to_index), to_gtsam(relative),
-      gtsam::noiseModel::Gaussian::Information(information));
+  boost::shared_ptr<gtsam::BetweenFactor<gtsam::Pose3>> factor(
+      new gtsam::BetweenFactor<gtsam::Pose3>(
+          key_of(from_index), key_of(to_index), to_gtsam(relative),
+          gtsam::noiseModel::Gaussian::Information(information)));
+  implementation_->pending_factors.push_back(factor);
+  if (implementation_->parameters.record_history) {
+    implementation_->history_factors.push_back(factor);
+  }
 }
 
 void PoseGraph::add_map_factor(int index, const Eigen::Isometry3d& pose,
                                const Eigen::Matrix<double, 6, 6>& information) {
-  implementation_->pending_factors.emplace_shared<gtsam::PriorFactor<gtsam::Pose3>>(
-      key_of(index), to_gtsam(pose),
-      robust(gtsam::noiseModel::Gaussian::Information(information),
-             implementation_->parameters.huber_k));
+  boost::shared_ptr<gtsam::PriorFactor<gtsam::Pose3>> factor(
+      new gtsam::PriorFactor<gtsam::Pose3>(
+          key_of(index), to_gtsam(pose),
+          robust(gtsam::noiseModel::Gaussian::Information(information),
+                 implementation_->parameters.huber_k)));
+  implementation_->pending_factors.push_back(factor);
+  if (implementation_->parameters.record_history) {
+    implementation_->history_factors.push_back(factor);
+  }
 }
 
 void PoseGraph::add_gps_factor(int index, const Eigen::Vector3d& position,
                                const Eigen::Vector3d& sigma_m) {
-  implementation_->pending_factors.emplace_shared<HorizontalGpsFactor>(
+  boost::shared_ptr<HorizontalGpsFactor> factor(new HorizontalGpsFactor(
       key_of(index), gtsam::Point2(position.head<2>()),
-      robust(Diagonal::Sigmas(sigma_m.head<2>()), implementation_->parameters.huber_k));
+      robust(Diagonal::Sigmas(sigma_m.head<2>()), implementation_->parameters.huber_k)));
+  implementation_->pending_factors.push_back(factor);
+  if (implementation_->parameters.record_history) {
+    implementation_->history_factors.push_back(factor);
+  }
 }
 
 bool PoseGraph::optimize() {
@@ -155,6 +190,17 @@ bool PoseGraph::optimize() {
     }
     graph.smoother.update(graph.pending_factors, graph.pending_values, graph.pending_stamps);
     graph.estimate = graph.smoother.calculateEstimate();
+    if (graph.parameters.record_history) {
+      // Keep the batch initial values close to the latest window estimate: nodes leave the
+      // fixed-lag window after window_s, and their creation guesses would otherwise keep the
+      // accumulated odometry drift forever.
+      for (const auto& entry : graph.history_stamps) {
+        const gtsam::Key key = key_of(entry.first);
+        if (graph.estimate.exists(key)) {
+          graph.history_values.update(key, graph.estimate.at(key));
+        }
+      }
+    }
   } catch (const std::exception& exception) {
     last_error_ = exception.what();
     return false;
@@ -163,6 +209,62 @@ bool PoseGraph::optimize() {
   graph.pending_values.clear();
   graph.pending_stamps.clear();
   return true;
+}
+
+bool PoseGraph::batch_optimize(int max_iterations) {
+  Implementation& graph = *implementation_;
+  if (!graph.parameters.record_history) {
+    last_error_ = "batch optimization requires record_history";
+    return false;
+  }
+  if (max_iterations < 1) {
+    last_error_ = "batch optimization requires max_iterations >= 1";
+    return false;
+  }
+  if (graph.history_factors.empty() || graph.history_values.empty()) {
+    last_error_ = "batch optimization has no graph";
+    return false;
+  }
+  try {
+    gtsam::LevenbergMarquardtParams optimizer_parameters;
+    optimizer_parameters.maxIterations = max_iterations;
+    gtsam::LevenbergMarquardtOptimizer optimizer(graph.history_factors, graph.history_values,
+                                                 optimizer_parameters);
+    const gtsam::Values result = optimizer.optimize();
+    graph.batch_poses.clear();
+    graph.batch_poses.reserve(graph.history_stamps.size());
+    std::unique_ptr<gtsam::Marginals> marginals;
+    for (const auto& entry : graph.history_stamps) {
+      BatchPose batch_pose;
+      batch_pose.index = entry.first;
+      batch_pose.stamp_sec = entry.second;
+      batch_pose.map_to_base = from_gtsam(result.at<gtsam::Pose3>(key_of(entry.first)));
+      try {
+        if (!marginals) {
+          marginals = std::make_unique<gtsam::Marginals>(graph.history_factors, result);
+        }
+        const gtsam::Matrix covariance = marginals->marginalCovariance(key_of(entry.first));
+        const Eigen::Matrix3d map_rotation = batch_pose.map_to_base.rotation();
+        const Eigen::Matrix3d map_translation_covariance =
+            map_rotation * covariance.bottomRightCorner<3, 3>() * map_rotation.transpose();
+        batch_pose.position_and_yaw_std = Eigen::Vector3d(
+            std::sqrt(std::max(0.0, map_translation_covariance(0, 0))),
+            std::sqrt(std::max(0.0, map_translation_covariance(1, 1))),
+            std::sqrt(std::max(0.0, covariance(2, 2))));
+      } catch (const std::exception&) {
+        // A rank-deficient graph can still yield usable poses; the std is left absent.
+      }
+      graph.batch_poses.push_back(std::move(batch_pose));
+    }
+  } catch (const std::exception& exception) {
+    last_error_ = exception.what();
+    return false;
+  }
+  return true;
+}
+
+const std::vector<BatchPose>& PoseGraph::batch_poses() const {
+  return implementation_->batch_poses;
 }
 
 std::optional<Eigen::Isometry3d> PoseGraph::pose(int index) const {
