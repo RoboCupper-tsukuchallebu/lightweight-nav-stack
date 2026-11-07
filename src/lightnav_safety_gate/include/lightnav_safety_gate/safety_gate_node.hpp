@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <memory>
+#include <string>
 
 #include "geometry_msgs/msg/twist.hpp"
 #include "lightnav_msgs/msg/obstacle_status.hpp"
@@ -20,36 +21,42 @@ using CallbackReturn = rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface
 class SafetyGateNode : public rclcpp_lifecycle::LifecycleNode
 {
 public:
-  SafetyGateNode()
-  : rclcpp_lifecycle::LifecycleNode("safety_gate_node")
+  explicit SafetyGateNode(const rclcpp::NodeOptions & options = rclcpp::NodeOptions())
+  : rclcpp_lifecycle::LifecycleNode("safety_gate_node", options)
   {
-    declare_parameter("publish_hz", 20.0);
-    declare_parameter("command_timeout_s", 0.3);
-    declare_parameter("obstacle_status_timeout_s", 0.5);
-    declare_parameter("v_max", 0.8);
-    declare_parameter("w_max", 0.6);
-    declare_parameter("acceleration_max_mps2", 0.5);
-    declare_parameter("deceleration_max_mps2", 1.0);
-    declare_parameter("angular_acceleration_max_rps2", 1.0);
-    declare_parameter("angular_deceleration_max_rps2", 2.0);
+    declareNumericParameter("publish_hz", 20.0);
+    declareNumericParameter("command_timeout_s", 0.3);
+    declareNumericParameter("obstacle_status_timeout_s", 0.5);
+    declareNumericParameter("v_max", 0.8);
+    declareNumericParameter("w_max", 0.6);
+    declareNumericParameter("acceleration_max_mps2", 0.5);
+    declareNumericParameter("deceleration_max_mps2", 1.0);
+    declareNumericParameter("angular_acceleration_max_rps2", 1.0);
+    declareNumericParameter("angular_deceleration_max_rps2", 2.0);
   }
 
   CallbackReturn on_configure(const rclcpp_lifecycle::State &) override
   {
-    publish_period_s_ = 1.0 / get_parameter("publish_hz").as_double();
-    timeouts_.command_timeout_s = get_parameter("command_timeout_s").as_double();
-    timeouts_.obstacle_status_timeout_s = get_parameter("obstacle_status_timeout_s").as_double();
-    limits_.linear_max_mps = get_parameter("v_max").as_double();
-    limits_.angular_max_rps = get_parameter("w_max").as_double();
-    limits_.acceleration_max_mps2 = get_parameter("acceleration_max_mps2").as_double();
-    limits_.deceleration_max_mps2 = get_parameter("deceleration_max_mps2").as_double();
-    limits_.angular_acceleration_max_rps2 =
-      get_parameter("angular_acceleration_max_rps2").as_double();
-    limits_.angular_deceleration_max_rps2 =
-      get_parameter("angular_deceleration_max_rps2").as_double();
+    double publish_hz = 0.0;
+    if (!readNumericParameter("publish_hz", publish_hz) ||
+      !readNumericParameter("command_timeout_s", timeouts_.command_timeout_s) ||
+      !readNumericParameter("obstacle_status_timeout_s", timeouts_.obstacle_status_timeout_s) ||
+      !readNumericParameter("v_max", limits_.linear_max_mps) ||
+      !readNumericParameter("w_max", limits_.angular_max_rps) ||
+      !readNumericParameter("acceleration_max_mps2", limits_.acceleration_max_mps2) ||
+      !readNumericParameter("deceleration_max_mps2", limits_.deceleration_max_mps2) ||
+      !readNumericParameter(
+        "angular_acceleration_max_rps2", limits_.angular_acceleration_max_rps2) ||
+      !readNumericParameter(
+        "angular_deceleration_max_rps2", limits_.angular_deceleration_max_rps2))
+    {
+      RCLCPP_ERROR(get_logger(), "parameter types must be integer or double; configure rejected");
+      return CallbackReturn::FAILURE;
+    }
+    publish_period_s_ = 1.0 / publish_hz;
 
     const bool are_parameters_valid =
-      std::isfinite(publish_period_s_) && publish_period_s_ > 0.0 &&
+      std::isfinite(publish_hz) && publish_hz > 0.0 &&
       std::isfinite(timeouts_.command_timeout_s) && timeouts_.command_timeout_s > 0.0 &&
       std::isfinite(timeouts_.obstacle_status_timeout_s) &&
       timeouts_.obstacle_status_timeout_s > 0.0 && areLimitsValid(limits_);
@@ -113,6 +120,29 @@ public:
   }
 
 private:
+  void declareNumericParameter(const std::string & name, double default_value)
+  {
+    rcl_interfaces::msg::ParameterDescriptor descriptor;
+    descriptor.dynamic_typing = true;
+    descriptor.description = "A number; an integer is accepted as well as a double.";
+    declare_parameter(name, rclcpp::ParameterValue(default_value), descriptor);
+  }
+
+  bool readNumericParameter(const std::string & name, double & value)
+  {
+    const rclcpp::Parameter parameter = get_parameter(name);
+    if (parameter.get_type() == rclcpp::ParameterType::PARAMETER_INTEGER) {
+      value = static_cast<double>(parameter.as_int());
+      return true;
+    }
+    if (parameter.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE) {
+      value = parameter.as_double();
+      return true;
+    }
+    RCLCPP_ERROR(get_logger(), "parameter '%s' must be an integer or a double", name.c_str());
+    return false;
+  }
+
   void resetInterfaces()
   {
     command_publisher_.reset();
@@ -124,16 +154,15 @@ private:
   {
     const PlanarVelocity requested{message.twist.linear.x, message.twist.angular.z};
     if (!isFinite(requested)) {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), steady_clock_, 1000, "dropping non-finite velocity command");
       if (message.is_hard_stop) {
         // A hard stop must not be lost just because the twist is garbage.
         latest_is_hard_stop_ = true;
         command_received_at_ = steady_clock_.now();
         has_command_ = true;
-      } else {
-        // Not recorded as received, so the command timeout takes the output to zero.
-        RCLCPP_WARN_THROTTLE(
-          get_logger(), *get_clock(), 1000, "dropping non-finite velocity command");
       }
+      // Otherwise the command is not recorded as received, so it times out to zero.
       return;
     }
     latest_requested_ = requested;

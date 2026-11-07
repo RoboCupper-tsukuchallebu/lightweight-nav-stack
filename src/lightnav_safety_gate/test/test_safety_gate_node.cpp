@@ -22,7 +22,7 @@ using VelocityCommand = lightnav_msgs::msg::VelocityCommand;
 using Twist = geometry_msgs::msg::Twist;
 using std::chrono::milliseconds;
 
-// Kept away from the default domain 42 so a running stack is never touched.
+// 42 is the real robot domain and 43 is the default; tests use a separate domain 47.
 constexpr size_t kTestDomainId = 47;
 constexpr double kLoopPeriodSeconds = 0.02;
 constexpr double kCruiseSpeedMps = 0.3;  // forwardCommand() default
@@ -111,11 +111,6 @@ protected:
     return false;
   }
 
-  bool hasNonZeroOutput() const
-  {
-    return !received_.empty() && received_.back().linear.x > 0.0;
-  }
-
   // Drives the gate until it outputs a non-zero velocity (positive control).
   void reachMotion()
   {
@@ -170,6 +165,18 @@ protected:
 TEST_F(SafetyGateNodeTest, healthyInputsProduceNonZeroOutput)
 {
   reachMotion();
+}
+
+TEST_F(SafetyGateNodeTest, publishesAtTwentyHertz)
+{
+  reachMotion();
+  received_.clear();
+  const ObstacleStatus status = healthyStatus();
+  const VelocityCommand command = forwardCommand();
+  run(1.0, &status, &command);
+  // publish_hz 20 means about 20 samples per second; 40 Hz would be about 40.
+  EXPECT_GE(received_.size(), 16U);
+  EXPECT_LE(received_.size(), 24U);
 }
 
 TEST_F(SafetyGateNodeTest, stopsWhenStopZoneOccupied)
@@ -263,6 +270,58 @@ TEST_F(SafetyGateNodeTest, outputsZeroWithCommandButNoObstacleStatus)
   const VelocityCommand command = forwardCommand();
   run(0.3, nullptr, &command);
   expectAllZero();
+}
+
+TEST_F(SafetyGateNodeTest, acceptsIntegerParametersAndUsesThem)
+{
+  // YAML may write whole numbers without a decimal point, e.g. publish_hz: 20 or v_max: 1.
+  executor_.remove_node(gate_->get_node_base_interface());
+  gate_->shutdown();
+  rclcpp::NodeOptions node_options;
+  node_options.parameter_overrides(
+    {
+      rclcpp::Parameter("publish_hz", 20),
+      rclcpp::Parameter("command_timeout_s", 1),
+      rclcpp::Parameter("obstacle_status_timeout_s", 1),
+      rclcpp::Parameter("v_max", 1),
+      rclcpp::Parameter("w_max", 1),
+      rclcpp::Parameter("acceleration_max_mps2", 1),
+      rclcpp::Parameter("deceleration_max_mps2", 1),
+      rclcpp::Parameter("angular_acceleration_max_rps2", 1),
+      rclcpp::Parameter("angular_deceleration_max_rps2", 1),
+    });
+  gate_ = std::make_shared<lightnav_safety_gate::SafetyGateNode>(node_options);
+  executor_.add_node(gate_->get_node_base_interface());
+  ASSERT_EQ(gate_->configure().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE);
+  activate();
+
+  const ObstacleStatus status = healthyStatus();
+  VelocityCommand command;
+  command.twist.linear.x = 5.0;    // v_max is the integer 1
+  command.twist.angular.z = -5.0;  // w_max is the integer 1
+  ASSERT_TRUE(runUntil(
+      [this] {
+        return !received_.empty() && received_.back().linear.x == 1.0 &&
+               received_.back().angular.z == -1.0;
+      },
+      &status, &command));
+
+  received_.clear();
+  run(1.0, &status, &command);
+  EXPECT_GE(received_.size(), 16U) << "publish_hz: 20 was not used";
+  EXPECT_LE(received_.size(), 24U) << "publish_hz: 20 was not used";
+}
+
+TEST_F(SafetyGateNodeTest, rejectsNonNumericParameterOnConfigure)
+{
+  executor_.remove_node(gate_->get_node_base_interface());
+  gate_->shutdown();
+  rclcpp::NodeOptions node_options;
+  node_options.parameter_overrides({rclcpp::Parameter("publish_hz", "20")});
+  gate_ = std::make_shared<lightnav_safety_gate::SafetyGateNode>(node_options);
+  executor_.add_node(gate_->get_node_base_interface());
+  EXPECT_EQ(
+    gate_->configure().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED);
 }
 
 TEST_F(SafetyGateNodeTest, deactivateSendsOneZeroThenStaysSilent)

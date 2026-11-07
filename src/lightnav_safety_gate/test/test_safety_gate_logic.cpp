@@ -71,21 +71,48 @@ TEST(EmergencyStop, everySingleFaultStops)
   }
 }
 
-// All 2^6 combinations of boolean conditions: stop unless every one is benign.
-TEST(EmergencyStop, allBooleanCombinationsStopUnlessAllBenign)
+// All 2^8 combinations of stop conditions: stop unless every one is benign.
+// The age bits exceed the default timeouts (obstacle 0.5 s, command 0.3 s).
+TEST(EmergencyStop, allConditionCombinationsStopUnlessAllBenign)
 {
-  for (int bits = 0; bits < 64; ++bits) {
-    EmergencyStopInputs inputs;
-    inputs.is_active = bits & 1;
-    inputs.has_obstacle_status = bits & 2;
-    inputs.has_command = bits & 4;
-    inputs.is_stop_zone_occupied = bits & 8;
-    inputs.is_input_stale = bits & 16;
-    inputs.is_hard_stop = bits & 32;
-    const bool is_all_benign = inputs.is_active && inputs.has_obstacle_status &&
-      inputs.has_command && !inputs.is_stop_zone_occupied && !inputs.is_input_stale &&
-      !inputs.is_hard_stop;
-    EXPECT_EQ(shouldEmergencyStop(inputs, defaultTimeouts()), !is_all_benign) << bits;
+  constexpr int kNotActiveBit = 1 << 0;
+  constexpr int kNoObstacleStatusBit = 1 << 1;
+  constexpr int kObstacleStatusTimedOutBit = 1 << 2;
+  constexpr int kStopZoneOccupiedBit = 1 << 3;
+  constexpr int kInputStaleBit = 1 << 4;
+  constexpr int kNoCommandBit = 1 << 5;
+  constexpr int kCommandTimedOutBit = 1 << 6;
+  constexpr int kHardStopBit = 1 << 7;
+  constexpr int kCombinationCount = 1 << 8;
+  constexpr double kFreshAgeSeconds = 0.1;
+  constexpr double kStaleObstacleAgeSeconds = 0.6;
+  constexpr double kStaleCommandAgeSeconds = 0.4;
+
+  for (int bits = 0; bits < kCombinationCount; ++bits) {
+    EmergencyStopInputs inputs = healthyInputs();
+    if ((bits & kNotActiveBit) != 0) {
+      inputs.is_active = false;
+    }
+    if ((bits & kNoObstacleStatusBit) != 0) {
+      inputs.has_obstacle_status = false;
+    }
+    inputs.obstacle_status_age_s =
+      ((bits & kObstacleStatusTimedOutBit) != 0) ? kStaleObstacleAgeSeconds : kFreshAgeSeconds;
+    if ((bits & kStopZoneOccupiedBit) != 0) {
+      inputs.is_stop_zone_occupied = true;
+    }
+    if ((bits & kInputStaleBit) != 0) {
+      inputs.is_input_stale = true;
+    }
+    if ((bits & kNoCommandBit) != 0) {
+      inputs.has_command = false;
+    }
+    inputs.command_age_s =
+      ((bits & kCommandTimedOutBit) != 0) ? kStaleCommandAgeSeconds : kFreshAgeSeconds;
+    if ((bits & kHardStopBit) != 0) {
+      inputs.is_hard_stop = true;
+    }
+    EXPECT_EQ(shouldEmergencyStop(inputs, defaultTimeouts()), bits != 0) << "bits=" << bits;
   }
 }
 
