@@ -9,6 +9,16 @@
 - stop / slow zone は膨張前のセル数で判定し、`occupied_min_frames` 連続・`clear_hold_s` 保持でヒステリシスをかける。
 - 入力途絶・TF 不在は `stale_sources` と `is_input_stale` に出し、10 Hz のウォッチドッグで status を出し続ける。
 
+## 点群の QoS
+
+`points_topic` の購読は `points_qos_reliability` で選ぶ。深さ 5、volatile。`scan_topic`（`LaserScan`）は SensorDataQoS（best-effort）のまま。
+
+| パラメータ | 既定値 | 意味 |
+|---|---|---|
+| `points_qos_reliability` | `reliable` | 点群購読の信頼性（`reliable` / `best_effort`）。それ以外の値は configure で拒否 |
+
+1.5 MB の `/velodyne_points` を best-effort で受けると rmw_fastrtps の共有メモリ 512 KiB があふれてフレームが欠けるため、既定は reliable（tsukuchalle_drivers #19 が直れば best_effort に戻せる）。
+
 ## 3D 占有判定のパラメータ
 
 | パラメータ | 既定値 | 意味 |
