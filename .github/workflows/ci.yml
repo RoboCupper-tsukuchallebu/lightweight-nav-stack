@@ -5,8 +5,10 @@ on:
     branches: [develop, main]
 
 # build-test (ubuntu-latest) and docker run on the self-hosted runners (one ThinkCentre, label tsukuchalle-pixi /
-# tsukuchalle-docker) for pushes and for pull requests from branches of this repository. Pull requests from forks
-# never run there: they stay on GitHub-hosted runners, so code from outside does not run on that machine.
+# tsukuchalle-docker) for pushes and for pull requests from branches of this repository; with this file, pull requests
+# from forks stay on GitHub-hosted runners. This condition is not the protection: a fork runs its own copy of this file
+# and can point runs-on at the self-hosted labels. What protects the machine is the repository setting that a person
+# approves every workflow run of an outside contributor (AGENTS.md: read the .github/ diff before approving).
 # One runner per label keeps those jobs serial: the pixi tests use the fixed ROS_DOMAIN_ID 44 on the host network.
 env:
   SELF_HOSTED: ${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository }}
