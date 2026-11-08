@@ -11,6 +11,7 @@
 # Start (mode: localization, the default; mapping to build a map):
 #       docker compose up -d localization
 #       LIGHTNAV_LOCALIZATION_MODE=mapping docker compose up -d localization
+# Indoors without GNSS: set LIGHTNAV_LOCALIZATION_PARAMS=/config/localization_indoor.yaml in .env (default /config/robot.yaml, see docker/README.md).
 # Change mode: `docker compose stop localization`, then start it again with the new mode (the mode is read at `up`).
 # Stop: `docker compose stop localization`. `stop_signal: SIGINT` makes `ros2 launch` shut the node down, which saves a map still being
 #       recorded (without SIGINT, SIGTERM kills the node without saving). Do NOT add `tty` or `stdin_open`: launch then sends no SIGINT to the node.
@@ -49,11 +50,12 @@ services:
       - lightnav_localization
       - localization.launch.py
       - mode:=${LIGHTNAV_LOCALIZATION_MODE:-localization}
-      - params_file:=/config/robot.yaml
+      - params_file:=${LIGHTNAV_LOCALIZATION_PARAMS:-/config/robot.yaml}
       - map_file:=/data/map/map.pcd
       - map_yaml:=/data/map/map.yaml
       - sigterm_timeout:=45
       - sigkill_timeout:=10
     volumes:
       - ./config/robot.yaml:/config/robot.yaml:ro
+      - ./config/localization_indoor.yaml:/config/localization_indoor.yaml:ro
       - ./data:/data
