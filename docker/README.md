@@ -10,7 +10,7 @@ is selected with an environment variable of compose.
 
 1. Put `LIGHTNAV_LOCALIZATION_PARAMS=/config/localization_indoor.yaml` in `.env` next to `compose.yaml`. The `localization`
    service of compose reads it as `params_file:=${LIGHTNAV_LOCALIZATION_PARAMS:-/config/robot.yaml}`; without the variable it
-   uses `robot.yaml` (outdoors). The service must mount `./config/localization_indoor.yaml` at `/config/localization_indoor.yaml`.
+   uses `robot.yaml` (outdoors). `compose.yaml` mounts `./config/localization_indoor.yaml` at `/config/localization_indoor.yaml`; `scripts/deploy.sh` puts `config/` on the robot PC.
 2. Put the vehicle on the floor mark (a taped cross, the front of the vehicle marked) and start mapping. **Stay still until
    `state` leaves `INITIALIZING`** (3 s after activation). The mark is the origin of the map and the front of the vehicle at
    that moment is +x. Then **drive straight ahead** and drive the course with the pad. Call `save_map` before stopping.
