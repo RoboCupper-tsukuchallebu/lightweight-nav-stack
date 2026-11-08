@@ -30,6 +30,30 @@ std::string join_path(const std::string& directory, const std::string& name) {
   return (std::filesystem::path(directory) / name).string();
 }
 
+// The three outputs in the order they are renamed into place: map.yaml (the origin that makes the
+// map usable) comes last, so a new map.pcd is never paired with an old map.yaml by a half-done save.
+constexpr const char* kOutputNames[] = {"map.pcd", "trajectory.csv", "map.yaml"};
+
+std::string temporary_name(const std::string& name) { return name + kTemporarySuffix; }
+
+void remove_temporary_outputs(const std::string& directory) {
+  for (const char* name : kOutputNames) {
+    std::error_code ignored;
+    std::filesystem::remove_all(join_path(directory, temporary_name(name)), ignored);
+  }
+}
+
+void rename_outputs_into_place(const std::string& directory) {
+  for (const char* name : kOutputNames) {
+    std::error_code rename_error;
+    std::filesystem::rename(join_path(directory, temporary_name(name)),
+                            join_path(directory, name), rename_error);
+    if (rename_error) {
+      throw std::runtime_error(std::string("cannot rename ") + name + ": " + rename_error.message());
+    }
+  }
+}
+
 }  // namespace
 
 PointList build_map_points(const std::vector<KeyframeCloud>& keyframes,
@@ -95,9 +119,6 @@ MapOutputResult write_map_outputs(const MapOutputParameters& parameters,
       build_map_points(keyframes, trajectory, parameters.map_voxel_size_m);
   result.map_point_count = map_points.size();
 
-  write_pcd(join_path(parameters.map_output_dir, "map.pcd"), map_points, PcdEncoding::kBinary);
-  write_trajectory_csv(join_path(parameters.map_output_dir, "trajectory.csv"), trajectory);
-
   MapMetadata metadata;
   metadata.has_gps_origin = parameters.has_gps_origin;
   if (parameters.has_gps_origin) {
@@ -109,7 +130,19 @@ MapOutputResult write_map_outputs(const MapOutputParameters& parameters,
   metadata.created = parameters.created;
   metadata.keyframe_count = static_cast<int>(keyframes.size());
   metadata.batch_optimized = parameters.batch_optimized;
-  write_map_metadata(join_path(parameters.map_output_dir, "map.yaml"), metadata);
+
+  // Write every file under a temporary name first; any failure leaves the previous three files as
+  // they were. Directory-level rename is not used (it fails with ENOTEMPTY on a non-empty directory).
+  const std::string& directory = parameters.map_output_dir;
+  try {
+    write_pcd(join_path(directory, temporary_name("map.pcd")), map_points, PcdEncoding::kBinary);
+    write_trajectory_csv(join_path(directory, temporary_name("trajectory.csv")), trajectory);
+    write_map_metadata(join_path(directory, temporary_name("map.yaml")), metadata);
+    rename_outputs_into_place(directory);
+  } catch (...) {
+    remove_temporary_outputs(directory);
+    throw;
+  }
   return result;
 }
 

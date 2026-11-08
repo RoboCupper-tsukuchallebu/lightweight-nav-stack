@@ -1,4 +1,11 @@
-"""Start localization_node and drive it through configure -> activate."""
+"""Start localization_node and drive it through configure -> activate.
+
+Launch arguments:
+  mode        "localization" (default) or "mapping". Passed to the node's `mode` parameter.
+  map_file    Prior map PCD. The node needs it in localization mode (here or in params_file); mapping ignores it.
+  map_yaml    map.yaml of the prior map; without it GPS is disabled (localization mode).
+  params_file Parameter file for localization_node (everything else is set there).
+"""
 
 import os
 
@@ -10,6 +17,7 @@ from launch.actions import (
     OpaqueFunction,
     RegisterEventHandler,
 )
+from launch.events import matches_action
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import LifecycleNode
 from launch_ros.event_handlers import OnStateTransition
@@ -17,23 +25,29 @@ from launch_ros.events.lifecycle import ChangeState
 from lifecycle_msgs.msg import Transition
 
 
+SUPPORTED_MODES = ("localization", "mapping")
+
+
 def generate_launch_description() -> LaunchDescription:
     package_share = get_package_share_directory("lightnav_localization")
+    mode = LaunchConfiguration("mode")
     params_file = LaunchConfiguration("params_file")
     map_file = LaunchConfiguration("map_file")
     map_yaml = LaunchConfiguration("map_yaml")
 
     def launch_setup(context, *args, **kwargs):
         parameters = [params_file.perform(context)]
-        overrides = {}
+        mode_value = mode.perform(context).strip()
+        if mode_value not in SUPPORTED_MODES:
+            raise RuntimeError(f"mode must be one of {SUPPORTED_MODES}, got '{mode_value}'")
+        overrides = {"mode": mode_value}
         map_file_value = map_file.perform(context)
         if map_file_value:
             overrides["map_file"] = map_file_value
         map_yaml_value = map_yaml.perform(context)
         if map_yaml_value:
             overrides["map_yaml"] = map_yaml_value
-        if overrides:
-            parameters.append(overrides)
+        parameters.append(overrides)
 
         localization_node = LifecycleNode(
             package="lightnav_localization",
@@ -45,7 +59,7 @@ def generate_launch_description() -> LaunchDescription:
         )
         configure = EmitEvent(
             event=ChangeState(
-                lifecycle_node_matcher=localization_node,
+                lifecycle_node_matcher=matches_action(localization_node),
                 transition_id=Transition.TRANSITION_CONFIGURE,
             )
         )
@@ -56,7 +70,7 @@ def generate_launch_description() -> LaunchDescription:
                 entities=[
                     EmitEvent(
                         event=ChangeState(
-                            lifecycle_node_matcher=localization_node,
+                            lifecycle_node_matcher=matches_action(localization_node),
                             transition_id=Transition.TRANSITION_ACTIVATE,
                         )
                     )
@@ -68,6 +82,11 @@ def generate_launch_description() -> LaunchDescription:
     return LaunchDescription(
         [
             DeclareLaunchArgument(
+                "mode",
+                default_value="localization",
+                description="localization | mapping (mapping does not need map_file)",
+            ),
+            DeclareLaunchArgument(
                 "params_file",
                 default_value=os.path.join(package_share, "config", "localization.yaml"),
                 description="Parameter file for localization_node",
@@ -75,7 +94,7 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument(
                 "map_file",
                 default_value="",
-                description="Absolute path to the prior map PCD (required)",
+                description="Absolute path to the prior map PCD (required in localization mode)",
             ),
             DeclareLaunchArgument(
                 "map_yaml",

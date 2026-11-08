@@ -485,6 +485,8 @@ void LocalizationNode::reset_runtime_state() {
   map_has_no_gps_origin_ = false;
   mapping_has_gps_origin_ = false;
   mapping_interrupted_ = false;
+  keyframe_count_at_save_map_.reset();
+  mapping_recording_stopped_note_.clear();
   has_mapping_activation_time_ = false;
   mapping_activation_sec_ = 0.0;
   mapping_reference_odom_.reset();
@@ -612,15 +614,7 @@ LocalizationNode::CallbackReturn LocalizationNode::on_deactivate(
   if (odom_publisher_) odom_publisher_->on_deactivate();
   if (status_publisher_) status_publisher_->on_deactivate();
   if (aligned_scan_publisher_) aligned_scan_publisher_->on_deactivate();
-  if (is_mapping() && localizer_) {
-    std::string message;
-    if (save_mapping_outputs(message)) {
-      RCLCPP_INFO(get_logger(), "mapping map saved on deactivate: %s", message.c_str());
-    } else {
-      RCLCPP_WARN(get_logger(), "mapping map could not be saved on deactivate: %s",
-                  message.c_str());
-    }
-  }
+  save_mapping_outputs_on_stop("deactivate");
   has_status_publish_time_ = false;
   return CallbackReturn::SUCCESS;
 }
@@ -660,13 +654,7 @@ LocalizationNode::CallbackReturn LocalizationNode::on_shutdown(
   }
   const bool was_active =
       state.id() == lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE;
-  if (is_mapping() && was_active && localizer_) {
-    std::string message;
-    if (!save_mapping_outputs(message)) {
-      RCLCPP_WARN(get_logger(), "mapping map could not be saved on shutdown: %s",
-                  message.c_str());
-    }
-  }
+  if (was_active) save_mapping_outputs_on_stop("shutdown");
   odom_publisher_.reset();
   status_publisher_.reset();
   aligned_scan_publisher_.reset();
@@ -1258,6 +1246,35 @@ void LocalizationNode::handle_save_map(
   std::string message;
   response->success = save_mapping_outputs(message);
   response->message = message;
+  if (response->success) stop_mapping_recording_after_save_map();
+}
+
+void LocalizationNode::stop_mapping_recording_after_save_map() {
+  // The saved map is final: later keyframes would not be in it, and the stop-time save is skipped
+  // as long as the keyframe count stays at this value.
+  localizer_->interrupt_mapping();
+  mapping_interrupted_ = true;
+  keyframe_count_at_save_map_ = localizer_->mapping_keyframe_count();
+  mapping_recording_stopped_note_ = "mapping recording stopped after save_map";
+  RCLCPP_INFO(get_logger(), "%s; restart mapping to record more (the saved map is overwritten then)",
+              mapping_recording_stopped_note_.c_str());
+}
+
+void LocalizationNode::save_mapping_outputs_on_stop(const char* phase) {
+  if (!is_mapping() || !localizer_) return;
+  if (keyframe_count_at_save_map_ &&
+      localizer_->mapping_keyframe_count() == *keyframe_count_at_save_map_) {
+    RCLCPP_INFO(get_logger(),
+                "mapping map not saved on %s: save_map already saved it and no keyframe was added since",
+                phase);
+    return;
+  }
+  std::string message;
+  if (save_mapping_outputs(message)) {
+    RCLCPP_INFO(get_logger(), "mapping map saved on %s: %s", phase, message.c_str());
+  } else {
+    RCLCPP_WARN(get_logger(), "mapping map could not be saved on %s: %s", phase, message.c_str());
+  }
 }
 
 bool LocalizationNode::save_mapping_outputs(std::string& message) {
@@ -1325,6 +1342,7 @@ std::string LocalizationNode::composed_last_error() const {
     error_message += part;
   };
   if (map_has_no_gps_origin_) append("map has no GPS origin: GPS disabled");
+  append(mapping_recording_stopped_note_);
   if (localizer_) append(localizer_->last_error());
   return error_message;
 }

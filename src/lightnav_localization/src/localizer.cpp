@@ -65,6 +65,17 @@ PoseGraphParameters history_parameters_for(const LocalizerParameters& parameters
   return graph_parameters;
 }
 
+// Mapping has no prior map and often loses GNSS for long stretches, so the ODOM_ONLY distance/time
+// limits must not turn a long drive into LOST (Issue #43 D5). The localization mode keeps them.
+StateMachineParameters state_parameters_for(const LocalizerParameters& parameters) {
+  StateMachineParameters state_parameters = parameters.state;
+  if (parameters.mapping) {
+    state_parameters.odom_only_max_distance_m = std::numeric_limits<double>::infinity();
+    state_parameters.odom_only_max_s = std::numeric_limits<double>::infinity();
+  }
+  return state_parameters;
+}
+
 }  // namespace
 
 struct Localizer::Implementation {
@@ -75,7 +86,7 @@ struct Localizer::Implementation {
         graph(std::make_unique<PoseGraph>(history_parameters_for(parameters_in))),
         lidar(parameters_in.lidar_odometry),
         corrector(parameters_in.corrector),
-        machine(parameters_in.state),
+        machine(state_parameters_for(parameters_in)),
         conflict(parameters_in.gps_conflict_window, parameters_in.gps_conflict_ratio),
         gps_origin(gps_origin_in) {
     if (gps_origin) gps.emplace(*gps_origin, parameters_in.gps);

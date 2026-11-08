@@ -53,8 +53,13 @@ PointList build_map_points(const std::vector<KeyframeCloud>& keyframes,
 void write_trajectory_csv(const std::string& file_path,
                           const std::vector<TrajectoryPoint>& trajectory);
 
+// Appended to each output name while it is being written.
+constexpr const char* kTemporarySuffix = ".tmp";
+
 // Creates `map_output_dir` if needed and writes map.pcd (binary, x y z), map.yaml and
-// trajectory.csv. Throws std::runtime_error on failure.
+// trajectory.csv. Each file is written under its name + kTemporarySuffix, then renamed in the order
+// map.pcd, trajectory.csv, map.yaml. If writing fails, the previous three files are left untouched.
+// Throws std::runtime_error on failure.
 MapOutputResult write_map_outputs(const MapOutputParameters& parameters,
                                   const std::vector<KeyframeCloud>& keyframes,
                                   const std::vector<TrajectoryPoint>& trajectory);

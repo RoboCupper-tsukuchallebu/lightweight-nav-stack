@@ -28,6 +28,9 @@ namespace {
 constexpr double kDt = 0.02;
 constexpr double kScanDuration = 0.1;
 constexpr double kSpeed = 0.6;
+// Batch trajectory error limits for GPS sigma 1.0 m (Issue #43 D4; measured 0.366 m and 0.848 m).
+constexpr double kSigma1KMaximumErrorM = 0.4;
+constexpr double kSigma1K2MaximumErrorM = 1.0;
 constexpr double kTurnRate = 0.4;
 constexpr double kMetersPerDegreeLatitude = 110959.00067472785;
 constexpr double kMetersPerDegreeLongitude = 90163.68782156157;
@@ -152,10 +155,8 @@ MappingRun run_mapping(const Course& course, bool has_pillars,
   LocalizerParameters parameters;
   parameters.mapping = true;
   parameters.keyframe_cloud_voxel_m = 0.25;
-  // K2 must observe the online error through the whole 100 m GPS outage; the production
-  // default would declare LOST after 50 m / 60 s and stop publishing.
-  parameters.state.odom_only_max_distance_m = 200.0;
-  parameters.state.odom_only_max_s = 10000.0;
+  // K2 observes the online error through the whole 100 m GPS outage: mapping mode does not apply
+  // the 50 m / 60 s ODOM_ONLY limits (Issue #43 D5), so no override is needed here.
   Localizer localizer(parameters, PointList{}, std::optional<GpsOrigin>(kOrigin));
 
   Eigen::Isometry3d initial_pose = truth_at(0.0);
@@ -477,7 +478,7 @@ TEST(MapBuilder, K2_ClasSigma0p1_SpecCourse) {
   std::filesystem::remove_all(seam_directory, seam_error);
 }
 
-TEST(MapBuilder, K_SpecCourseSigma1p0_MeasurementOnly) {
+TEST(MapBuilder, K_SpecCourseSigma1p0) {
   const std::string output_directory = unique_directory("k_spec");
   const MappingRun mapping =
       run_mapping(kSpecCourse, true, -1.0, -1.0, true, 1.01, 1.0, output_directory);
@@ -494,11 +495,12 @@ TEST(MapBuilder, K_SpecCourseSigma1p0_MeasurementOnly) {
       summary.last_quarter_maximum, localization.max_error_m,
       localization.max_yaw_error_deg, localization.wheel_only_end_error_m,
       localization.published_count);
+  EXPECT_LT(summary.maximum, kSigma1KMaximumErrorM);
   std::error_code error;
   std::filesystem::remove_all(output_directory, error);
 }
 
-TEST(MapBuilder, K2_SpecCourseSigma1p0_MeasurementOnly) {
+TEST(MapBuilder, K2_SpecCourseSigma1p0) {
   const std::string output_directory = unique_directory("k2_spec");
   const double gps_off_begin_sec = 50.0 / kSpeed;
   const double gps_off_end_sec = 150.0 / kSpeed;
@@ -518,6 +520,7 @@ TEST(MapBuilder, K2_SpecCourseSigma1p0_MeasurementOnly) {
       mapping.trajectory.size(), mapping.map_points.size(), mapping.online_max_error_m,
       mapping.online_dropout_max_error_m, summary.maximum, summary.maximum_stamp_sec,
       before_dropout.maximum, in_dropout.maximum, after_dropout.maximum);
+  EXPECT_LT(summary.maximum, kSigma1K2MaximumErrorM);
   std::error_code error;
   std::filesystem::remove_all(output_directory, error);
 }
@@ -621,6 +624,152 @@ TEST(MapBuilder, MapYamlRecordsGpsOriginAndBatchFlags) {
   EXPECT_TRUE(metadata.batch_optimized);
   EXPECT_EQ(metadata.keyframe_count, 1);
   EXPECT_EQ(metadata.created, "2026-02-03T04:05:06Z");
+  std::error_code error;
+  std::filesystem::remove_all(output_directory, error);
+}
+
+namespace {
+
+// Drives straight on the first leg of kSpecCourse without GPS and without a map, so no absolute
+// observation ever arrives. Returns the worst state seen and the number of mapping keyframes.
+struct NoAbsoluteObservationRun {
+  bool was_lost = false;
+  std::size_t mapping_keyframes = 0;
+  std::size_t mapping_keyframes_at_half = 0;
+};
+
+NoAbsoluteObservationRun drive_without_absolute_observations(bool is_mapping, double duration_sec) {
+  SyntheticWorld world(kSpecCourse.centerline(), true);
+  const auto truth_at = [&world](double time_sec) {
+    Eigen::Isometry3d pose = kSpecCourse.truth_at(time_sec);
+    pose.translation().z() += world.floor_height(pose.translation().x());
+    return pose;
+  };
+  LocalizerParameters parameters;
+  parameters.mapping = is_mapping;
+  Localizer localizer(parameters, PointList{}, std::nullopt);
+  localizer.initialize(truth_at(0.0));
+
+  NoAbsoluteObservationRun run;
+  Eigen::Isometry3d odom = Eigen::Isometry3d::Identity();
+  Eigen::Isometry3d previous_truth = truth_at(0.0);
+  const int step_count = static_cast<int>(duration_sec / kDt);
+  for (int step = 0; step <= step_count; ++step) {
+    const double time_sec = step * kDt;
+    const Eigen::Isometry3d truth = truth_at(time_sec);
+    if (step > 0) odom = odom * (previous_truth.inverse() * truth);
+    previous_truth = truth;
+    if (step > 0 && step % static_cast<int>(0.1 / kDt) == 0 && time_sec >= kScanDuration) {
+      localizer.on_scan(time_sec, world.synthesize_scan(truth_at, time_sec - kScanDuration,
+                                                        kScanDuration, true, 360, 8));
+    }
+    const auto output = localizer.on_wheel_odom(time_sec, odom);
+    if (output && output->state == LocalizationState::kLost) run.was_lost = true;
+    if (localizer.poll_state(time_sec) == LocalizationState::kLost) run.was_lost = true;
+    if (step == step_count / 2) run.mapping_keyframes_at_half = localizer.mapping_keyframe_count();
+  }
+  run.mapping_keyframes = localizer.mapping_keyframe_count();
+  return run;
+}
+
+}  // namespace
+
+// Issue #43 D5: 70 s (42 m) without GPS or map exceeds odom_only_max_s (60 s).
+TEST(MapBuilder, MappingDoesNotGoLostAtTheOdomOnlyLimits) {
+  constexpr double kDurationSec = 70.0;
+  const NoAbsoluteObservationRun run = drive_without_absolute_observations(true, kDurationSec);
+  std::printf("[ MAPPING_ODOM_ONLY ] lost=%d keyframes=%zu keyframes_at_half=%zu\n",
+              run.was_lost ? 1 : 0, run.mapping_keyframes, run.mapping_keyframes_at_half);
+  EXPECT_FALSE(run.was_lost);
+  EXPECT_GT(run.mapping_keyframes, run.mapping_keyframes_at_half);
+  EXPECT_GT(run.mapping_keyframes, 60U);
+}
+
+TEST(MapBuilder, LocalizationStillGoesLostAtTheOdomOnlyLimits) {
+  const NoAbsoluteObservationRun run = drive_without_absolute_observations(false, 70.0);
+  EXPECT_TRUE(run.was_lost);
+}
+
+namespace {
+
+struct SavedFile {
+  std::string name;
+  std::string content;
+};
+
+std::vector<SavedFile> read_map_files(const std::string& directory) {
+  std::vector<SavedFile> files;
+  for (const char* name : {"map.pcd", "trajectory.csv", "map.yaml"}) {
+    std::ifstream stream(std::filesystem::path(directory) / name, std::ios::binary);
+    std::stringstream buffer;
+    buffer << stream.rdbuf();
+    files.push_back({name, buffer.str()});
+  }
+  return files;
+}
+
+void make_map_inputs(int keyframe_count, std::vector<KeyframeCloud>& keyframes,
+                     std::vector<TrajectoryPoint>& trajectory) {
+  for (int index = 0; index < keyframe_count; ++index) {
+    KeyframeCloud keyframe;
+    keyframe.node_index = index;
+    keyframe.stamp_sec = 10.0 + index;
+    keyframe.points_in_base.push_back(Eigen::Vector3f(1.0F + index, 0.0F, 0.0F));
+    keyframes.push_back(keyframe);
+    TrajectoryPoint point;
+    point.node_index = index;
+    point.stamp_sec = 10.0 + index;
+    point.map_to_base.translation() = Eigen::Vector3d(index, 0.0, 0.0);
+    trajectory.push_back(point);
+  }
+}
+
+}  // namespace
+
+// Issue #43 D7 (3): a failure while writing must not leave a new map.pcd next to an old map.yaml.
+TEST(MapBuilder, FailedWriteKeepsThePreviousThreeFiles) {
+  const std::string output_directory = unique_directory("atomic");
+  MapOutputParameters parameters;
+  parameters.map_output_dir = output_directory;
+  parameters.map_voxel_size_m = 0.2;
+  parameters.has_gps_origin = true;
+  parameters.gps_origin = GpsOrigin{36.0, 140.0, 1.0};
+  parameters.batch_optimized = true;
+  parameters.created = "2026-01-01T00:00:00Z";
+  std::vector<KeyframeCloud> first_keyframes;
+  std::vector<TrajectoryPoint> first_trajectory;
+  make_map_inputs(3, first_keyframes, first_trajectory);
+  write_map_outputs(parameters, first_keyframes, first_trajectory);
+  const std::vector<SavedFile> before = read_map_files(output_directory);
+
+  // A directory in the way of map.yaml's temporary file makes the last write fail, after map.pcd
+  // and trajectory.csv were already written under their temporary names.
+  const std::filesystem::path blocker =
+      std::filesystem::path(output_directory) / (std::string("map.yaml") + kTemporarySuffix);
+  std::filesystem::create_directory(blocker);
+  std::vector<KeyframeCloud> second_keyframes;
+  std::vector<TrajectoryPoint> second_trajectory;
+  make_map_inputs(5, second_keyframes, second_trajectory);
+  parameters.created = "2026-02-02T00:00:00Z";
+  EXPECT_THROW(write_map_outputs(parameters, second_keyframes, second_trajectory),
+               std::runtime_error);
+
+  const std::vector<SavedFile> after = read_map_files(output_directory);
+  ASSERT_EQ(before.size(), after.size());
+  for (std::size_t index = 0; index < before.size(); ++index) {
+    EXPECT_EQ(before[index].content, after[index].content) << before[index].name;
+  }
+  for (const char* name : {"map.pcd", "trajectory.csv"}) {
+    EXPECT_FALSE(std::filesystem::exists(std::filesystem::path(output_directory) /
+                                         (std::string(name) + kTemporarySuffix)))
+        << name;
+  }
+
+  std::filesystem::remove_all(blocker);
+  write_map_outputs(parameters, second_keyframes, second_trajectory);
+  EXPECT_EQ(read_map_metadata((std::filesystem::path(output_directory) / "map.yaml").string())
+                .keyframe_count,
+            5);
   std::error_code error;
   std::filesystem::remove_all(output_directory, error);
 }

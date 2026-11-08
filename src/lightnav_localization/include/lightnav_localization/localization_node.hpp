@@ -68,6 +68,9 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
   void handle_save_map(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
                        std::shared_ptr<std_srvs::srv::Trigger::Response> response);
   bool save_mapping_outputs(std::string& message);
+  // on_deactivate / on_shutdown: saves once, unless save_map already saved and no keyframe was added since.
+  void stop_mapping_recording_after_save_map();
+  void save_mapping_outputs_on_stop(const char* phase);
 
   bool resolve_lidar_extrinsic(const sensor_msgs::msg::PointCloud2& cloud, std::string& error);
   bool resolve_gps_extrinsic(std::string& error);
@@ -136,6 +139,9 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
   bool initial_position_from_gps_ = false;
   bool mapping_has_gps_origin_ = false;
   bool mapping_interrupted_ = false;
+  // Keyframe count right after a successful save_map call (Issue #43 D7 (2)).
+  std::optional<std::size_t> keyframe_count_at_save_map_;
+  std::string mapping_recording_stopped_note_;
   bool has_mapping_activation_time_ = false;
   double mapping_activation_sec_ = 0.0;
   std::optional<Eigen::Isometry3d> mapping_reference_odom_;

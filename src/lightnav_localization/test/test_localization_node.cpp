@@ -12,6 +12,7 @@
 #include <memory>
 #include <random>
 #include <set>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -454,6 +455,54 @@ class LocalizationNodeTest : public ::testing::Test {
     return condition();
   }
 
+  std::shared_ptr<std_srvs::srv::Trigger::Response> call_save_map() {
+    auto future =
+        save_map_client_->async_send_request(std::make_shared<std_srvs::srv::Trigger::Request>());
+    const auto end = std::chrono::steady_clock::now() + 5000ms;
+    while (future.wait_for(0ms) != std::future_status::ready &&
+           std::chrono::steady_clock::now() < end) {
+      executor_.spin_some(10ms);
+    }
+    if (future.wait_for(0ms) != std::future_status::ready) return nullptr;
+    return future.get();
+  }
+
+  rclcpp::NodeOptions make_mapping_options(const std::filesystem::path& output_directory) const {
+    rclcpp::NodeOptions options;
+    options.parameter_overrides(
+        {rclcpp::Parameter("mode", "mapping"),
+         rclcpp::Parameter("map_output_dir", output_directory.string()),
+         rclcpp::Parameter("init_travel_m", 0.5),
+         rclcpp::Parameter("keyframe_time_s", 0.5),
+         rclcpp::Parameter("keyframe_distance_m", 0.5),
+         rclcpp::Parameter("status_rate_hz", 10.0)});
+    return options;
+  }
+
+  // Mapping for 2 s, moving along +x. Returns the last pose sent.
+  Eigen::Isometry3d drive_mapping_forward() {
+    return drive_mapping(
+        [](double elapsed) {
+          Eigen::Isometry3d pose = Eigen::Isometry3d::Identity();
+          pose.translation() = Eigen::Vector3d(2.0 + 2.0 * elapsed, 0.0, 1.0);
+          return pose;
+        },
+        2000ms);
+  }
+
+  // Contents of map.pcd, trajectory.csv and map.yaml in this order, with their modification times.
+  std::vector<std::pair<std::string, std::filesystem::file_time_type>> snapshot_map_files(
+      const std::filesystem::path& directory) const {
+    std::vector<std::pair<std::string, std::filesystem::file_time_type>> files;
+    for (const char* name : {"map.pcd", "trajectory.csv", "map.yaml"}) {
+      std::ifstream stream(directory / name, std::ios::binary);
+      std::stringstream buffer;
+      buffer << stream.rdbuf();
+      files.emplace_back(buffer.str(), std::filesystem::last_write_time(directory / name));
+    }
+    return files;
+  }
+
   std::filesystem::path temp_directory_;
   std::filesystem::path map_file_;
   std::filesystem::path map_yaml_;
@@ -595,6 +644,52 @@ TEST_F(LocalizationNodeTest, MappingSavesMapOnShutdown) {
   EXPECT_GT(metadata.keyframe_count, 0);
   EXPECT_TRUE(metadata.batch_optimized);
   std::printf("[ MAPPING_SHUTDOWN ] keyframes=%d saved=1\n", metadata.keyframe_count);
+}
+
+// Issue #43 D7 (2): after a successful save_map the recording stops, so the stop-time save is skipped
+// even though stationary scans keep arriving (a keyframe is added every keyframe_time_s otherwise).
+TEST_F(LocalizationNodeTest, MappingDoesNotSaveOnDeactivateAfterSaveMap) {
+  const std::filesystem::path output_directory = temp_directory_ / "mapping_after_save_map";
+  create_node(make_mapping_options(output_directory));
+  bring_up();
+  const Eigen::Isometry3d last_pose = drive_mapping_forward();
+  ASSERT_GT(odom_count_, 0) << last_status_.last_error;
+
+  const auto response = call_save_map();
+  ASSERT_NE(response, nullptr);
+  ASSERT_TRUE(response->success) << response->message;
+  const auto saved = snapshot_map_files(output_directory);
+
+  // Stationary scans for 3 s (six times keyframe_time_s).
+  drive_mapping([&last_pose](double /*elapsed*/) { return last_pose; }, 3000ms);
+  EXPECT_NE(last_status_.last_error.find("mapping recording stopped"), std::string::npos)
+      << last_status_.last_error;
+  ASSERT_EQ(node_->deactivate().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE);
+
+  const auto after_deactivate = snapshot_map_files(output_directory);
+  ASSERT_EQ(saved.size(), after_deactivate.size());
+  for (std::size_t index = 0; index < saved.size(); ++index) {
+    EXPECT_EQ(saved[index].first, after_deactivate[index].first) << "file " << index;
+    EXPECT_EQ(saved[index].second, after_deactivate[index].second) << "file " << index;
+  }
+}
+
+TEST_F(LocalizationNodeTest, MappingSavesOnceOnDeactivateWithoutSaveMap) {
+  const std::filesystem::path output_directory = temp_directory_ / "mapping_deactivate";
+  create_node(make_mapping_options(output_directory));
+  bring_up();
+  const Eigen::Isometry3d last_pose = drive_mapping_forward();
+  ASSERT_GT(odom_count_, 0) << last_status_.last_error;
+  drive_mapping([&last_pose](double /*elapsed*/) { return last_pose; }, 1000ms);
+  ASSERT_FALSE(std::filesystem::exists(output_directory / "map.yaml"));
+
+  ASSERT_EQ(node_->deactivate().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE);
+
+  ASSERT_TRUE(std::filesystem::exists(output_directory / "map.pcd"));
+  ASSERT_TRUE(std::filesystem::exists(output_directory / "trajectory.csv"));
+  const MapMetadata metadata = read_map_metadata((output_directory / "map.yaml").string());
+  EXPECT_GT(metadata.keyframe_count, 0);
+  EXPECT_TRUE(metadata.batch_optimized);
 }
 
 TEST_F(LocalizationNodeTest, StaysInitializingWithoutGpsOrService) {
