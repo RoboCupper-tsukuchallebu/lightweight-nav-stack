@@ -5,7 +5,6 @@ import rclpy
 
 from lightnav_msgs.srv import PlanPath
 
-
 LOCALHOST_ADDRESS = "127.0.0.1"
 
 
