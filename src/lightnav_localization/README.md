@@ -52,7 +52,8 @@ pixi run ros2 lifecycle set /localization_node activate
    原点が決まるまでは `INITIALIZING` のまま `last_error` に出る。
 2. **初期 yaw**: 原点が決まってから `init_travel_m`（既定 3 m）を直進すると、その向きが初期 yaw になる。
    `INITIALIZING` を抜けるのはここ（初期 yaw が決まったとき）。止めて待つだけでは抜けず、`last_error` は
-   `mapping origin set; waiting for init_travel_m` のまま。
+   `waiting for init_travel_m` を含む文字列のまま（ふつうは `mapping: waiting for init_travel_m (0.000000 m of 3.000000 m)`、
+   原点が決まった時点で wheel odom がまだ無いときは `mapping origin set; waiting for init_travel_m`）。
 3. **走行**: キーフレームは `keyframe_distance_m` の移動**または** `keyframe_time_s` の経過で足される。
    静止していても 1 s に 1 個増える。mapping 中は `odom_only_max_distance_m`・`odom_only_max_s`・
    `lost_position_std_m` で LOST にしない。

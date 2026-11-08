@@ -44,11 +44,13 @@ compose のコメント（`compose.yaml` の先頭）、`scripts/deploy.sh`。�
    - `gnss` アンテナの位置（`base_link→gnss`）は仮の値のまま。車軸中心からアンテナ位相中心までの x・y・z を実測して
      tsukuchalle_description の `dimensions.yaml` の `gnss_xyz_above_ground_m` を更新してから、GNSS を使う確認を行う。
 2. **mapping を起動**: `LIGHTNAV_LOCALIZATION_MODE=mapping docker compose up -d localization`。
-   `/lightnav/localization/status` の `gps_status` が 1（Float）以上になり、`last_error` が
-   `mapping origin set; waiting for init_travel_m` になるまで車を止めて待つ（この位置が地図の原点になる）。
+   `/lightnav/localization/status` の `gps_status` が 1（Float）以上になり、`last_error` に
+   `waiting for init_travel_m` を含む文字列が出るまで車を止めて待つ（この位置が地図の原点になる）。
+   ふつうは `mapping: waiting for init_travel_m (0.000000 m of 3.000000 m)`、原点が決まった時点で wheel odom がまだ無いときは
+   `mapping origin set; waiting for init_travel_m` になる。
    **ここで待っても `INITIALIZING` は抜けない。** 続けて 3 m（`init_travel_m`）をまっすぐ走ると、その向きが初期 yaw になり、
-   そこで初めて `INITIALIZING` を抜ける（走り出すまでは `last_error` が `mapping origin set; ...` か
-   `mapping: waiting for init_travel_m (...)` のまま）。
+   そこで初めて `INITIALIZING` を抜ける（走り出すまでは `last_error` が `mapping: waiting for init_travel_m (...)` か
+   `mapping origin set; waiting for init_travel_m` のまま）。
    - **原点のログ行（`mapping origin set at ...`）には緯度経度が出る。** ログを Issue・PR に貼るときは
      `grep -v 'mapping origin set'` で伏せる。
 3. **ティーチ走行**: パッドで走る。速度は 0.3 m/s・0.4 rad/s 以下を目安にする（下の「速度の判定」）。`nav` は起動しない。
@@ -118,7 +120,7 @@ drive コンテナを再起動すると `odom` の原点が 0 に戻る。**loca
 
 ログを貼るときは原点の行を伏せる。
 
-1. **止めたまま**: mapping で Float により原点が決まる（`last_error` が `mapping origin set; waiting for init_travel_m`）。
+1. **止めたまま**: mapping で Float により原点が決まる（`last_error` に `waiting for init_travel_m` が含まれる。ふつうは `mapping: waiting for init_travel_m (...)`）。
    3 m 直進して `INITIALIZING` を抜ける。localization で静止初期化して `TRACKING`。10 分静止して
    `/lightnav/localization/odom` の漂いが 0.3 m 以内。`last_scan_time_ms` の中央値 < 100 ms、`last_match_time_ms` < 500 ms。
    `INPUT_STALE` がちらつかない。RAM が 6 GiB に収まる。`time_gap_rejected_total` が増え続けない（増えるなら遅延を測り
