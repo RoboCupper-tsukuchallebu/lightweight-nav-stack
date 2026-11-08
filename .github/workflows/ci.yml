@@ -41,3 +41,50 @@ jobs:
       - name: Show failed tests
         if: failure()
         run: pixi run colcon test-result --verbose
+
+  # apt environment of the robot (docker/Dockerfile). The pixi jobs above stay the reference for development.
+  docker:
+    needs: no-nav2-dependency
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      # mode=min: only the apt layer is reused; every layer after `COPY src` changes with each commit.
+      - name: Build the test image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: docker/Dockerfile
+          target: test
+          load: true
+          tags: lightnav:test
+          cache-from: type=gha,scope=lightnav-test
+          cache-to: type=gha,mode=min,scope=lightnav-test
+      - name: Build the runtime image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: docker/Dockerfile
+          load: true
+          tags: lightnav:runtime
+          cache-from: type=gha,scope=lightnav-runtime
+          cache-to: type=gha,mode=min,scope=lightnav-runtime
+      # The ROS_HOME of the image (/tmp/ros_home) hides the rosdep cache of the base image, so remove it for this command only
+      # (an empty ROS_HOME does not work: rosdep then reports it is not initialized).
+      # rviz2 is a GUI dependency of lightnav_sim and is not in the image.
+      - name: rosdep check (a package.xml dependency missing from the Dockerfile fails here)
+        run: |
+          docker run --rm --entrypoint sh lightnav:test -c \
+            'env -u ROS_HOME rosdep check --from-paths src --ignore-src --skip-keys rviz2'
+      # Production Fast DDS XML, so --ipc host is not used: a participant takes about 16.75 MiB of /dev/shm.
+      - name: colcon test in the image
+        run: docker run --rm --shm-size=1g lightnav:test
+      - name: Runtime image contains the workspace and no sources
+        run: |
+          docker run --rm lightnav:runtime bash -c \
+            'for package_name in lightnav_controller lightnav_safety_gate lightnav_localization; do ros2 pkg prefix "$package_name"; done; test ! -e /ws/src && test ! -e /ws/build'
+          # The robot runs as a non-root uid: ROS_LOG_DIR / ROS_HOME must be writable and dds_check must accept it.
+          docker run --rm --user 1000:1000 -e TSUKUCHALLE_UID=1000 lightnav:runtime ros2 pkg prefix lightnav_controller
+          size_bytes=$(docker save lightnav:runtime | gzip | wc -c)
+          echo "lightnav:runtime compressed: $((size_bytes / 1024 / 1024)) MiB"
