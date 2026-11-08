@@ -5,6 +5,16 @@
 # Stop: docker compose exec nav bash -lc 'ros2 lifecycle set /safety_gate_node deactivate'   (Twist 0)
 #       docker compose stop nav
 # `stop` alone does not publish zero; the drive stops by its own 0.5 s command timeout.
+#
+# `localization` (lightnav_localization) builds the map and localizes against it. It publishes no /cmd_vel.
+# Map: ./data/map/{map.pcd,trajectory.csv,map.yaml} (mounted as /data/map). Starting mapping overwrites the previous map: move it away first.
+# Start (mode: localization, the default; mapping to build a map):
+#       docker compose up -d localization
+#       LIGHTNAV_LOCALIZATION_MODE=mapping docker compose up -d localization
+# Change mode: `docker compose stop localization`, then start it again with the new mode (the mode is read at `up`).
+# Stop: `docker compose stop localization`. `stop_signal: SIGINT` makes `ros2 launch` shut the node down, which saves a map still being
+#       recorded (without SIGINT, SIGTERM kills the node without saving). Do NOT add `tty` or `stdin_open`: launch then sends no SIGINT to the node.
+#       sigterm_timeout 45 s + sigkill_timeout 10 s must stay below stop_grace_period 60 s.
 x-ros-common: &ros-common
   image: lightnav:latest
   network_mode: host
@@ -25,6 +35,25 @@ services:
       - lightnav_bringup
       - robot.launch.py
       - safety_gate:=${LIGHTNAV_SAFETY_GATE:-true}
+    volumes:
+      - ./config/robot.yaml:/config/robot.yaml:ro
+      - ./data:/data
+
+  localization:
+    <<: *ros-common
+    stop_signal: SIGINT
+    stop_grace_period: 60s
+    command:
+      - ros2
+      - launch
+      - lightnav_localization
+      - localization.launch.py
+      - mode:=${LIGHTNAV_LOCALIZATION_MODE:-localization}
+      - params_file:=/config/robot.yaml
+      - map_file:=/data/map/map.pcd
+      - map_yaml:=/data/map/map.yaml
+      - sigterm_timeout:=45
+      - sigkill_timeout:=10
     volumes:
       - ./config/robot.yaml:/config/robot.yaml:ro
       - ./data:/data
