@@ -1,0 +1,30 @@
+# Runs on the robot PC, in ~/lightnav/ next to .env (scripts/deploy.sh puts this file, config/ and .env.example there).
+# Needs `.env` with TSUKUCHALLE_UID and TSUKUCHALLE_GID (see .env.example): without them compose stops here.
+# Starting `nav` publishes /cmd_vel (through safety_gate_node), so every start needs a person's approval.
+#
+# Stop: docker compose exec nav bash -lc 'ros2 lifecycle set /safety_gate_node deactivate'   (Twist 0)
+#       docker compose stop nav
+# `stop` alone does not publish zero; the drive stops by its own 0.5 s command timeout.
+x-ros-common: &ros-common
+  image: lightnav:latest
+  network_mode: host
+  ipc: host
+  init: true
+  restart: "no"
+  user: "${TSUKUCHALLE_UID:?set TSUKUCHALLE_UID in .env}:${TSUKUCHALLE_GID:?set TSUKUCHALLE_GID in .env}"
+  environment:
+    # Written out with a value: dds_check.sh skips its uid check when TSUKUCHALLE_UID is empty in the container.
+    TSUKUCHALLE_UID: "${TSUKUCHALLE_UID:?set TSUKUCHALLE_UID in .env}"
+
+services:
+  nav:
+    <<: *ros-common
+    command:
+      - ros2
+      - launch
+      - lightnav_bringup
+      - robot.launch.py
+      - safety_gate:=${LIGHTNAV_SAFETY_GATE:-true}
+    volumes:
+      - ./config/robot.yaml:/config/robot.yaml:ro
+      - ./data:/data

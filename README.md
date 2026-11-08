@@ -10,4 +10,12 @@ pixi run test
 pixi run lint
 ```
 
+ロボット（X13）は Docker で動かす（Issue #35、詳細は CLAUDE.md の「Docker」）:
+
+```
+docker build -f docker/Dockerfile -t lightnav:local .                                  # build（ビルド機で）
+docker build -f docker/Dockerfile --target test -t lightnav:test . && docker run --rm --shm-size=1g lightnav:test   # test
+LIGHTNAV_BUILD_HOST=... LIGHTNAV_ROBOT_HOST=... scripts/deploy.sh [git-ref]          # deploy（ssh の宛先。Mac で）
+```
+
 ライセンス: Apache-2.0

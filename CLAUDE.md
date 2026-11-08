@@ -24,10 +24,28 @@ pixi run lint    # ruff check src
 ## 禁止事項
 
 - 次の操作は人の承認なしに行わない: 駆動系トピックの publish（`/cmd_vel` など）、駆動系サービスの call（モーター有効化など）、ファーム書き込み、リポジトリ外への破壊的操作。
-- 実機（`ROS_DOMAIN_ID=42`、SUBNET）に届くのは `pixi run ros2-robot ...` のみ。起動・publish・call は毎回人の承認が必須で、エージェントは使わない。試験は既定のまま `pixi run test` を使い、実機のドメイン 42 で試験用ノードを動かさない。
+- 実機（`ROS_DOMAIN_ID=42`）に届くのは X13 の `docker compose` だけ。`nav`（`/cmd_vel` を含む）の起動とパッドの Start は毎回人の承認が必須で、エージェントは行わない。`pixi run ros2-robot` が実機に届くのは tsukuchalle_drivers #19 の Mac モード（`TSUKUCHALLE_DDS_MODE=lan`）中だけで、その間は best-effort の欠けが戻る。これも起動・publish・call は毎回人の承認が必須で、エージェントは使わない。試験は既定のまま `pixi run test` を使い、実機のドメイン 42 で試験用ノードを動かさない。
 - `nav2_*` への依存を入れない（CI が package.xml / CMakeLists.txt / pixi.toml を検査する）。
 - 変数名を省略しない（`pos` ではなく `position` など）。
 - マージの条件とマージする人は AGENTS.md に従う。force push・履歴書き換えをしない。
+
+## Docker（X13 の実行環境）
+
+X13 では nav-stack を pixi ではなく Docker で走らせる（Issue #35）。pixi は Mac の開発と CI に残す。ビルドと試験の環境は apt（Python 3.12、pytest 7.4）で、pixi の linux-64 とは版が違う。
+
+```
+docker build -f docker/Dockerfile -t lightnav:local .                  # runtime（最後の段）
+docker build -f docker/Dockerfile --target test -t lightnav:test . && docker run --rm --shm-size=1g lightnav:test   # 試験（CI と同じ。ビルド機で行う）
+LIGHTNAV_BUILD_HOST=<ssh 宛先> LIGHTNAV_ROBOT_HOST=<ssh 宛先> scripts/deploy.sh [git-ref]   # Mac で実行。ビルド機でビルドして X13 に入れる
+```
+
+- Mac では `docker build` をしない。イメージはビルド機で作り、deploy.sh が Mac 経由で X13 に送る。ホスト名・IP はスクリプトにもリポジトリにも書かない（環境変数で渡す）。
+- X13 の `~/lightnav/` に `compose.yaml`・`config/robot.yaml`・`.env`・`data/`。`.env` に `TSUKUCHALLE_UID` と `TSUKUCHALLE_GID`（他リポのコンテナが root の間は 0）が無いと compose は止まる。deploy.sh は `.env` が無いときだけ `docker/.env.example` を置く。
+- `config/robot.yaml` を現地で変えない（次の deploy が差分を見せて止まる）。値の変更は `docker/config/robot.yaml` を PR で直す。
+- 起動（毎回人の承認）: `docker compose up -d nav`。`safety_gate_node` が起動と同時に active になり、Start の前に mission が `IDLE` であることを確かめる。ティーチ走行（パッドで `record_waypoints`）だけ `LIGHTNAV_SAFETY_GATE=false docker compose up -d nav`。その状態で `send_waypoints` をしない。gate の稼働中はパッドで操縦しない（止める手段はパッドの Back と 24 V）。
+- 停止: `docker compose exec nav bash -lc 'ros2 lifecycle set /safety_gate_node deactivate'`（Twist 0）→ `docker compose stop nav`。`stop` だけだと 0 は出ず、ドライバの 0.5 s のタイムアウトで止まる。
+- コンテナ内の確認用 CLI は `docker compose exec nav bash -lc '…'` で、`ros2 topic hz` などに `--no-daemon` を付ける。
+- DDS の `docker/dds/` は tsukuchalle_drivers `ros2/dds/` の複製（正は drivers 側）。
 
 ## 合否の基準と Mac の差
 
