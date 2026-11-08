@@ -29,6 +29,8 @@ find_package(Python3 REQUIRED COMPONENTS Development)
 add_library(lightnav_localization_core
   src/pcd_io.cpp
   src/map_metadata.cpp
+  src/map_builder.cpp
+  src/mapping_initialization.cpp
   src/deskew.cpp
   src/downsample.cpp
   src/matcher.cpp
@@ -93,7 +95,7 @@ if(BUILD_TESTING)
   find_package(GTest REQUIRED)
   foreach(test_name pcd_io map_metadata pose_buffer deskew matcher performance pose_graph gps_input
                     corrector state_machine lidar_odometry localizer match_information
-                    performance_large initial_alignment point_cloud_extraction)
+                    performance_large initial_alignment point_cloud_extraction mapping)
     add_executable(test_${test_name} test/test_${test_name}.cpp)
     target_link_libraries(test_${test_name} lightnav_localization_core GTest::gtest GTest::gtest_main)
     target_compile_options(test_${test_name} PRIVATE -Wall -Wextra -Werror)
@@ -111,6 +113,10 @@ if(BUILD_TESTING)
 
   find_package(ament_cmake_pytest REQUIRED)
   ament_add_pytest_test(test_pose_adapter_acceptance test/test_pose_adapter_acceptance.py)
+  # localization.launch.py in both modes: activate, then SIGINT through on_shutdown.
+  foreach(launch_test_name localization_launch_localization localization_launch_mapping)
+    ament_add_pytest_test(test_${launch_test_name} test/test_${launch_test_name}.py TIMEOUT 180)
+  endforeach()
 endif()
 
 ament_package()

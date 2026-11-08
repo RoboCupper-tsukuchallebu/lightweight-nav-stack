@@ -85,7 +85,7 @@ LiDAR の外部パラメータ（`base_frame→点群の frame_id`）と GPS ア
 | `gps_gate_mahalanobis` / `gps_trusted_std_m` / `gps_absolute_gate_m` | 3.0 / 0.3 / 2.0 | GPS ゲート |
 | `correction_slew_mps` / `correction_slew_rps` / `large_correction_threshold_m` | 0.2 / 0.1 / 1.0 | 補正の平滑化 |
 | `tracking_window_s` / `lost_position_std_m` | 5.0 / 2.0 | 状態判定 |
-| `odom_only_max_distance_m` / `odom_only_max_s` / `drift_rate` | 50 / 60 / 0.02 | ODOM_ONLY の上限 |
+| `odom_only_max_distance_m` / `odom_only_max_s` / `drift_rate` | 50 / 60 / 0.02 | ODOM_ONLY の上限。**`mode: mapping` では無効**（この 2 つで LOST にしない。D5） |
 
 ## 既知の限界
 
@@ -96,6 +96,12 @@ LiDAR の外部パラメータ（`base_frame→点群の frame_id`）と GPS ア
 - GPS の高度は拘束しない。坂・段差の roll/pitch は LiDAR オドメトリ由来で、IMU は使わない。
 - 初期 yaw の粗照合は 15° 刻み・静止スキャン前提。走行しながらの初期化は対象外。
 - mapping モード、`~/save_map`、`trajectory.csv` は L3-b（別 Issue）。
+- mapping モードの K/K2（合成コースの `test_mapping`）の基準は、GPS σ 1.0 m で K（バッチ後の
+  `trajectory.csv` の最大誤差）0.45 m、K2（GPS を 100 m 欠測）1.0 m（計測値は pixi で 0.366 m・0.848 m、Docker（apt）で 0.410 m・0.847 m）。
+  σ 0.2 m／0.1 m の CLAS 相当では従来どおり 0.2 m 未満。
+- mapping 中は LOST にしない（odom_only の 50 m／60 s と、位置の不確かさ `lost_position_std_m` の両方を
+  無効にする。`drift_rate` の項が GNSS 欠測の距離で増えるため、後者を残すと約 30 s で LOST になる）。
+  localization モードは従来どおり。
 - ループ閉じ込み・動的物体除去・地図更新は v1 の非スコープ。
 
 ## 試験

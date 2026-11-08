@@ -26,6 +26,7 @@
 #include "lightnav_localization/gps_input.hpp"
 #include "lightnav_localization/initial_alignment.hpp"
 #include "lightnav_localization/localizer.hpp"
+#include "lightnav_localization/map_builder.hpp"
 #include "lightnav_localization/map_metadata.hpp"
 #include "lightnav_localization/pcd_io.hpp"
 #include "lightnav_localization/pose_buffer.hpp"
@@ -53,6 +54,7 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
   bool load_map_data(std::string& error);
   void reset_runtime_state();
   bool is_active() const;
+  bool is_mapping() const { return mode_ == "mapping"; }
 
   void handle_wheel_odom(const nav_msgs::msg::Odometry::SharedPtr message);
   void handle_point_cloud(const sensor_msgs::msg::PointCloud2::SharedPtr message);
@@ -63,15 +65,23 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
       std::shared_ptr<lightnav_msgs::srv::SetInitialPose::Response> response);
   void handle_reload_map(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
                          std::shared_ptr<std_srvs::srv::Trigger::Response> response);
+  void handle_save_map(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+                       std::shared_ptr<std_srvs::srv::Trigger::Response> response);
+  bool save_mapping_outputs(std::string& message);
+  // on_deactivate / on_shutdown: saves once, unless save_map already saved and no keyframe was added since.
+  void stop_mapping_recording_after_save_map();
+  void save_mapping_outputs_on_stop(const char* phase);
 
   bool resolve_lidar_extrinsic(const sensor_msgs::msg::PointCloud2& cloud, std::string& error);
   bool resolve_gps_extrinsic(std::string& error);
   bool try_start_initialization();
+  void maybe_start_mapping();
   void maybe_align_initial_yaw();
   void add_alignment_scan(const PointList& scan);
   void handle_pending_scans();
   GpsFix to_gps_fix(const sensor_msgs::msg::NavSatFix& message) const;
   bool is_usable_initial_fix(const GpsFix& fix) const;
+  bool is_usable_mapping_fix(const GpsFix& fix) const;
 
   struct PendingScan {
     builtin_interfaces::msg::Time stamp;
@@ -92,6 +102,12 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
   std::string mode_;
   std::string map_file_;
   std::string map_yaml_;
+  std::string map_output_dir_;
+  double map_voxel_size_m_ = 0.2;
+  double keyframe_cloud_voxel_m_ = 0.25;
+  int batch_max_iterations_ = 100;
+  double init_travel_m_ = 3.0;
+  bool allow_mapping_without_gps_ = false;
   std::string map_frame_;
   std::string odom_frame_;
   std::string base_frame_;
@@ -121,6 +137,16 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
   std::optional<Eigen::Vector3d> initial_position_;
   std::optional<double> initial_yaw_;
   bool initial_position_from_gps_ = false;
+  bool mapping_has_gps_origin_ = false;
+  bool mapping_interrupted_ = false;
+  // Keyframe count right after a successful save_map call (Issue #43 D7 (2)).
+  std::optional<std::size_t> keyframe_count_at_save_map_;
+  std::string mapping_recording_stopped_note_;
+  bool has_mapping_activation_time_ = false;
+  double mapping_activation_sec_ = 0.0;
+  std::optional<Eigen::Isometry3d> mapping_reference_odom_;
+  std::optional<Eigen::Vector3d> mapping_reference_enu_;
+  std::optional<Eigen::Vector3d> latest_mapping_gps_enu_;
   std::deque<PointList> alignment_scans_;
   std::optional<PreparedTarget> alignment_target_;
   Eigen::Vector3d alignment_target_center_ = Eigen::Vector3d::Zero();
@@ -165,6 +191,7 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
   rclcpp::Subscription<sensor_msgs::msg::NavSatFix>::SharedPtr gps_subscription_;
   rclcpp::Service<lightnav_msgs::srv::SetInitialPose>::SharedPtr set_initial_pose_service_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr reload_map_service_;
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr save_map_service_;
   rclcpp::TimerBase::SharedPtr watchdog_timer_;
   std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;

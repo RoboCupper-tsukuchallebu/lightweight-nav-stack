@@ -7,10 +7,12 @@
 #include <filesystem>
 #include <functional>
 #include <future>
+#include <fstream>
 #include <limits>
 #include <memory>
 #include <random>
 #include <set>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -143,6 +145,8 @@ class LocalizationNodeTest : public ::testing::Test {
         });
     set_initial_pose_client_ =
         helper_->create_client<SetInitialPose>("/localization_node/set_initial_pose");
+    save_map_client_ =
+        helper_->create_client<std_srvs::srv::Trigger>("/localization_node/save_map");
     static_broadcaster_ = std::make_unique<tf2_ros::StaticTransformBroadcaster>(helper_);
     executor_.add_node(node_->get_node_base_interface());
     executor_.add_node(helper_);
@@ -158,6 +162,7 @@ class LocalizationNodeTest : public ::testing::Test {
     executor_.cancel();
     static_broadcaster_.reset();
     set_initial_pose_client_.reset();
+    save_map_client_.reset();
     status_subscription_.reset();
     odom_subscription_.reset();
     gps_publisher_.reset();
@@ -183,11 +188,13 @@ class LocalizationNodeTest : public ::testing::Test {
     static_broadcaster_->sendTransform(transform);
   }
 
-  void bring_up() {
+  void bring_up(bool with_gps_lever_arm = true) {
     ASSERT_EQ(node_->configure().id(),
               lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE);
     send_static_transform("base_footprint", "velodyne");
-    send_static_transform("base_footprint", "gnss", kGpsLeverArm);
+    send_static_transform("base_footprint", "gnss",
+                          with_gps_lever_arm ? kGpsLeverArm
+                                             : Eigen::Vector3d::Zero());
     ASSERT_EQ(node_->activate().id(),
               lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE);
     spin_for(200ms);
@@ -303,6 +310,117 @@ class LocalizationNodeTest : public ::testing::Test {
     gps_publisher_->publish(message);
   }
 
+  void publish_wheel_at(const rclcpp::Time& stamp, const Eigen::Isometry3d& pose) {
+    nav_msgs::msg::Odometry message;
+    message.header.stamp = stamp;
+    message.header.frame_id = "odom";
+    message.child_frame_id = "base_footprint";
+    message.pose.pose.position.x = pose.translation().x();
+    message.pose.pose.position.y = pose.translation().y();
+    message.pose.pose.position.z = pose.translation().z();
+    const Eigen::Quaterniond orientation(pose.rotation());
+    message.pose.pose.orientation.x = orientation.x();
+    message.pose.pose.orientation.y = orientation.y();
+    message.pose.pose.orientation.z = orientation.z();
+    message.pose.pose.orientation.w = orientation.w();
+    message.pose.covariance[0] = 1e-4;
+    message.pose.covariance[7] = 1e-4;
+    message.pose.covariance[35] = 1e-4;
+    published_wheel_stamps_.insert(rclcpp::Time(stamp).nanoseconds());
+    wheel_publisher_->publish(message);
+  }
+
+  void publish_scan_at(const rclcpp::Time& stamp, const Eigen::Isometry3d& pose) {
+    const std::vector<TimedPoint> points = world_->synthesize_scan(
+        [&pose](double /*time_sec*/) { return pose; }, stamp.seconds() - 0.1, 0.1, true,
+        360, 8);
+    constexpr std::uint32_t kWidth = 32;
+    const std::size_t height = std::max<std::size_t>(1, points.size() / kWidth);
+    constexpr std::uint32_t kPointStep = 16;
+    sensor_msgs::msg::PointCloud2 cloud;
+    cloud.header.stamp = stamp;
+    cloud.header.frame_id = "velodyne";
+    cloud.height = static_cast<std::uint32_t>(height);
+    cloud.width = kWidth;
+    cloud.is_dense = false;
+    cloud.is_bigendian = false;
+    cloud.point_step = kPointStep;
+    cloud.row_step = kPointStep * cloud.width;
+    for (const char* name : {"x", "y", "z", "time"}) {
+      sensor_msgs::msg::PointField field;
+      field.name = name;
+      field.offset = static_cast<std::uint32_t>(cloud.fields.size()) * 4U;
+      field.datatype = sensor_msgs::msg::PointField::FLOAT32;
+      field.count = 1;
+      cloud.fields.push_back(field);
+    }
+    cloud.data.assign(static_cast<std::size_t>(cloud.row_step) * cloud.height, 0);
+    float* data = reinterpret_cast<float*>(cloud.data.data());
+    std::size_t point_index = 0;
+    for (std::size_t row = 0; row < height; ++row) {
+      for (std::uint32_t column = 0; column < kWidth; ++column, ++point_index) {
+        float* point = data + (row * kWidth + column) * 4;
+        if (point_index >= points.size()) continue;
+        point[0] = points[point_index].position.x();
+        point[1] = points[point_index].position.y();
+        point[2] = points[point_index].position.z();
+        point[3] = points[point_index].time_offset_sec;
+      }
+    }
+    points_publisher_->publish(cloud);
+  }
+
+  void publish_gps_at(const rclcpp::Time& stamp, const Eigen::Isometry3d& pose) {
+    const Eigen::Vector3d antenna_position = pose * kGpsLeverArm;
+    const double east = antenna_position.x() + 0.3 * gps_normal_(gps_random_);
+    const double north = antenna_position.y() + 0.3 * gps_normal_(gps_random_);
+    sensor_msgs::msg::NavSatFix message;
+    message.header.stamp = stamp;
+    message.header.frame_id = "gnss";
+    message.status.status = sensor_msgs::msg::NavSatStatus::STATUS_FIX;
+    message.latitude = kOrigin.latitude_deg + north / kMetersPerDegreeLatitude;
+    message.longitude = kOrigin.longitude_deg +
+                        east / (kMetersPerDegreeLatitude *
+                                std::cos(kOrigin.latitude_deg * M_PI / 180.0));
+    message.altitude = kOrigin.altitude_m + antenna_position.z();
+    message.position_covariance_type =
+        sensor_msgs::msg::NavSatFix::COVARIANCE_TYPE_KNOWN;
+    message.position_covariance[0] = 0.36;
+    message.position_covariance[4] = 0.36;
+    message.position_covariance[8] = 0.36;
+    gps_publisher_->publish(message);
+  }
+
+  Eigen::Isometry3d drive_mapping(
+      const std::function<Eigen::Isometry3d(double)>& pose_at,
+      std::chrono::milliseconds duration) {
+    const auto start = std::chrono::steady_clock::now();
+    auto next_wheel = start;
+    auto next_scan = start;
+    auto next_gps = start;
+    Eigen::Isometry3d last_pose = Eigen::Isometry3d::Identity();
+    while (std::chrono::steady_clock::now() - start < duration) {
+      const auto now = std::chrono::steady_clock::now();
+      const double elapsed = std::chrono::duration<double>(now - start).count();
+      last_pose = pose_at(elapsed);
+      const rclcpp::Time stamp = node_->get_clock()->now();
+      if (now >= next_wheel) {
+        publish_wheel_at(stamp, last_pose);
+        while (next_wheel <= now) next_wheel += 20ms;
+      }
+      if (now >= next_scan) {
+        publish_scan_at(stamp, last_pose);
+        while (next_scan <= now) next_scan += 100ms;
+      }
+      if (now >= next_gps) {
+        publish_gps_at(stamp, last_pose);
+        while (next_gps <= now) next_gps += 200ms;
+      }
+      executor_.spin_some(5ms);
+    }
+    return last_pose;
+  }
+
   void run_for(std::chrono::milliseconds duration, int inputs) {
     const auto end = std::chrono::steady_clock::now() + duration;
     auto next_wheel = std::chrono::steady_clock::now();
@@ -337,6 +455,54 @@ class LocalizationNodeTest : public ::testing::Test {
     return condition();
   }
 
+  std::shared_ptr<std_srvs::srv::Trigger::Response> call_save_map() {
+    auto future =
+        save_map_client_->async_send_request(std::make_shared<std_srvs::srv::Trigger::Request>());
+    const auto end = std::chrono::steady_clock::now() + 5000ms;
+    while (future.wait_for(0ms) != std::future_status::ready &&
+           std::chrono::steady_clock::now() < end) {
+      executor_.spin_some(10ms);
+    }
+    if (future.wait_for(0ms) != std::future_status::ready) return nullptr;
+    return future.get();
+  }
+
+  rclcpp::NodeOptions make_mapping_options(const std::filesystem::path& output_directory) const {
+    rclcpp::NodeOptions options;
+    options.parameter_overrides(
+        {rclcpp::Parameter("mode", "mapping"),
+         rclcpp::Parameter("map_output_dir", output_directory.string()),
+         rclcpp::Parameter("init_travel_m", 0.5),
+         rclcpp::Parameter("keyframe_time_s", 0.5),
+         rclcpp::Parameter("keyframe_distance_m", 0.5),
+         rclcpp::Parameter("status_rate_hz", 10.0)});
+    return options;
+  }
+
+  // Mapping for 2 s, moving along +x. Returns the last pose sent.
+  Eigen::Isometry3d drive_mapping_forward() {
+    return drive_mapping(
+        [](double elapsed) {
+          Eigen::Isometry3d pose = Eigen::Isometry3d::Identity();
+          pose.translation() = Eigen::Vector3d(2.0 + 2.0 * elapsed, 0.0, 1.0);
+          return pose;
+        },
+        2000ms);
+  }
+
+  // Contents of map.pcd, trajectory.csv and map.yaml in this order, with their modification times.
+  std::vector<std::pair<std::string, std::filesystem::file_time_type>> snapshot_map_files(
+      const std::filesystem::path& directory) const {
+    std::vector<std::pair<std::string, std::filesystem::file_time_type>> files;
+    for (const char* name : {"map.pcd", "trajectory.csv", "map.yaml"}) {
+      std::ifstream stream(directory / name, std::ios::binary);
+      std::stringstream buffer;
+      buffer << stream.rdbuf();
+      files.emplace_back(buffer.str(), std::filesystem::last_write_time(directory / name));
+    }
+    return files;
+  }
+
   std::filesystem::path temp_directory_;
   std::filesystem::path map_file_;
   std::filesystem::path map_yaml_;
@@ -351,6 +517,7 @@ class LocalizationNodeTest : public ::testing::Test {
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_subscription_;
   rclcpp::Subscription<LocalizationStatus>::SharedPtr status_subscription_;
   rclcpp::Client<SetInitialPose>::SharedPtr set_initial_pose_client_;
+  rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr save_map_client_;
   std::unique_ptr<tf2_ros::StaticTransformBroadcaster> static_broadcaster_;
   nav_msgs::msg::Odometry last_odom_;
   LocalizationStatus last_status_;
@@ -370,10 +537,159 @@ TEST_F(LocalizationNodeTest, ConfigureFailsWithoutMapFile) {
             lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED);
 }
 
-TEST_F(LocalizationNodeTest, ConfigureFailsInMappingMode) {
-  create_node(make_options(map_file_.string(), map_yaml_.string(), "mapping"));
-  EXPECT_EQ(node_->configure().id(),
-            lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED);
+TEST_F(LocalizationNodeTest, MappingModeSavesMapOnTrigger) {
+  const std::filesystem::path output_directory = temp_directory_ / "mapping_output";
+  rclcpp::NodeOptions options;
+  options.parameter_overrides(
+      {rclcpp::Parameter("mode", "mapping"),
+       rclcpp::Parameter("map_output_dir", output_directory.string()),
+       rclcpp::Parameter("init_travel_m", 0.5),
+       rclcpp::Parameter("keyframe_time_s", 0.5),
+       rclcpp::Parameter("keyframe_distance_m", 0.5),
+       rclcpp::Parameter("status_rate_hz", 10.0)});
+  create_node(options);
+  bring_up();
+
+  const auto start = std::chrono::steady_clock::now();
+  auto next_wheel = start;
+  auto next_scan = start;
+  auto next_gps = start;
+  while (std::chrono::steady_clock::now() - start < std::chrono::milliseconds(3000)) {
+    const auto now = std::chrono::steady_clock::now();
+    const double elapsed =
+        std::chrono::duration<double>(now - start).count();
+    Eigen::Isometry3d pose = Eigen::Isometry3d::Identity();
+    pose.translation() = Eigen::Vector3d(2.0 + 2.0 * elapsed, 0.0, 1.0);
+    const rclcpp::Time stamp = node_->get_clock()->now();
+    if (now >= next_wheel) {
+      publish_wheel_at(stamp, pose);
+      while (next_wheel <= now) next_wheel += 20ms;
+    }
+    if (now >= next_scan) {
+      publish_scan_at(stamp, pose);
+      while (next_scan <= now) next_scan += 100ms;
+    }
+    if (now >= next_gps) {
+      publish_gps_at(stamp, pose);
+      while (next_gps <= now) next_gps += 200ms;
+    }
+    executor_.spin_some(5ms);
+  }
+  ASSERT_GT(status_count_, 0);
+  EXPECT_EQ(last_status_.mode, LocalizationStatus::MODE_MAPPING);
+  ASSERT_GT(odom_count_, 0) << "last_error: " << last_status_.last_error;
+
+  auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
+  auto future = save_map_client_->async_send_request(request);
+  const auto end = std::chrono::steady_clock::now() + 5000ms;
+  while (future.wait_for(0ms) != std::future_status::ready &&
+         std::chrono::steady_clock::now() < end) {
+    executor_.spin_some(10ms);
+  }
+  ASSERT_EQ(future.wait_for(0ms), std::future_status::ready);
+  const std::shared_ptr<std_srvs::srv::Trigger::Response> response = future.get();
+  ASSERT_TRUE(response->success) << response->message;
+
+  ASSERT_TRUE(std::filesystem::exists(output_directory / "map.pcd"));
+  ASSERT_TRUE(std::filesystem::exists(output_directory / "map.yaml"));
+  ASSERT_TRUE(std::filesystem::exists(output_directory / "trajectory.csv"));
+  const PointList map_points = read_pcd((output_directory / "map.pcd").string());
+  const MapMetadata metadata =
+      read_map_metadata((output_directory / "map.yaml").string());
+  EXPECT_FALSE(map_points.empty());
+  EXPECT_GT(metadata.keyframe_count, 0);
+  EXPECT_TRUE(metadata.batch_optimized);
+  EXPECT_NEAR(metadata.voxel_size_m, 0.2, 1e-9);
+  std::ifstream csv((output_directory / "trajectory.csv").string());
+  ASSERT_TRUE(csv);
+  std::string line;
+  ASSERT_TRUE(std::getline(csv, line));
+  EXPECT_EQ(line, "stamp_sec,x,y,z,roll,pitch,yaw,position_std_m");
+  int row_count = 0;
+  while (std::getline(csv, line)) {
+    if (!line.empty()) ++row_count;
+  }
+  EXPECT_EQ(row_count, metadata.keyframe_count);
+  std::printf("[ K_NODE ] keyframes=%d map_points=%zu message=%s\n",
+              metadata.keyframe_count, map_points.size(), response->message.c_str());
+}
+
+TEST_F(LocalizationNodeTest, MappingSavesMapOnShutdown) {
+  const std::filesystem::path output_directory = temp_directory_ / "mapping_shutdown";
+  rclcpp::NodeOptions options;
+  options.parameter_overrides(
+      {rclcpp::Parameter("mode", "mapping"),
+       rclcpp::Parameter("map_output_dir", output_directory.string()),
+       rclcpp::Parameter("init_travel_m", 0.5),
+       rclcpp::Parameter("keyframe_time_s", 0.5),
+       rclcpp::Parameter("keyframe_distance_m", 0.5),
+       rclcpp::Parameter("status_rate_hz", 10.0)});
+  create_node(options);
+  bring_up();
+  drive_mapping(
+      [](double elapsed) {
+        Eigen::Isometry3d pose = Eigen::Isometry3d::Identity();
+        pose.translation() = Eigen::Vector3d(2.0 + 2.0 * elapsed, 0.0, 1.0);
+        return pose;
+      },
+      2000ms);
+  ASSERT_GT(odom_count_, 0) << last_status_.last_error;
+  ASSERT_EQ(node_->shutdown().id(),
+            lifecycle_msgs::msg::State::PRIMARY_STATE_FINALIZED);
+  ASSERT_TRUE(std::filesystem::exists(output_directory / "map.pcd"));
+  ASSERT_TRUE(std::filesystem::exists(output_directory / "map.yaml"));
+  ASSERT_TRUE(std::filesystem::exists(output_directory / "trajectory.csv"));
+  const MapMetadata metadata =
+      read_map_metadata((output_directory / "map.yaml").string());
+  EXPECT_GT(metadata.keyframe_count, 0);
+  EXPECT_TRUE(metadata.batch_optimized);
+  std::printf("[ MAPPING_SHUTDOWN ] keyframes=%d saved=1\n", metadata.keyframe_count);
+}
+
+// Issue #43 D7 (2): after a successful save_map the recording stops, so the stop-time save is skipped
+// even though stationary scans keep arriving (a keyframe is added every keyframe_time_s otherwise).
+TEST_F(LocalizationNodeTest, MappingDoesNotSaveOnDeactivateAfterSaveMap) {
+  const std::filesystem::path output_directory = temp_directory_ / "mapping_after_save_map";
+  create_node(make_mapping_options(output_directory));
+  bring_up();
+  const Eigen::Isometry3d last_pose = drive_mapping_forward();
+  ASSERT_GT(odom_count_, 0) << last_status_.last_error;
+
+  const auto response = call_save_map();
+  ASSERT_NE(response, nullptr);
+  ASSERT_TRUE(response->success) << response->message;
+  const auto saved = snapshot_map_files(output_directory);
+
+  // Stationary scans for 3 s (six times keyframe_time_s).
+  drive_mapping([&last_pose](double /*elapsed*/) { return last_pose; }, 3000ms);
+  EXPECT_NE(last_status_.last_error.find("mapping recording stopped"), std::string::npos)
+      << last_status_.last_error;
+  ASSERT_EQ(node_->deactivate().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE);
+
+  const auto after_deactivate = snapshot_map_files(output_directory);
+  ASSERT_EQ(saved.size(), after_deactivate.size());
+  for (std::size_t index = 0; index < saved.size(); ++index) {
+    EXPECT_EQ(saved[index].first, after_deactivate[index].first) << "file " << index;
+    EXPECT_EQ(saved[index].second, after_deactivate[index].second) << "file " << index;
+  }
+}
+
+TEST_F(LocalizationNodeTest, MappingSavesOnceOnDeactivateWithoutSaveMap) {
+  const std::filesystem::path output_directory = temp_directory_ / "mapping_deactivate";
+  create_node(make_mapping_options(output_directory));
+  bring_up();
+  const Eigen::Isometry3d last_pose = drive_mapping_forward();
+  ASSERT_GT(odom_count_, 0) << last_status_.last_error;
+  drive_mapping([&last_pose](double /*elapsed*/) { return last_pose; }, 1000ms);
+  ASSERT_FALSE(std::filesystem::exists(output_directory / "map.yaml"));
+
+  ASSERT_EQ(node_->deactivate().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE);
+
+  ASSERT_TRUE(std::filesystem::exists(output_directory / "map.pcd"));
+  ASSERT_TRUE(std::filesystem::exists(output_directory / "trajectory.csv"));
+  const MapMetadata metadata = read_map_metadata((output_directory / "map.yaml").string());
+  EXPECT_GT(metadata.keyframe_count, 0);
+  EXPECT_TRUE(metadata.batch_optimized);
 }
 
 TEST_F(LocalizationNodeTest, StaysInitializingWithoutGpsOrService) {
