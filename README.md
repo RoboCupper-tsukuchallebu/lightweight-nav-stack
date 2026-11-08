@@ -10,7 +10,7 @@ pixi run test
 pixi run lint
 ```
 
-ロボット（X13）は Docker で動かす（Issue #35、詳細は CLAUDE.md の「Docker」）:
+ロボット（X13）は Docker で動かす（Issue #35、詳細は CLAUDE.md の「Docker」。自己位置推定の現地手順は [docker/README.md](docker/README.md)）:
 
 ```
 docker build -f docker/Dockerfile -t lightnav:local .                                  # build（ビルド機で）

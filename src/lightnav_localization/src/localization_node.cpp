@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <ctime>
 #include <exception>
 #include <limits>
 #include <memory>
@@ -12,6 +13,8 @@
 #include <vector>
 
 #include <Eigen/Core>
+#include <diagnostic_msgs/msg/diagnostic_status.hpp>
+#include <diagnostic_msgs/msg/key_value.hpp>
 #include <geometry_msgs/msg/pose.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <lifecycle_msgs/msg/state.hpp>
@@ -21,6 +24,7 @@
 
 #include "lightnav_localization/deskew.hpp"
 #include "lightnav_localization/downsample.hpp"
+#include "lightnav_localization/mapping_initialization.hpp"
 #include "lightnav_localization/point_cloud_extraction.hpp"
 
 namespace lightnav_localization {
@@ -29,8 +33,20 @@ namespace {
 constexpr double kNeverSec = -1e9;
 constexpr double kWheelBufferSec = 3.0;
 constexpr double kDefaultWatchdogPeriodSec = 0.02;
-constexpr std::size_t kMaxGpsDiagnostics = 100;
+constexpr double kDiagnosticsPeriodSec = 1.0;
+constexpr int kLowestNavSatStatus = -1;   // STATUS_NO_FIX
+constexpr int kHighestNavSatStatus = 2;   // STATUS_GBAS_FIX
 constexpr std::size_t kMaxPendingScans = 20;
+
+std::string utc_now_iso8601() {
+  const std::time_t now = std::chrono::system_clock::to_time_t(
+      std::chrono::system_clock::now());
+  std::tm broken_down{};
+  gmtime_r(&now, &broken_down);
+  char buffer[32] = {};
+  std::strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%SZ", &broken_down);
+  return std::string(buffer);
+}
 
 Eigen::Isometry3d invert_isometry(const Eigen::Isometry3d& transform) {
   Eigen::Isometry3d inverse = Eigen::Isometry3d::Identity();
@@ -137,11 +153,21 @@ void LocalizationNode::declare_parameters() {
   declare_parameter<double>("status_rate_hz", 2.0);
   declare_parameter<int>("num_threads", 4);
   declare_parameter<double>("init_gps_max_std_m", 3.0);
+  // GNSS input contract (Issue #43 section 4.3): drop fixes below this NavSatStatus (-1 keeps all) and
+  // thin the rest to one per gps_min_interval_s (0 keeps all) before they reach the Localizer.
+  declare_parameter<int>("gps_min_status", kLowestNavSatStatus);
+  declare_parameter<double>("gps_min_interval_s", 0.0);
   declare_parameter<int>("init_scan_count", 3);
   declare_parameter<double>("init_yaw_step_deg", 15.0);
   declare_parameter<double>("init_coarse_corr_m", 2.0);
   declare_parameter<double>("init_fine_corr_m", 0.5);
   declare_parameter<double>("init_inlier_ratio_min", 0.6);
+  declare_parameter<std::string>("map_output_dir", "");
+  declare_parameter<double>("map_voxel_size_m", 0.2);
+  declare_parameter<double>("keyframe_cloud_voxel_m", 0.25);
+  declare_parameter<int>("batch_max_iterations", 100);
+  declare_parameter<double>("init_travel_m", 3.0);
+  declare_parameter<bool>("allow_mapping_without_gps", false);
 
   declare_parameter<double>("wheel_timeout_s", 0.2);
   declare_parameter<double>("scan_timeout_s", 0.5);
@@ -213,11 +239,19 @@ bool LocalizationNode::read_parameters(std::string& error) {
   status_rate_hz_ = get_parameter("status_rate_hz").as_double();
   num_threads_ = static_cast<int>(get_parameter("num_threads").as_int());
   init_gps_max_std_m_ = get_parameter("init_gps_max_std_m").as_double();
+  gps_min_status_ = static_cast<int>(get_parameter("gps_min_status").as_int());
+  gps_min_interval_s_ = get_parameter("gps_min_interval_s").as_double();
   alignment_parameters_.scan_count = static_cast<int>(get_parameter("init_scan_count").as_int());
   alignment_parameters_.yaw_step_deg = get_parameter("init_yaw_step_deg").as_double();
   alignment_parameters_.coarse_correspondence_m = get_parameter("init_coarse_corr_m").as_double();
   alignment_parameters_.fine_correspondence_m = get_parameter("init_fine_corr_m").as_double();
   alignment_parameters_.inlier_ratio_min = get_parameter("init_inlier_ratio_min").as_double();
+  map_output_dir_ = get_parameter("map_output_dir").as_string();
+  map_voxel_size_m_ = get_parameter("map_voxel_size_m").as_double();
+  keyframe_cloud_voxel_m_ = get_parameter("keyframe_cloud_voxel_m").as_double();
+  batch_max_iterations_ = static_cast<int>(get_parameter("batch_max_iterations").as_int());
+  init_travel_m_ = get_parameter("init_travel_m").as_double();
+  allow_mapping_without_gps_ = get_parameter("allow_mapping_without_gps").as_bool();
 
   if (map_frame_.empty() || odom_frame_.empty() || base_frame_.empty() || gps_frame_.empty() ||
       wheel_odom_topic_.empty() || points_topic_.empty() || gps_topic_.empty()) {
@@ -233,6 +267,14 @@ bool LocalizationNode::read_parameters(std::string& error) {
       !(alignment_parameters_.fine_correspondence_m > 0.0) ||
       !(alignment_parameters_.inlier_ratio_min > 0.0) || !(init_gps_max_std_m_ > 0.0)) {
     error = "initial alignment parameters must be positive";
+    return false;
+  }
+  if (gps_min_status_ < kLowestNavSatStatus || gps_min_status_ > kHighestNavSatStatus) {
+    error = "gps_min_status must be between -1 (NO_FIX) and 2 (GBAS_FIX)";
+    return false;
+  }
+  if (!(gps_min_interval_s_ >= 0.0) || !std::isfinite(gps_min_interval_s_)) {
+    error = "gps_min_interval_s must be non-negative and finite";
     return false;
   }
   const double match_rate_hz = get_parameter("match_rate_hz").as_double();
@@ -382,6 +424,19 @@ bool LocalizationNode::read_parameters(std::string& error) {
     error = "num_threads must be at least 1";
     return false;
   }
+  if (is_mapping()) {
+    if (map_output_dir_.empty()) {
+      error = "map_output_dir is required in mapping mode";
+      return false;
+    }
+    if (!(map_voxel_size_m_ > 0.0) || !std::isfinite(map_voxel_size_m_) ||
+        !(keyframe_cloud_voxel_m_ > 0.0) || !std::isfinite(keyframe_cloud_voxel_m_) ||
+        batch_max_iterations_ < 1 || !(init_travel_m_ > 0.0) || !std::isfinite(init_travel_m_)) {
+      error = "mapping parameters (map_voxel_size_m, keyframe_cloud_voxel_m, "
+              "batch_max_iterations, init_travel_m) must be positive";
+      return false;
+    }
+  }
   return true;
 }
 
@@ -446,15 +501,24 @@ void LocalizationNode::reset_runtime_state() {
   has_gps_antenna_to_base_ = false;
   gps_antenna_in_base_ = Eigen::Vector3d::Zero();
   map_has_no_gps_origin_ = false;
+  mapping_has_gps_origin_ = false;
+  mapping_interrupted_ = false;
+  keyframe_count_at_save_map_.reset();
+  mapping_recording_stopped_note_.clear();
+  has_mapping_activation_time_ = false;
+  mapping_activation_sec_ = 0.0;
+  mapping_reference_odom_.reset();
+  mapping_reference_enu_.reset();
+  latest_mapping_gps_enu_.reset();
   has_wheel_odom_ = false;
   last_odom_to_base_ = Eigen::Isometry3d::Identity();
   alignment_odom_buffer_ = PoseBuffer();
   last_output_.reset();
   last_output_map_to_base_.reset();
-  accepted_gps_status_ = 255;
-  accepted_gps_std_m_ = 0.0F;
-  gps_diagnostics_.clear();
-  last_report_accepted_gps_stamp_sec_ = -1e9;
+  received_gps_status_ = 255;
+  received_gps_std_m_ = 0.0F;
+  last_passed_gps_stamp_sec_.reset();
+  has_diagnostics_publish_time_ = false;
   last_status_state_ = LocalizationState::kInitializing;
   has_status_publish_time_ = false;
   node_error_.clear();
@@ -471,16 +535,20 @@ LocalizationNode::CallbackReturn LocalizationNode::on_configure(
     RCLCPP_ERROR(get_logger(), "invalid parameters: %s", error.c_str());
     return CallbackReturn::FAILURE;
   }
-  if (mode_ == "mapping") {
-    RCLCPP_ERROR(get_logger(), "mode=mapping is not implemented in this release (L3-b)");
-    return CallbackReturn::FAILURE;
-  }
-  if (mode_ != "localization") {
+  if (mode_ != "localization" && mode_ != "mapping") {
     RCLCPP_ERROR(get_logger(), "unsupported mode: %s", mode_.c_str());
     return CallbackReturn::FAILURE;
   }
   reset_runtime_state();
-  if (!load_map_data(error)) {
+  localizer_parameters_.mapping = is_mapping();
+  localizer_parameters_.keyframe_cloud_voxel_m = keyframe_cloud_voxel_m_;
+  if (is_mapping()) {
+    map_points_.clear();
+    map_metadata_ = MapMetadata{};
+    gps_origin_.reset();
+    gps_converter_.reset();
+    map_has_no_gps_origin_ = false;
+  } else if (!load_map_data(error)) {
     RCLCPP_ERROR(get_logger(), "%s", error.c_str());
     return CallbackReturn::FAILURE;
   }
@@ -496,6 +564,8 @@ LocalizationNode::CallbackReturn LocalizationNode::on_configure(
       rclcpp::QoS(1).reliable().transient_local());
   aligned_scan_publisher_ = create_publisher<sensor_msgs::msg::PointCloud2>(
       "/lightnav/localization/aligned_scan", rclcpp::SensorDataQoS());
+  diagnostics_publisher_ = create_publisher<diagnostic_msgs::msg::DiagnosticArray>(
+      "/diagnostics", rclcpp::QoS(10).reliable());
 
   wheel_subscription_ = create_subscription<nav_msgs::msg::Odometry>(
       wheel_odom_topic_, rclcpp::QoS(50).reliable(),
@@ -519,9 +589,19 @@ LocalizationNode::CallbackReturn LocalizationNode::on_configure(
              std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
         handle_reload_map(request, response);
       });
+  save_map_service_ = create_service<std_srvs::srv::Trigger>(
+      "~/save_map",
+      [this](const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+             std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
+        handle_save_map(request, response);
+      });
 
-  RCLCPP_INFO(get_logger(), "configured localization mode with %zu map points from %s",
-              map_points_.size(), map_file_.c_str());
+  if (is_mapping()) {
+    RCLCPP_INFO(get_logger(), "configured mapping mode, output %s", map_output_dir_.c_str());
+  } else {
+    RCLCPP_INFO(get_logger(), "configured localization mode with %zu map points from %s",
+                map_points_.size(), map_file_.c_str());
+  }
   return CallbackReturn::SUCCESS;
 }
 
@@ -530,14 +610,19 @@ LocalizationNode::CallbackReturn LocalizationNode::on_activate(
   odom_publisher_->on_activate();
   status_publisher_->on_activate();
   aligned_scan_publisher_->on_activate();
+  diagnostics_publisher_->on_activate();
   has_status_publish_time_ = false;
   last_status_state_ = LocalizationState::kInitializing;
+  mapping_activation_sec_ = get_clock()->now().seconds();
+  // With use_sim_time the clock may still be 0 at activation. Start the gps_timeout_s wait
+  // only once the clock has a real value.
+  has_mapping_activation_time_ = mapping_activation_sec_ > 0.0;
   watchdog_timer_ = create_wall_timer(
       std::chrono::duration_cast<std::chrono::nanoseconds>(
           std::chrono::duration<double>(kDefaultWatchdogPeriodSec)),
       [this]() { handle_watchdog(); });
   publish_status();
-  RCLCPP_INFO(get_logger(), "localization node active");
+  RCLCPP_INFO(get_logger(), "localization node active in %s mode", mode_.c_str());
   return CallbackReturn::SUCCESS;
 }
 
@@ -550,6 +635,8 @@ LocalizationNode::CallbackReturn LocalizationNode::on_deactivate(
   if (odom_publisher_) odom_publisher_->on_deactivate();
   if (status_publisher_) status_publisher_->on_deactivate();
   if (aligned_scan_publisher_) aligned_scan_publisher_->on_deactivate();
+  if (diagnostics_publisher_) diagnostics_publisher_->on_deactivate();
+  save_mapping_outputs_on_stop("deactivate");
   has_status_publish_time_ = false;
   return CallbackReturn::SUCCESS;
 }
@@ -565,9 +652,11 @@ LocalizationNode::CallbackReturn LocalizationNode::on_cleanup(
   gps_subscription_.reset();
   set_initial_pose_service_.reset();
   reload_map_service_.reset();
+  save_map_service_.reset();
   odom_publisher_.reset();
   status_publisher_.reset();
   aligned_scan_publisher_.reset();
+  diagnostics_publisher_.reset();
   tf_listener_.reset();
   tf_buffer_.reset();
   tf_broadcaster_.reset();
@@ -581,19 +670,25 @@ LocalizationNode::CallbackReturn LocalizationNode::on_cleanup(
 }
 
 LocalizationNode::CallbackReturn LocalizationNode::on_shutdown(
-    const rclcpp_lifecycle::State& /*state*/) {
+    const rclcpp_lifecycle::State& state) {
   if (watchdog_timer_) {
     watchdog_timer_->cancel();
     watchdog_timer_.reset();
   }
+  RCLCPP_INFO(get_logger(), "on_shutdown in %s mode", mode_.c_str());
+  const bool was_active =
+      state.id() == lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE;
+  if (was_active) save_mapping_outputs_on_stop("shutdown");
   odom_publisher_.reset();
   status_publisher_.reset();
   aligned_scan_publisher_.reset();
+  diagnostics_publisher_.reset();
   wheel_subscription_.reset();
   points_subscription_.reset();
   gps_subscription_.reset();
   set_initial_pose_service_.reset();
   reload_map_service_.reset();
+  save_map_service_.reset();
   tf_listener_.reset();
   tf_buffer_.reset();
   tf_broadcaster_.reset();
@@ -680,6 +775,27 @@ bool LocalizationNode::is_usable_initial_fix(const GpsFix& fix) const {
   return gps_converter_->horizontal_std_m(fix) <= init_gps_max_std_m_;
 }
 
+bool LocalizationNode::is_usable_mapping_fix(const GpsFix& fix) const {
+  if (fix.status == GpsFixStatus::kNoFix) return false;
+  if (!std::isfinite(fix.latitude_deg) || !std::isfinite(fix.longitude_deg) ||
+      !std::isfinite(fix.altitude_m) || std::abs(fix.latitude_deg) > 90.0 ||
+      std::abs(fix.longitude_deg) > 180.0) {
+    return false;
+  }
+  if (fix.hdop > localizer_parameters_.gps.max_hdop) return false;
+  double horizontal_std_m = 0.0;
+  if (fix.has_known_covariance && std::isfinite(fix.known_std_m) && fix.known_std_m > 0.0) {
+    horizontal_std_m = fix.known_std_m;
+  } else if (fix.status == GpsFixStatus::kSbasFix) {
+    horizontal_std_m = localizer_parameters_.gps.std_sbas_m;
+  } else if (fix.status == GpsFixStatus::kGbasFix) {
+    horizontal_std_m = localizer_parameters_.gps.std_gbas_m;
+  } else {
+    horizontal_std_m = localizer_parameters_.gps.std_fix_m;
+  }
+  return horizontal_std_m <= init_gps_max_std_m_;
+}
+
 void LocalizationNode::handle_wheel_odom(const nav_msgs::msg::Odometry::SharedPtr message) {
   if (!is_active()) return;
   Eigen::Isometry3d odom_to_base = Eigen::Isometry3d::Identity();
@@ -693,7 +809,15 @@ void LocalizationNode::handle_wheel_odom(const nav_msgs::msg::Odometry::SharedPt
   alignment_odom_buffer_.add(stamp_sec, odom_to_base);
   alignment_odom_buffer_.prune_before(stamp_sec - kWheelBufferSec);
 
-  if (!is_localizer_initialized_) try_start_initialization();
+  if (!is_localizer_initialized_) {
+    if (is_mapping()) {
+      // With GPS the next fix carries the current position; starting between fixes would use a
+      // stale fix as the initial pose. Without GPS the wheel sample is enough.
+      if (!mapping_has_gps_origin_) maybe_start_mapping();
+    } else {
+      try_start_initialization();
+    }
+  }
   if (is_localizer_initialized_) {
     if (!has_localizer_wheel_) {
       has_localizer_wheel_ = true;
@@ -828,10 +952,15 @@ void LocalizationNode::handle_pending_scans() {
     if (!deskewed) continue;  // older than the wheel buffer; it cannot become usable again
 
     if (!is_localizer_initialized_) {
-      add_alignment_scan(*deskewed);
-      if (initial_position_ && !initial_yaw_) maybe_align_initial_yaw();
-      if (!is_localizer_initialized_) try_start_initialization();
-      if (!is_localizer_initialized_) continue;  // consumed by the initial alignment
+      if (is_mapping()) {
+        if (!mapping_has_gps_origin_) maybe_start_mapping();
+        if (!is_localizer_initialized_) continue;
+      } else {
+        add_alignment_scan(*deskewed);
+        if (initial_position_ && !initial_yaw_) maybe_align_initial_yaw();
+        if (!is_localizer_initialized_) try_start_initialization();
+        if (!is_localizer_initialized_) continue;  // consumed by the initial alignment
+      }
     }
     if (!has_localizer_wheel_) {
       remaining.push_back(std::move(scan));
@@ -855,6 +984,46 @@ void LocalizationNode::handle_pending_scans() {
 void LocalizationNode::handle_nav_sat_fix(
     const sensor_msgs::msg::NavSatFix::SharedPtr message) {
   if (!is_active()) return;
+  const GpsFix fix = to_gps_fix(*message);
+  record_received_gps(fix, *message);
+  // D8: a fix below gps_min_status (the single-point solution) is no GNSS observation at all. It
+  // counts as neither a rejection nor a reference for the rate limit below.
+  if (static_cast<int>(fix.status) < gps_min_status_) return;
+  const rclcpp::Time stamp(message->header.stamp, get_clock()->get_clock_type());
+  const double stamp_sec = stamp.seconds();
+
+  if (is_mapping() && !is_localizer_initialized_) {
+    if (!mapping_has_gps_origin_) {
+      if (!is_usable_mapping_fix(fix)) {
+        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                             "waiting for a good GPS fix for the mapping origin");
+        return;
+      }
+      GpsOrigin origin;
+      origin.latitude_deg = fix.latitude_deg;
+      origin.longitude_deg = fix.longitude_deg;
+      origin.altitude_m = fix.altitude_m;
+      gps_origin_ = origin;
+      gps_converter_.emplace(origin, localizer_parameters_.gps);
+      mapping_has_gps_origin_ = true;
+      map_has_no_gps_origin_ = false;
+      if (has_wheel_odom_) mapping_reference_odom_ = last_odom_to_base_;
+      mapping_reference_enu_ = gps_converter_->to_enu(fix);
+      latest_mapping_gps_enu_ = mapping_reference_enu_;
+      node_error_.clear();
+      RCLCPP_INFO(get_logger(), "mapping origin set at lat %.8f, lon %.8f, alt %.3f",
+                  origin.latitude_deg, origin.longitude_deg, origin.altitude_m);
+    } else if (gps_converter_) {
+      if (!is_usable_mapping_fix(fix)) {
+        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                             "ignoring an unusable GPS fix while waiting for the mapping start");
+        return;
+      }
+      latest_mapping_gps_enu_ = gps_converter_->to_enu(fix);
+    }
+    maybe_start_mapping();
+    return;
+  }
   if (!gps_origin_) {
     RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
                          "GPS fix received but the map has no GPS origin; ignoring");
@@ -863,14 +1032,21 @@ void LocalizationNode::handle_nav_sat_fix(
   if (!has_gps_antenna_to_base_) {
     std::string error;
     if (!resolve_gps_extrinsic(error)) {
-      node_error_ = error;
-      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "%s", error.c_str());
-      return;
+      if (is_mapping()) {
+        // Mapping must not depend on an antenna TF that bringup may not provide.
+        RCLCPP_WARN_THROTTLE(
+            get_logger(), *get_clock(), 2000,
+            "GPS antenna TF missing in mapping mode; using a zero lever arm: %s",
+            error.c_str());
+        gps_antenna_in_base_ = Eigen::Vector3d::Zero();
+        has_gps_antenna_to_base_ = true;
+      } else {
+        node_error_ = error;
+        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "%s", error.c_str());
+        return;
+      }
     }
   }
-  const GpsFix fix = to_gps_fix(*message);
-  const rclcpp::Time stamp(message->header.stamp, get_clock()->get_clock_type());
-  const double stamp_sec = stamp.seconds();
 
   if (!is_localizer_initialized_) {
     if (!initial_position_ && is_usable_initial_fix(fix)) {
@@ -884,10 +1060,25 @@ void LocalizationNode::handle_nav_sat_fix(
     return;
   }
 
+  if (!is_gps_due(stamp_sec)) return;
   localizer_->on_gps(stamp_sec, fix);
-  gps_diagnostics_[stamp_sec] = {static_cast<uint8_t>(message->status.status),
-                                 static_cast<float>(gps_converter_->horizontal_std_m(fix))};
-  while (gps_diagnostics_.size() > kMaxGpsDiagnostics) gps_diagnostics_.erase(gps_diagnostics_.begin());
+}
+
+void LocalizationNode::record_received_gps(const GpsFix& fix,
+                                           const sensor_msgs::msg::NavSatFix& message) {
+  received_gps_status_ = static_cast<uint8_t>(message.status.status);
+  received_gps_std_m_ = static_cast<float>(localizer_parameters_.gps.horizontal_std_m(fix));
+}
+
+bool LocalizationNode::is_gps_due(double stamp_sec) {
+  if (last_passed_gps_stamp_sec_) {
+    const double elapsed_s = stamp_sec - *last_passed_gps_stamp_sec_;
+    // A negative step means the clock restarted (bag loop, sim time reset): let it through,
+    // otherwise every later fix would be thinned against a stamp from the future.
+    if (elapsed_s >= 0.0 && elapsed_s < gps_min_interval_s_) return false;
+  }
+  last_passed_gps_stamp_sec_ = stamp_sec;
+  return true;
 }
 
 bool LocalizationNode::try_start_initialization() {
@@ -900,8 +1091,16 @@ bool LocalizationNode::try_start_initialization() {
   if (gps_origin_ && !has_gps_antenna_to_base_) {
     std::string error;
     if (!resolve_gps_extrinsic(error)) {
-      node_error_ = error;
-      return false;
+      if (!is_mapping()) {
+        node_error_ = error;
+        return false;
+      }
+      RCLCPP_WARN_THROTTLE(
+          get_logger(), *get_clock(), 2000,
+          "GPS antenna TF missing in mapping mode; using a zero lever arm: %s",
+          error.c_str());
+      gps_antenna_in_base_ = Eigen::Vector3d::Zero();
+      has_gps_antenna_to_base_ = true;
     }
   }
 
@@ -934,9 +1133,63 @@ bool LocalizationNode::try_start_initialization() {
   last_output_.reset();
   last_output_map_to_base_.reset();
   node_error_.clear();
-  RCLCPP_INFO(get_logger(), "initialized at (%.3f, %.3f, %.3f), yaw %.3f rad", position.x(),
-              position.y(), position.z(), *initial_yaw_);
+  RCLCPP_INFO(get_logger(), "initialized %s at (%.3f, %.3f, %.3f), yaw %.3f rad",
+              mode_.c_str(), position.x(), position.y(), position.z(), *initial_yaw_);
   return true;
+}
+
+void LocalizationNode::maybe_start_mapping() {
+  if (!is_mapping() || is_localizer_initialized_) return;
+  if (!has_wheel_odom_) return;
+  if (!initial_position_) {
+    if (mapping_has_gps_origin_ && gps_converter_ && latest_mapping_gps_enu_) {
+      if (!mapping_reference_odom_ || !mapping_reference_enu_) {
+        mapping_reference_odom_ = last_odom_to_base_;
+        mapping_reference_enu_ = *latest_mapping_gps_enu_;
+        node_error_ = "mapping origin set; waiting for init_travel_m";
+        return;
+      }
+      const Eigen::Isometry3d wheel_delta =
+          invert_isometry(*mapping_reference_odom_) * last_odom_to_base_;
+      const double travel_m = wheel_delta.translation().head<2>().norm();
+      if (travel_m < init_travel_m_) {
+        node_error_ = "mapping: waiting for init_travel_m (" + std::to_string(travel_m) +
+                      " m of " + std::to_string(init_travel_m_) + " m)";
+        return;
+      }
+      const Eigen::Vector3d gps_delta = *latest_mapping_gps_enu_ - *mapping_reference_enu_;
+      if (gps_delta.head<2>().norm() < 0.5 * init_travel_m_) {
+        node_error_ = "mapping: GPS displacement is too small to determine the initial yaw";
+        return;
+      }
+      initial_yaw_ = mapping_initial_yaw(gps_delta, wheel_delta);
+      initial_position_ = *latest_mapping_gps_enu_;
+      initial_position_from_gps_ = true;
+    } else if (!mapping_has_gps_origin_ && allow_mapping_without_gps_) {
+      const double now_sec = get_clock()->now().seconds();
+      if (!has_mapping_activation_time_) {
+        if (!(now_sec > 0.0)) {
+          node_error_ = "mapping: waiting for the clock before starting without GPS";
+          return;
+        }
+        has_mapping_activation_time_ = true;
+        mapping_activation_sec_ = now_sec;
+      }
+      const double waited_sec = now_sec - mapping_activation_sec_;
+      if (waited_sec < localizer_parameters_.state.gps_timeout_s) {
+        node_error_ = "mapping: waiting for gps_timeout_s before starting without GPS";
+        return;
+      }
+      initial_position_ = Eigen::Vector3d::Zero();
+      initial_yaw_ = 0.0;
+      initial_position_from_gps_ = false;
+      map_has_no_gps_origin_ = true;
+    } else {
+      node_error_ = "waiting for a GPS fix for the mapping origin";
+      return;
+    }
+  }
+  try_start_initialization();
 }
 
 void LocalizationNode::handle_set_initial_pose(
@@ -945,6 +1198,11 @@ void LocalizationNode::handle_set_initial_pose(
   if (!is_active()) {
     response->accepted = false;
     response->message = "localization node is not active";
+    return;
+  }
+  if (is_mapping()) {
+    response->accepted = false;
+    response->message = "set_initial_pose is not available in mapping mode";
     return;
   }
   const auto& pose = request->pose.pose.pose;
@@ -996,6 +1254,11 @@ void LocalizationNode::handle_reload_map(
     response->message = "localization node is not active";
     return;
   }
+  if (is_mapping()) {
+    response->success = false;
+    response->message = "reload_map is not available in mapping mode";
+    return;
+  }
   std::string error;
   if (!load_map_data(error)) {
     response->success = false;
@@ -1016,6 +1279,76 @@ void LocalizationNode::handle_reload_map(
   publish_status();
 }
 
+void LocalizationNode::handle_save_map(
+    const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
+    std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
+  if (!is_active()) {
+    response->success = false;
+    response->message = "localization node is not active";
+    return;
+  }
+  std::string message;
+  response->success = save_mapping_outputs(message);
+  response->message = message;
+  if (response->success) stop_mapping_recording_after_save_map();
+}
+
+void LocalizationNode::stop_mapping_recording_after_save_map() {
+  // The saved map is final: later keyframes would not be in it, and the stop-time save is skipped
+  // as long as the keyframe count stays at this value.
+  localizer_->interrupt_mapping();
+  mapping_interrupted_ = true;
+  keyframe_count_at_save_map_ = localizer_->mapping_keyframe_count();
+  mapping_recording_stopped_note_ = "mapping recording stopped after save_map";
+  RCLCPP_INFO(get_logger(), "%s; restart mapping to record more (the saved map is overwritten then)",
+              mapping_recording_stopped_note_.c_str());
+}
+
+void LocalizationNode::save_mapping_outputs_on_stop(const char* phase) {
+  if (!is_mapping() || !localizer_) return;
+  if (keyframe_count_at_save_map_ &&
+      localizer_->mapping_keyframe_count() == *keyframe_count_at_save_map_) {
+    RCLCPP_INFO(get_logger(),
+                "mapping map not saved on %s: save_map already saved it and no keyframe was added since",
+                phase);
+    return;
+  }
+  std::string message;
+  if (save_mapping_outputs(message)) {
+    RCLCPP_INFO(get_logger(), "mapping map saved on %s: %s", phase, message.c_str());
+  } else {
+    RCLCPP_WARN(get_logger(), "mapping map could not be saved on %s: %s", phase, message.c_str());
+  }
+}
+
+bool LocalizationNode::save_mapping_outputs(std::string& message) {
+  if (!is_mapping()) {
+    message = "save_map is only available in mapping mode";
+    return false;
+  }
+  if (!localizer_ || !is_localizer_initialized_) {
+    message = "mapping has not started; no keyframes to save";
+    return false;
+  }
+  MapOutputParameters parameters;
+  parameters.map_output_dir = map_output_dir_;
+  parameters.map_voxel_size_m = map_voxel_size_m_;
+  parameters.batch_max_iterations = batch_max_iterations_;
+  parameters.created = utc_now_iso8601();
+  parameters.has_gps_origin = mapping_has_gps_origin_ && gps_origin_.has_value();
+  if (parameters.has_gps_origin) parameters.gps_origin = *gps_origin_;
+  MapOutputResult result;
+  std::string error;
+  if (!localizer_->save_map(parameters, result, error)) {
+    message = "save_map failed: " + error;
+    return false;
+  }
+  message = "saved " + std::to_string(result.keyframe_count) + " keyframes, " +
+            std::to_string(result.map_point_count) + " map points to " + map_output_dir_;
+  RCLCPP_INFO(get_logger(), "%s", message.c_str());
+  return true;
+}
+
 void LocalizationNode::handle_watchdog() {
   if (!is_active()) return;
   const rclcpp::Time now = get_clock()->now();
@@ -1030,19 +1363,52 @@ void LocalizationNode::handle_watchdog() {
         should_publish || elapsed >= 1.0 / std::max(1e-6, status_rate_hz_);
   }
   if (should_publish) publish_status();
+  publish_diagnostics(now);
 }
 
-void LocalizationNode::update_accepted_gps_diagnostics() {
-  if (!localizer_) return;
-  const double accepted_stamp = localizer_->last_accepted_gps_stamp_sec();
-  if (accepted_stamp >= 0.0 && accepted_stamp != last_report_accepted_gps_stamp_sec_) {
-    const auto found = gps_diagnostics_.find(accepted_stamp);
-    if (found != gps_diagnostics_.end()) {
-      accepted_gps_status_ = found->second.first;
-      accepted_gps_std_m_ = found->second.second;
-    }
-    last_report_accepted_gps_stamp_sec_ = accepted_stamp;
+void LocalizationNode::publish_diagnostics(const rclcpp::Time& now) {
+  if (!diagnostics_publisher_ || !diagnostics_publisher_->is_activated()) return;
+  if (has_diagnostics_publish_time_ &&
+      (now - last_diagnostics_publish_time_).seconds() < kDiagnosticsPeriodSec) {
+    return;
   }
+  const auto make_entry = [](const std::string& key, const std::string& value) {
+    diagnostic_msgs::msg::KeyValue entry;
+    entry.key = key;
+    entry.value = value;
+    return entry;
+  };
+  const bool has_localizer = localizer_ && is_localizer_initialized_;
+  const auto count_text = [has_localizer](const auto& count_of_localizer) {
+    return std::to_string(has_localizer ? count_of_localizer() : std::size_t{0});
+  };
+  const bool is_conflict = last_output_ && last_output_->is_gps_conflict;
+
+  diagnostic_msgs::msg::DiagnosticStatus status;
+  status.name = "localization_node: GNSS";
+  status.level = is_conflict ? diagnostic_msgs::msg::DiagnosticStatus::WARN
+                             : diagnostic_msgs::msg::DiagnosticStatus::OK;
+  status.message = is_conflict ? "GNSS conflicts with the estimate" : "OK";
+  status.values.push_back(make_entry(
+      "gate_rejected_total", count_text([this] { return localizer_->gps_gate_rejection_count(); })));
+  status.values.push_back(make_entry("time_gap_rejected_total", count_text([this] {
+                                       return localizer_->gps_time_gap_rejection_count();
+                                     })));
+  status.values.push_back(make_entry("conflict_window_rejects", count_text([this] {
+                                       return localizer_->gps_conflict_window_reject_count();
+                                     })));
+  status.values.push_back(make_entry(
+      "accepted_total", count_text([this] { return localizer_->accepted_gps_factor_count(); })));
+  status.values.push_back(make_entry("gps_status", std::to_string(received_gps_status_)));
+  status.values.push_back(make_entry("gps_std_m", std::to_string(received_gps_std_m_)));
+  status.values.push_back(make_entry("is_gps_conflict", is_conflict ? "true" : "false"));
+
+  diagnostic_msgs::msg::DiagnosticArray array;
+  array.header.stamp = now;
+  array.status.push_back(std::move(status));
+  diagnostics_publisher_->publish(array);
+  last_diagnostics_publish_time_ = now;
+  has_diagnostics_publish_time_ = true;
 }
 
 std::string LocalizationNode::composed_last_error() const {
@@ -1053,6 +1419,7 @@ std::string LocalizationNode::composed_last_error() const {
     error_message += part;
   };
   if (map_has_no_gps_origin_) append("map has no GPS origin: GPS disabled");
+  append(mapping_recording_stopped_note_);
   if (localizer_) append(localizer_->last_error());
   return error_message;
 }
@@ -1064,20 +1431,25 @@ void LocalizationNode::publish_status() {
   const rclcpp::Time now = get_clock()->now();
   status.header.stamp = now;
   status.header.frame_id = map_frame_;
-  status.mode = Status::MODE_LOCALIZATION;
+  status.mode = is_mapping() ? Status::MODE_MAPPING : Status::MODE_LOCALIZATION;
   status.state = Status::INITIALIZING;
-  status.gps_status = accepted_gps_status_;
-  status.gps_std_m = accepted_gps_std_m_;
+  status.gps_status = received_gps_status_;
+  status.gps_std_m = received_gps_std_m_;
   status.seconds_since_last_match = -1.0F;
   status.position_std_m[0] = 0.0;
   status.position_std_m[1] = 0.0;
   status.position_std_m[2] = 0.0;
 
   if (localizer_ && is_localizer_initialized_) {
-    update_accepted_gps_diagnostics();
     const LocalizationState state = localizer_->poll_state(now.seconds());
     status.state = state_to_message(state);
     last_status_state_ = state;
+    if (is_mapping() && state == LocalizationState::kLost && !mapping_interrupted_) {
+      mapping_interrupted_ = true;
+      node_error_ = "mapping interrupted: localization LOST; the partial map can be saved";
+      if (localizer_) localizer_->interrupt_mapping();
+      RCLCPP_ERROR(get_logger(), "%s", node_error_.c_str());
+    }
     status.last_inlier_ratio = static_cast<float>(localizer_->last_inlier_ratio());
     status.last_lidar_odom_inlier_ratio =
         static_cast<float>(localizer_->last_lidar_odom_inlier_ratio());

@@ -12,6 +12,7 @@
 #include "lightnav_localization/deskew.hpp"
 #include "lightnav_localization/gps_input.hpp"
 #include "lightnav_localization/lidar_odometry.hpp"
+#include "lightnav_localization/map_builder.hpp"
 #include "lightnav_localization/match_information.hpp"
 #include "lightnav_localization/pose_buffer.hpp"
 #include "lightnav_localization/pose_graph.hpp"
@@ -40,6 +41,10 @@ struct LocalizerParameters {
   double map_submap_rebuild_distance_m = 50.0;
   double initial_sigma_xy_m = 0.5;
   double initial_sigma_yaw_rad = 0.1;
+  // Mapping mode: excludes the prior-map factor (empty map already does that), keeps every
+  // keyframe cloud after deskewing and enables the full factor history for the batch save.
+  bool mapping = false;
+  double keyframe_cloud_voxel_m = 0.25;
 };
 
 struct LocalizerOutput {
@@ -99,11 +104,24 @@ class Localizer {
   double last_accepted_gps_stamp_sec() const;
   std::size_t gps_time_gap_rejection_count() const;
   std::size_t gps_gate_rejection_count() const;
+  // Gate rejections among the last `gps_conflict_window` fixes; counts the fixes the gate would
+  // have rejected, including those a trusted fix let through (Issue #43 section 4.3).
+  std::size_t gps_conflict_window_reject_count() const;
   std::size_t max_gps_factors_per_keyframe() const;
   double max_keyframe_interval_sec() const;
   double last_absolute_observation_stamp_sec() const;
   // Test seam: may alter a prior-map match result before the gate (e.g. inject a false convergence).
   void set_map_match_hook(std::function<void(MatchResult&)> hook);
+
+  // Mapping support. Only meaningful when LocalizerParameters::mapping is true.
+  const std::vector<KeyframeCloud>& mapping_keyframes() const;
+  std::size_t mapping_keyframe_count() const;
+  std::size_t accepted_gps_factor_count() const;
+  // Stops keeping new keyframe clouds after a LOST; the retained partial map can still be saved.
+  void interrupt_mapping();
+  // Batch re-optimizes every retained factor and writes map.pcd / map.yaml / trajectory.csv.
+  bool save_map(const MapOutputParameters& parameters, MapOutputResult& result,
+                std::string& error);
 
  private:
   struct Implementation;

@@ -1,4 +1,5 @@
-# Parameters of the nodes started by lightnav_bringup/robot.launch.py. The top-level keys are the node names.
+# Parameters of the nodes started by lightnav_bringup/robot.launch.py and of localization_node (started by
+# lightnav_localization/launch/localization.launch.py with this file as params_file). The top-level keys are the node names.
 # Mounted read-only at /config/robot.yaml by docker/compose.yaml; scripts/deploy.sh stops when the copy on the
 # robot differs from this file, so a value changed on site goes back through a PR.
 #
@@ -19,3 +20,19 @@ controller_node:
     # TENTATIVE: 1.5 is the value of the contract table of Issue #1, not a measured one. Decide it from the width of
     # the real course before the first run on a path (before 1c).
     max_path_deviation_m: 1.5
+
+localization_node:
+  ros__parameters:
+    # GNSS input contract (Issue #43 section 4.3, decisions D1, D8, D10). Mapping and localization use the same topic.
+    gps_topic: /rtk/fix_all
+    # 1 = SBAS (Float) or better. The single-point solution (status 0) is no GNSS observation: it does not
+    # initialise, set the mapping origin or enter the graph, and it is not counted as a rejection.
+    gps_min_status: 1
+    # The receiver publishes 5 Hz; the graph takes at most one fix per second (thinned by header.stamp).
+    gps_min_interval_s: 1.0
+    # With gps_min_status 1 this is reached by a Float fix (sigma 1.0 m from gps_std_m_by_status).
+    init_gps_max_std_m: 1.5
+    # Same directory as the map localization reads: back up /data/map before starting mapping.
+    map_output_dir: /data/map
+    base_frame: base_footprint
+    gps_frame: gnss

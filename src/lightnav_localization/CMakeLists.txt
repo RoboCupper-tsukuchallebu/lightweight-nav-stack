@@ -14,6 +14,7 @@ find_package(GeographicLib REQUIRED)
 
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
+find_package(diagnostic_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
@@ -29,6 +30,8 @@ find_package(Python3 REQUIRED COMPONENTS Development)
 add_library(lightnav_localization_core
   src/pcd_io.cpp
   src/map_metadata.cpp
+  src/map_builder.cpp
+  src/mapping_initialization.cpp
   src/deskew.cpp
   src/downsample.cpp
   src/matcher.cpp
@@ -66,6 +69,7 @@ target_link_libraries(lightnav_localization_node_lib PUBLIC
   tf2::tf2
   tf2_ros::tf2_ros
   tf2_eigen::tf2_eigen
+  diagnostic_msgs::diagnostic_msgs__rosidl_typesupport_cpp
   geometry_msgs::geometry_msgs__rosidl_typesupport_cpp
   nav_msgs::nav_msgs__rosidl_typesupport_cpp
   sensor_msgs::sensor_msgs__rosidl_typesupport_cpp
@@ -85,7 +89,7 @@ install(TARGETS lightnav_localization_core EXPORT export_lightnav_localization
   ARCHIVE DESTINATION lib LIBRARY DESTINATION lib RUNTIME DESTINATION bin)
 ament_export_targets(export_lightnav_localization HAS_LIBRARY_TARGET)
 ament_export_dependencies(Eigen3 GTSAM GeographicLib lightnav_msgs rclcpp rclcpp_lifecycle
-  nav_msgs sensor_msgs geometry_msgs std_msgs std_srvs tf2 tf2_ros tf2_eigen)
+  diagnostic_msgs nav_msgs sensor_msgs geometry_msgs std_msgs std_srvs tf2 tf2_ros tf2_eigen)
 
 if(BUILD_TESTING)
   # Plain GTest (not ament_add_gtest): the vendored gtest source of ament_cmake_gtest does not
@@ -93,7 +97,7 @@ if(BUILD_TESTING)
   find_package(GTest REQUIRED)
   foreach(test_name pcd_io map_metadata pose_buffer deskew matcher performance pose_graph gps_input
                     corrector state_machine lidar_odometry localizer match_information
-                    performance_large initial_alignment point_cloud_extraction)
+                    performance_large initial_alignment point_cloud_extraction mapping)
     add_executable(test_${test_name} test/test_${test_name}.cpp)
     target_link_libraries(test_${test_name} lightnav_localization_core GTest::gtest GTest::gtest_main)
     target_compile_options(test_${test_name} PRIVATE -Wall -Wextra -Werror)
@@ -111,6 +115,10 @@ if(BUILD_TESTING)
 
   find_package(ament_cmake_pytest REQUIRED)
   ament_add_pytest_test(test_pose_adapter_acceptance test/test_pose_adapter_acceptance.py)
+  # localization.launch.py in both modes: activate, then SIGINT through on_shutdown.
+  foreach(launch_test_name localization_launch_localization localization_launch_mapping)
+    ament_add_pytest_test(test_${launch_test_name} test/test_${launch_test_name}.py TIMEOUT 180)
+  endforeach()
 endif()
 
 ament_package()
