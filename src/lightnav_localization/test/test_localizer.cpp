@@ -546,10 +546,11 @@ TEST(Localizer, WheelGapLongerThanTheWindowKeepsTheLidarSubmapPoses) {
   EXPECT_TRUE(report.last_error.empty()) << report.last_error;
   const std::vector<Eigen::Isometry3d>& poses = report.lidar_keyframe_poses;
   ASSERT_GE(poses.size(), 3u);
-  // The robot drives along +x at kSpeed: successive keyframes are at least 0.3 m further on and
-  // none is more than 10 keyframe-seconds (6 m) behind the robot.
+  // The robot drives along +x at kSpeed: successive keyframes are at least 0.3 m further on, and none
+  // is further behind the robot than 10 keyframe-seconds (6 m) plus a 1 m margin.
+  constexpr double kMaxDistanceBehindRobotM = 6.0 + 1.0;
   for (std::size_t index = 0; index < poses.size(); ++index) {
-    EXPECT_LE((poses[index].translation() - report.final_truth.translation()).norm(), 6.0 + 1.0)
+    EXPECT_LE((poses[index].translation() - report.final_truth.translation()).norm(), kMaxDistanceBehindRobotM)
         << "keyframe " << index;
     if (index == 0) continue;
     EXPECT_GT(poses[index].translation().x() - poses[index - 1].translation().x(), 0.3)

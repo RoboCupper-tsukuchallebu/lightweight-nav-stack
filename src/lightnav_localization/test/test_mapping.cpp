@@ -79,7 +79,11 @@ struct Course {
 
 const Course kKCourse{{20.0, 20.0}, {1.0}};
 const Course kSpecCourse{{70.0, 60.0, 70.0}, {1.0, -1.0}};
-// 80 m: leaves room for a 60 s hole in the input (36 m) with the corner after it.
+// 80 m: leaves room for a 60 s hole in the input (36 m); the corner is at 83 s, after the point (75 s)
+// where the sub-map is inspected.
+// Time after a gap at which the sub-map is inspected, while keyframes from before the fix would still
+// be in it (later they roll out of the sub-map and the stacking is no longer visible).
+constexpr double kSecondsToObserveAfterGap = 5.0;
 const Course kGapCourse{{50.0, 30.0}, {1.0}};
 const Course kLoopCourse{{40.0, 40.0, 40.0, 40.0}, {1.0, 1.0, 1.0, 1.0}};
 
@@ -138,6 +142,8 @@ struct MappingRun {
   bool online_moved_after_failure = false;
   std::string last_error;
   std::vector<std::pair<double, Eigen::Isometry3d>> online_poses;
+  // Sub-map keyframes a few seconds after the input gap (empty without a gap).
+  std::vector<Eigen::Isometry3d> lidar_keyframe_poses_after_gap;
 };
 
 MappingRun run_mapping(const Course& course, bool has_pillars,
@@ -209,6 +215,10 @@ MappingRun run_mapping(const Course& course, bool has_pillars,
       localizer.inject_optimization_failure_for_test();
     }
     const auto output = localizer.on_wheel_odom(time_sec, odom);
+    if (wheel_gap_end_sec >= 0.0 && time_sec >= wheel_gap_end_sec + kSecondsToObserveAfterGap &&
+        result.lidar_keyframe_poses_after_gap.empty()) {
+      result.lidar_keyframe_poses_after_gap = localizer.lidar_keyframe_poses_for_test();
+    }
     if (output) {
       result.online_poses.push_back({time_sec, output->map_to_base});
       if (fail_optimization_at_sec >= 0.0 && time_sec > fail_optimization_at_sec + 1.0) {
@@ -546,10 +556,10 @@ TEST(MapBuilder, K2_SpecCourseSigma1p0) {
 }
 
 // Issue #45: a wheel-odometry gap (60 s) longer than the 30 s window must neither keep an unknown-node
-// error nor smear the map: mapping continues after the gap and the no keyframe is placed off the corridor.
+// error nor smear the map: mapping continues after the gap and the sub-map keyframes are not stacked on one pose.
 TEST(MapBuilder, MappingContinuesAfterWheelGapLongerThanTheWindow) {
-  constexpr double kGapBeginSec = 20.0;
-  constexpr double kGapEndSec = 80.0;
+  constexpr double kGapBeginSec = 10.0;
+  constexpr double kGapEndSec = 70.0;
   const std::string output_directory = unique_directory("wheel_gap");
   const MappingRun mapping = run_mapping(kGapCourse, false, -1.0, -1.0, true, 1.01, 0.2,
                                          output_directory, -1.0, kGapBeginSec, kGapEndSec);
@@ -559,7 +569,7 @@ TEST(MapBuilder, MappingContinuesAfterWheelGapLongerThanTheWindow) {
   for (const CsvRow& row : mapping.trajectory) {
     if (row.stamp_sec > kGapEndSec) ++keyframes_after_gap;
   }
-  EXPECT_GE(keyframes_after_gap, 30u);  // about 1 keyframe/s for the 57 s after the gap
+  EXPECT_GE(keyframes_after_gap, 30u);  // about 1 keyframe/s for the 63 s after the gap
   const ErrorSummary after_gap = summarize_error_in_window(
       kGapCourse, mapping.trajectory, kGapEndSec, kGapCourse.total_sec());
   const double outside_ratio = straight_leg_points_outside_walls_ratio(mapping.map_points);
@@ -567,6 +577,14 @@ TEST(MapBuilder, MappingContinuesAfterWheelGapLongerThanTheWindow) {
               keyframes_after_gap, after_gap.maximum, outside_ratio);
   EXPECT_LT(after_gap.maximum, 0.5);
   EXPECT_LT(outside_ratio, 0.01);
+  // The GPS and the match gate keep a stacked keyframe out of the saved map, so the map check above
+  // alone would also pass without the fix; the sub-map keyframe poses just after the gap show the stacking.
+  ASSERT_GE(mapping.lidar_keyframe_poses_after_gap.size(), 3u);
+  for (std::size_t index = 1; index < mapping.lidar_keyframe_poses_after_gap.size(); ++index) {
+    const double spacing_m = (mapping.lidar_keyframe_poses_after_gap[index].translation() -
+                              mapping.lidar_keyframe_poses_after_gap[index - 1].translation()).norm();
+    EXPECT_GT(spacing_m, 0.3) << "sub-map keyframe " << index << " is stacked on its predecessor";
+  }
 }
 
 TEST(MapBuilder, MappingSaveSurvivesOptimizationFailure) {
