@@ -652,6 +652,7 @@ LocalizationNode::CallbackReturn LocalizationNode::on_shutdown(
     watchdog_timer_->cancel();
     watchdog_timer_.reset();
   }
+  RCLCPP_INFO(get_logger(), "on_shutdown in %s mode", mode_.c_str());
   const bool was_active =
       state.id() == lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE;
   if (was_active) save_mapping_outputs_on_stop("shutdown");
