@@ -13,6 +13,8 @@
 #include <vector>
 
 #include <Eigen/Core>
+#include <diagnostic_msgs/msg/diagnostic_status.hpp>
+#include <diagnostic_msgs/msg/key_value.hpp>
 #include <geometry_msgs/msg/pose.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <lifecycle_msgs/msg/state.hpp>
@@ -31,7 +33,9 @@ namespace {
 constexpr double kNeverSec = -1e9;
 constexpr double kWheelBufferSec = 3.0;
 constexpr double kDefaultWatchdogPeriodSec = 0.02;
-constexpr std::size_t kMaxGpsDiagnostics = 100;
+constexpr double kDiagnosticsPeriodSec = 1.0;
+constexpr int kLowestNavSatStatus = -1;   // STATUS_NO_FIX
+constexpr int kHighestNavSatStatus = 2;   // STATUS_GBAS_FIX
 constexpr std::size_t kMaxPendingScans = 20;
 
 std::string utc_now_iso8601() {
@@ -149,6 +153,10 @@ void LocalizationNode::declare_parameters() {
   declare_parameter<double>("status_rate_hz", 2.0);
   declare_parameter<int>("num_threads", 4);
   declare_parameter<double>("init_gps_max_std_m", 3.0);
+  // GNSS input contract (Issue #43 section 4.3): drop fixes below this NavSatStatus (-1 keeps all) and
+  // thin the rest to one per gps_min_interval_s (0 keeps all) before they reach the Localizer.
+  declare_parameter<int>("gps_min_status", kLowestNavSatStatus);
+  declare_parameter<double>("gps_min_interval_s", 0.0);
   declare_parameter<int>("init_scan_count", 3);
   declare_parameter<double>("init_yaw_step_deg", 15.0);
   declare_parameter<double>("init_coarse_corr_m", 2.0);
@@ -231,6 +239,8 @@ bool LocalizationNode::read_parameters(std::string& error) {
   status_rate_hz_ = get_parameter("status_rate_hz").as_double();
   num_threads_ = static_cast<int>(get_parameter("num_threads").as_int());
   init_gps_max_std_m_ = get_parameter("init_gps_max_std_m").as_double();
+  gps_min_status_ = static_cast<int>(get_parameter("gps_min_status").as_int());
+  gps_min_interval_s_ = get_parameter("gps_min_interval_s").as_double();
   alignment_parameters_.scan_count = static_cast<int>(get_parameter("init_scan_count").as_int());
   alignment_parameters_.yaw_step_deg = get_parameter("init_yaw_step_deg").as_double();
   alignment_parameters_.coarse_correspondence_m = get_parameter("init_coarse_corr_m").as_double();
@@ -257,6 +267,14 @@ bool LocalizationNode::read_parameters(std::string& error) {
       !(alignment_parameters_.fine_correspondence_m > 0.0) ||
       !(alignment_parameters_.inlier_ratio_min > 0.0) || !(init_gps_max_std_m_ > 0.0)) {
     error = "initial alignment parameters must be positive";
+    return false;
+  }
+  if (gps_min_status_ < kLowestNavSatStatus || gps_min_status_ > kHighestNavSatStatus) {
+    error = "gps_min_status must be between -1 (NO_FIX) and 2 (GBAS_FIX)";
+    return false;
+  }
+  if (!(gps_min_interval_s_ >= 0.0) || !std::isfinite(gps_min_interval_s_)) {
+    error = "gps_min_interval_s must be non-negative and finite";
     return false;
   }
   const double match_rate_hz = get_parameter("match_rate_hz").as_double();
@@ -497,10 +515,10 @@ void LocalizationNode::reset_runtime_state() {
   alignment_odom_buffer_ = PoseBuffer();
   last_output_.reset();
   last_output_map_to_base_.reset();
-  accepted_gps_status_ = 255;
-  accepted_gps_std_m_ = 0.0F;
-  gps_diagnostics_.clear();
-  last_report_accepted_gps_stamp_sec_ = -1e9;
+  received_gps_status_ = 255;
+  received_gps_std_m_ = 0.0F;
+  last_passed_gps_stamp_sec_.reset();
+  has_diagnostics_publish_time_ = false;
   last_status_state_ = LocalizationState::kInitializing;
   has_status_publish_time_ = false;
   node_error_.clear();
@@ -546,6 +564,8 @@ LocalizationNode::CallbackReturn LocalizationNode::on_configure(
       rclcpp::QoS(1).reliable().transient_local());
   aligned_scan_publisher_ = create_publisher<sensor_msgs::msg::PointCloud2>(
       "/lightnav/localization/aligned_scan", rclcpp::SensorDataQoS());
+  diagnostics_publisher_ = create_publisher<diagnostic_msgs::msg::DiagnosticArray>(
+      "/diagnostics", rclcpp::QoS(10).reliable());
 
   wheel_subscription_ = create_subscription<nav_msgs::msg::Odometry>(
       wheel_odom_topic_, rclcpp::QoS(50).reliable(),
@@ -590,6 +610,7 @@ LocalizationNode::CallbackReturn LocalizationNode::on_activate(
   odom_publisher_->on_activate();
   status_publisher_->on_activate();
   aligned_scan_publisher_->on_activate();
+  diagnostics_publisher_->on_activate();
   has_status_publish_time_ = false;
   last_status_state_ = LocalizationState::kInitializing;
   mapping_activation_sec_ = get_clock()->now().seconds();
@@ -614,6 +635,7 @@ LocalizationNode::CallbackReturn LocalizationNode::on_deactivate(
   if (odom_publisher_) odom_publisher_->on_deactivate();
   if (status_publisher_) status_publisher_->on_deactivate();
   if (aligned_scan_publisher_) aligned_scan_publisher_->on_deactivate();
+  if (diagnostics_publisher_) diagnostics_publisher_->on_deactivate();
   save_mapping_outputs_on_stop("deactivate");
   has_status_publish_time_ = false;
   return CallbackReturn::SUCCESS;
@@ -634,6 +656,7 @@ LocalizationNode::CallbackReturn LocalizationNode::on_cleanup(
   odom_publisher_.reset();
   status_publisher_.reset();
   aligned_scan_publisher_.reset();
+  diagnostics_publisher_.reset();
   tf_listener_.reset();
   tf_buffer_.reset();
   tf_broadcaster_.reset();
@@ -659,6 +682,7 @@ LocalizationNode::CallbackReturn LocalizationNode::on_shutdown(
   odom_publisher_.reset();
   status_publisher_.reset();
   aligned_scan_publisher_.reset();
+  diagnostics_publisher_.reset();
   wheel_subscription_.reset();
   points_subscription_.reset();
   gps_subscription_.reset();
@@ -961,6 +985,10 @@ void LocalizationNode::handle_nav_sat_fix(
     const sensor_msgs::msg::NavSatFix::SharedPtr message) {
   if (!is_active()) return;
   const GpsFix fix = to_gps_fix(*message);
+  record_received_gps(fix, *message);
+  // D8: a fix below gps_min_status (the single-point solution) is no GNSS observation at all. It
+  // counts as neither a rejection nor a reference for the rate limit below.
+  if (static_cast<int>(fix.status) < gps_min_status_) return;
   const rclcpp::Time stamp(message->header.stamp, get_clock()->get_clock_type());
   const double stamp_sec = stamp.seconds();
 
@@ -1032,10 +1060,25 @@ void LocalizationNode::handle_nav_sat_fix(
     return;
   }
 
+  if (!is_gps_due(stamp_sec)) return;
   localizer_->on_gps(stamp_sec, fix);
-  gps_diagnostics_[stamp_sec] = {static_cast<uint8_t>(message->status.status),
-                                 static_cast<float>(gps_converter_->horizontal_std_m(fix))};
-  while (gps_diagnostics_.size() > kMaxGpsDiagnostics) gps_diagnostics_.erase(gps_diagnostics_.begin());
+}
+
+void LocalizationNode::record_received_gps(const GpsFix& fix,
+                                           const sensor_msgs::msg::NavSatFix& message) {
+  received_gps_status_ = static_cast<uint8_t>(message.status.status);
+  received_gps_std_m_ = static_cast<float>(localizer_parameters_.gps.horizontal_std_m(fix));
+}
+
+bool LocalizationNode::is_gps_due(double stamp_sec) {
+  if (last_passed_gps_stamp_sec_) {
+    const double elapsed_s = stamp_sec - *last_passed_gps_stamp_sec_;
+    // A negative step means the clock restarted (bag loop, sim time reset): let it through,
+    // otherwise every later fix would be thinned against a stamp from the future.
+    if (elapsed_s >= 0.0 && elapsed_s < gps_min_interval_s_) return false;
+  }
+  last_passed_gps_stamp_sec_ = stamp_sec;
+  return true;
 }
 
 bool LocalizationNode::try_start_initialization() {
@@ -1320,19 +1363,52 @@ void LocalizationNode::handle_watchdog() {
         should_publish || elapsed >= 1.0 / std::max(1e-6, status_rate_hz_);
   }
   if (should_publish) publish_status();
+  publish_diagnostics(now);
 }
 
-void LocalizationNode::update_accepted_gps_diagnostics() {
-  if (!localizer_) return;
-  const double accepted_stamp = localizer_->last_accepted_gps_stamp_sec();
-  if (accepted_stamp >= 0.0 && accepted_stamp != last_report_accepted_gps_stamp_sec_) {
-    const auto found = gps_diagnostics_.find(accepted_stamp);
-    if (found != gps_diagnostics_.end()) {
-      accepted_gps_status_ = found->second.first;
-      accepted_gps_std_m_ = found->second.second;
-    }
-    last_report_accepted_gps_stamp_sec_ = accepted_stamp;
+void LocalizationNode::publish_diagnostics(const rclcpp::Time& now) {
+  if (!diagnostics_publisher_ || !diagnostics_publisher_->is_activated()) return;
+  if (has_diagnostics_publish_time_ &&
+      (now - last_diagnostics_publish_time_).seconds() < kDiagnosticsPeriodSec) {
+    return;
   }
+  const auto make_entry = [](const std::string& key, const std::string& value) {
+    diagnostic_msgs::msg::KeyValue entry;
+    entry.key = key;
+    entry.value = value;
+    return entry;
+  };
+  const bool has_localizer = localizer_ && is_localizer_initialized_;
+  const auto count_text = [has_localizer](const auto& count_of_localizer) {
+    return std::to_string(has_localizer ? count_of_localizer() : std::size_t{0});
+  };
+  const bool is_conflict = last_output_ && last_output_->is_gps_conflict;
+
+  diagnostic_msgs::msg::DiagnosticStatus status;
+  status.name = "localization_node: GNSS";
+  status.level = is_conflict ? diagnostic_msgs::msg::DiagnosticStatus::WARN
+                             : diagnostic_msgs::msg::DiagnosticStatus::OK;
+  status.message = is_conflict ? "GNSS conflicts with the estimate" : "OK";
+  status.values.push_back(make_entry(
+      "gate_rejected_total", count_text([this] { return localizer_->gps_gate_rejection_count(); })));
+  status.values.push_back(make_entry("time_gap_rejected_total", count_text([this] {
+                                       return localizer_->gps_time_gap_rejection_count();
+                                     })));
+  status.values.push_back(make_entry("conflict_window_rejects", count_text([this] {
+                                       return localizer_->gps_conflict_window_reject_count();
+                                     })));
+  status.values.push_back(make_entry(
+      "accepted_total", count_text([this] { return localizer_->accepted_gps_factor_count(); })));
+  status.values.push_back(make_entry("gps_status", std::to_string(received_gps_status_)));
+  status.values.push_back(make_entry("gps_std_m", std::to_string(received_gps_std_m_)));
+  status.values.push_back(make_entry("is_gps_conflict", is_conflict ? "true" : "false"));
+
+  diagnostic_msgs::msg::DiagnosticArray array;
+  array.header.stamp = now;
+  array.status.push_back(std::move(status));
+  diagnostics_publisher_->publish(array);
+  last_diagnostics_publish_time_ = now;
+  has_diagnostics_publish_time_ = true;
 }
 
 std::string LocalizationNode::composed_last_error() const {
@@ -1357,15 +1433,14 @@ void LocalizationNode::publish_status() {
   status.header.frame_id = map_frame_;
   status.mode = is_mapping() ? Status::MODE_MAPPING : Status::MODE_LOCALIZATION;
   status.state = Status::INITIALIZING;
-  status.gps_status = accepted_gps_status_;
-  status.gps_std_m = accepted_gps_std_m_;
+  status.gps_status = received_gps_status_;
+  status.gps_std_m = received_gps_std_m_;
   status.seconds_since_last_match = -1.0F;
   status.position_std_m[0] = 0.0;
   status.position_std_m[1] = 0.0;
   status.position_std_m[2] = 0.0;
 
   if (localizer_ && is_localizer_initialized_) {
-    update_accepted_gps_diagnostics();
     const LocalizationState state = localizer_->poll_state(now.seconds());
     status.state = state_to_message(state);
     last_status_state_ = state;

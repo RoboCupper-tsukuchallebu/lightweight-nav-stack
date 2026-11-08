@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include <diagnostic_msgs/msg/diagnostic_array.hpp>
 #include <lightnav_msgs/msg/localization_status.hpp>
 #include <lightnav_msgs/srv/set_initial_pose.hpp>
 #include <nav_msgs/msg/odometry.hpp>
@@ -82,6 +83,10 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
   GpsFix to_gps_fix(const sensor_msgs::msg::NavSatFix& message) const;
   bool is_usable_initial_fix(const GpsFix& fix) const;
   bool is_usable_mapping_fix(const GpsFix& fix) const;
+  // Remembers the status and sigma of the newest fix before gps_min_status can drop it.
+  void record_received_gps(const GpsFix& fix, const sensor_msgs::msg::NavSatFix& message);
+  // gps_min_interval_s: true when this fix may go to the Localizer (and then becomes the reference).
+  bool is_gps_due(double stamp_sec);
 
   struct PendingScan {
     builtin_interfaces::msg::Time stamp;
@@ -95,7 +100,7 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
                       const Eigen::Isometry3d& odom_to_base);
   void publish_status();
   void publish_aligned_scan(const PointList& points_in_base, const rclcpp::Time& stamp);
-  void update_accepted_gps_diagnostics();
+  void publish_diagnostics(const rclcpp::Time& now);
   std::string composed_last_error() const;
 
   // Parameters.
@@ -118,6 +123,8 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
   bool publish_tf_ = true;
   double status_rate_hz_ = 2.0;
   double init_gps_max_std_m_ = 3.0;
+  int gps_min_status_ = -1;  // NavSatStatus value; fixes below it never reach the Localizer
+  double gps_min_interval_s_ = 0.0;
   int num_threads_ = 4;
   LocalizerParameters localizer_parameters_;
   InitialAlignmentParameters alignment_parameters_;
@@ -172,10 +179,11 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
 
   // Diagnostics.
   std::string node_error_;
-  uint8_t accepted_gps_status_ = 255;
-  float accepted_gps_std_m_ = 0.0F;
-  std::map<double, std::pair<uint8_t, float>> gps_diagnostics_;
-  double last_report_accepted_gps_stamp_sec_ = -1e9;
+  uint8_t received_gps_status_ = 255;  // NavSatStatus of the newest fix (-1 -> 255)
+  float received_gps_std_m_ = 0.0F;
+  std::optional<double> last_passed_gps_stamp_sec_;
+  rclcpp::Time last_diagnostics_publish_time_;
+  bool has_diagnostics_publish_time_ = false;
   LocalizationState last_status_state_ = LocalizationState::kInitializing;
   rclcpp::Time last_status_publish_time_;
   bool has_status_publish_time_ = false;
@@ -186,6 +194,8 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
       status_publisher_;
   rclcpp_lifecycle::LifecyclePublisher<sensor_msgs::msg::PointCloud2>::SharedPtr
       aligned_scan_publisher_;
+  rclcpp_lifecycle::LifecyclePublisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr
+      diagnostics_publisher_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr wheel_subscription_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr points_subscription_;
   rclcpp::Subscription<sensor_msgs::msg::NavSatFix>::SharedPtr gps_subscription_;

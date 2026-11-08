@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <future>
 #include <fstream>
 #include <limits>
@@ -17,6 +18,7 @@
 #include <utility>
 #include <vector>
 
+#include <diagnostic_msgs/msg/diagnostic_array.hpp>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <lifecycle_msgs/msg/state.hpp>
@@ -143,6 +145,15 @@ class LocalizationNodeTest : public ::testing::Test {
           last_status_ = *message;
           ++status_count_;
         });
+    diagnostics_subscription_ = helper_->create_subscription<diagnostic_msgs::msg::DiagnosticArray>(
+        "/diagnostics", rclcpp::QoS(10).reliable(),
+        [this](diagnostic_msgs::msg::DiagnosticArray::SharedPtr message) {
+          for (const auto& status : message->status) {
+            if (status.name != "localization_node: GNSS") continue;
+            last_gnss_diagnostics_level_ = status.level;
+            for (const auto& entry : status.values) last_gnss_diagnostics_[entry.key] = entry.value;
+          }
+        });
     set_initial_pose_client_ =
         helper_->create_client<SetInitialPose>("/localization_node/set_initial_pose");
     save_map_client_ =
@@ -164,6 +175,7 @@ class LocalizationNodeTest : public ::testing::Test {
     set_initial_pose_client_.reset();
     save_map_client_.reset();
     status_subscription_.reset();
+    diagnostics_subscription_.reset();
     odom_subscription_.reset();
     gps_publisher_.reset();
     points_publisher_.reset();
@@ -455,6 +467,98 @@ class LocalizationNodeTest : public ::testing::Test {
     return condition();
   }
 
+  rclcpp::NodeOptions make_gnss_options(int min_status, double min_interval_s) const {
+    rclcpp::NodeOptions options = make_options(map_file_.string(), map_yaml_.string());
+    options.append_parameter_override("gps_min_status", min_status);
+    options.append_parameter_override("gps_min_interval_s", min_interval_s);
+    return options;
+  }
+
+  // A fix at the truth antenna position moved by the offset, as the RTK receiver publishes it:
+  // DIAGONAL_KNOWN, which the node ignores in favour of the status table (decision D2).
+  sensor_msgs::msg::NavSatFix make_gnss_fix(const rclcpp::Time& stamp, int8_t status,
+                                            double east_offset_m) const {
+    Eigen::Isometry3d base_pose = Eigen::Isometry3d::Identity();
+    base_pose.translation() = kTruthPosition;
+    base_pose.linear() =
+        Eigen::AngleAxisd(kTruthYaw, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+    const Eigen::Vector3d antenna_position = base_pose * kGpsLeverArm;
+    const double east = antenna_position.x() + east_offset_m;
+    sensor_msgs::msg::NavSatFix message;
+    message.header.stamp = stamp;
+    message.header.frame_id = "gnss";
+    message.status.status = status;
+    message.latitude = kOrigin.latitude_deg + antenna_position.y() / kMetersPerDegreeLatitude;
+    message.longitude = kOrigin.longitude_deg +
+                        east / (kMetersPerDegreeLatitude *
+                                std::cos(kOrigin.latitude_deg * M_PI / 180.0));
+    message.altitude = kOrigin.altitude_m + antenna_position.z();
+    message.position_covariance_type =
+        sensor_msgs::msg::NavSatFix::COVARIANCE_TYPE_DIAGONAL_KNOWN;
+    message.position_covariance[0] = 0.0004;
+    message.position_covariance[4] = 0.0004;
+    message.position_covariance[8] = 0.0016;
+    return message;
+  }
+
+  // Wheel and scans at the truth pose for `duration`, plus one fix every `fix_period`.
+  void run_with_fixes(std::chrono::milliseconds duration, std::chrono::milliseconds fix_period,
+                      int8_t status, double east_offset_m) {
+    const auto end = std::chrono::steady_clock::now() + duration;
+    auto next_wheel = std::chrono::steady_clock::now();
+    auto next_scan = next_wheel;
+    auto next_fix = next_wheel;
+    while (std::chrono::steady_clock::now() < end) {
+      const auto now = std::chrono::steady_clock::now();
+      const rclcpp::Time stamp = node_->get_clock()->now();
+      if (now >= next_wheel) {
+        publish_wheel(stamp);
+        while (next_wheel <= now) next_wheel += 20ms;
+      }
+      if (now >= next_scan) {
+        publish_scan(stamp);
+        while (next_scan <= now) next_scan += 100ms;
+      }
+      if (now >= next_fix) {
+        gps_publisher_->publish(make_gnss_fix(stamp, status, east_offset_m));
+        ++published_fix_count_;
+        while (next_fix <= now) next_fix += fix_period;
+      }
+      executor_.spin_some(5ms);
+    }
+  }
+
+  // set_initial_pose at the truth, then TRACKING with odom flowing.
+  void start_tracking_at_truth() {
+    run_for(600ms, kInputWheel | kInputScans);
+    auto request = std::make_shared<SetInitialPose::Request>();
+    request->pose.header.frame_id = "map";
+    request->pose.pose.pose.position.x = kTruthPosition.x();
+    request->pose.pose.pose.position.y = kTruthPosition.y();
+    request->pose.pose.pose.position.z = kTruthPosition.z();
+    request->pose.pose.pose.orientation = quaternion_from_yaw(kTruthYaw);
+    request->pose.pose.covariance[35] = 0.0;  // yaw is specified
+    auto future = set_initial_pose_client_->async_send_request(request);
+    ASSERT_TRUE(run_until(
+        [&future]() { return future.wait_for(0ms) == std::future_status::ready; }, 3000ms,
+        kInputWheel | kInputScans));
+    ASSERT_TRUE(future.get()->accepted);
+    ASSERT_TRUE(run_until(
+        [this]() { return last_status_.state == LocalizationStatus::TRACKING && odom_count_ > 0; },
+        10000ms, kInputWheel | kInputScans));
+  }
+
+  // The value of a key of the latest GNSS /diagnostics (published at 1 Hz); -1 while absent.
+  int gnss_diagnostics_value(const std::string& key) const {
+    const auto found = last_gnss_diagnostics_.find(key);
+    return found == last_gnss_diagnostics_.end() ? -1 : std::stoi(found->second);
+  }
+
+  bool wait_for_gnss_diagnostics(const std::function<bool()>& condition,
+                                 std::chrono::milliseconds timeout = 3000ms) {
+    return run_until(condition, timeout, kInputWheel | kInputScans);
+  }
+
   std::shared_ptr<std_srvs::srv::Trigger::Response> call_save_map() {
     auto future =
         save_map_client_->async_send_request(std::make_shared<std_srvs::srv::Trigger::Request>());
@@ -516,11 +620,15 @@ class LocalizationNodeTest : public ::testing::Test {
   rclcpp::Publisher<sensor_msgs::msg::NavSatFix>::SharedPtr gps_publisher_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_subscription_;
   rclcpp::Subscription<LocalizationStatus>::SharedPtr status_subscription_;
+  rclcpp::Subscription<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr diagnostics_subscription_;
   rclcpp::Client<SetInitialPose>::SharedPtr set_initial_pose_client_;
   rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr save_map_client_;
   std::unique_ptr<tf2_ros::StaticTransformBroadcaster> static_broadcaster_;
   nav_msgs::msg::Odometry last_odom_;
   LocalizationStatus last_status_;
+  std::map<std::string, std::string> last_gnss_diagnostics_;
+  uint8_t last_gnss_diagnostics_level_ = 255;
+  int published_fix_count_ = 0;
   std::set<int64_t> published_wheel_stamps_;
   int odom_count_ = 0;
   int status_count_ = 0;
@@ -846,4 +954,107 @@ TEST_F(LocalizationNodeTest, SetInitialPoseWithYawTracks) {
               std::chrono::duration<double>(std::chrono::steady_clock::now() - service_start)
                   .count(),
               position_error.norm());
+}
+
+TEST_F(LocalizationNodeTest, ConfigureFailsWithInvalidGnssInputParameters) {
+  create_node(make_gnss_options(3, 0.0));
+  EXPECT_EQ(node_->configure().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED);
+  close_node();
+  create_node(make_gnss_options(-1, -0.5));
+  EXPECT_EQ(node_->configure().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED);
+}
+
+TEST_F(LocalizationNodeTest, DiagnosticsCountAcceptedGateAndTimeGapFixes) {
+  create_node(make_gnss_options(-1, 0.0));
+  bring_up();
+  start_tracking_at_truth();
+
+  // The Localizer drops a fix older than its 3 s wheel buffer without counting it, so the fix must
+  // lie inside the buffer and still be more than gps_keyframe_max_gap_s (1.2 s) before the first
+  // keyframe, which was added when tracking started a moment ago.
+  const rclcpp::Time stale = node_->get_clock()->now() - rclcpp::Duration::from_seconds(2.5);
+  gps_publisher_->publish(make_gnss_fix(stale, 1, 0.0));
+  ASSERT_TRUE(wait_for_gnss_diagnostics(
+      [this]() { return gnss_diagnostics_value("time_gap_rejected_total") >= 1; }))
+      << "time_gap_rejected_total=" << gnss_diagnostics_value("time_gap_rejected_total");
+  EXPECT_EQ(gnss_diagnostics_value("accepted_total"), 0);
+  EXPECT_EQ(gnss_diagnostics_value("gate_rejected_total"), 0);
+
+  gps_publisher_->publish(make_gnss_fix(node_->get_clock()->now(), 2, 0.0));
+  ASSERT_TRUE(wait_for_gnss_diagnostics([this]() { return gnss_diagnostics_value("accepted_total") >= 1; }))
+      << "accepted_total=" << gnss_diagnostics_value("accepted_total");
+  EXPECT_EQ(gnss_diagnostics_value("gate_rejected_total"), 0);
+  EXPECT_EQ(gnss_diagnostics_value("gps_status"), 2);
+  EXPECT_TRUE(wait_for_gnss_diagnostics([this]() { return last_status_.gps_status == 2; }));
+
+  const int accepted_before = gnss_diagnostics_value("accepted_total");
+  gps_publisher_->publish(make_gnss_fix(node_->get_clock()->now(), 1, 30.0));  // 30 m off: gate
+  ASSERT_TRUE(wait_for_gnss_diagnostics(
+      [this]() { return gnss_diagnostics_value("gate_rejected_total") >= 1; }))
+      << "gate_rejected_total=" << gnss_diagnostics_value("gate_rejected_total");
+  EXPECT_EQ(gnss_diagnostics_value("accepted_total"), accepted_before);
+  EXPECT_GE(gnss_diagnostics_value("conflict_window_rejects"), 1);
+  EXPECT_EQ(gnss_diagnostics_value("time_gap_rejected_total"), 1);
+  EXPECT_EQ(gnss_diagnostics_value("gps_status"), 1);
+  std::printf("[ GNSS_DIAG ] accepted=%d gate=%d time_gap=%d window=%d\n",
+              gnss_diagnostics_value("accepted_total"), gnss_diagnostics_value("gate_rejected_total"),
+              gnss_diagnostics_value("time_gap_rejected_total"),
+              gnss_diagnostics_value("conflict_window_rejects"));
+}
+
+TEST_F(LocalizationNodeTest, GpsMinIntervalLimitsFixesReachingTheLocalizer) {
+  create_node(make_gnss_options(-1, 1.0));
+  bring_up();
+  start_tracking_at_truth();
+  ASSERT_TRUE(wait_for_gnss_diagnostics([this]() { return gnss_diagnostics_value("accepted_total") >= 0; }));
+
+  // 5 Hz of fixes the gate rejects: the rejections still happen at most once per second.
+  const int gate_before = gnss_diagnostics_value("gate_rejected_total");
+  const int published_before = published_fix_count_;
+  run_with_fixes(3000ms, 200ms, 1, 30.0);
+  ASSERT_TRUE(wait_for_gnss_diagnostics([this, gate_before]() {
+    return gnss_diagnostics_value("gate_rejected_total") > gate_before;
+  }));
+  run_for(1200ms, kInputWheel | kInputScans);  // let the last diagnostics through
+  const int published_fixes = published_fix_count_ - published_before;
+  const int rejected = gnss_diagnostics_value("gate_rejected_total") - gate_before;
+  EXPECT_GE(published_fixes, 12);
+  EXPECT_GE(rejected, 2);
+  EXPECT_LE(rejected, 4) << "published " << published_fixes << " fixes in 3 s";
+
+  // The same for accepted fixes: one factor per second, not five.
+  const int accepted_before = gnss_diagnostics_value("accepted_total");
+  run_with_fixes(3000ms, 200ms, 1, 0.0);
+  run_for(1200ms, kInputWheel | kInputScans);
+  const int accepted = gnss_diagnostics_value("accepted_total") - accepted_before;
+  EXPECT_GE(accepted, 2);
+  EXPECT_LE(accepted, 4);
+  std::printf("[ GNSS_THIN ] gate_rejected=%d accepted=%d of %d fixes\n", rejected, accepted,
+              published_fixes);
+}
+
+TEST_F(LocalizationNodeTest, GpsMinStatusKeepsSinglePointOutOfEverythingButTheStatus) {
+  create_node(make_gnss_options(1, 0.0));
+  bring_up();
+
+  // Status 0 fixes (the single-point solution) must not initialise the pose, even with wheel and scans.
+  run_with_fixes(2500ms, 200ms, 0, 0.0);
+  EXPECT_EQ(last_status_.state, LocalizationStatus::INITIALIZING);
+  EXPECT_EQ(odom_count_, 0);
+  EXPECT_EQ(last_status_.gps_status, 0) << "the dropped fix is still reported";
+  EXPECT_FLOAT_EQ(last_status_.gps_std_m, 2.0F);
+
+  start_tracking_at_truth();
+  run_with_fixes(1500ms, 200ms, 0, 30.0);  // far and single point: neither a factor nor a rejection
+  ASSERT_TRUE(wait_for_gnss_diagnostics([this]() { return gnss_diagnostics_value("gps_status") == 0; }));
+  EXPECT_EQ(gnss_diagnostics_value("accepted_total"), 0);
+  EXPECT_EQ(gnss_diagnostics_value("gate_rejected_total"), 0);
+  EXPECT_EQ(gnss_diagnostics_value("time_gap_rejected_total"), 0);
+  EXPECT_EQ(gnss_diagnostics_value("conflict_window_rejects"), 0);
+
+  // A Float fix goes through, so the zeros above are not a dead GNSS path.
+  gps_publisher_->publish(make_gnss_fix(node_->get_clock()->now(), 1, 0.0));
+  EXPECT_TRUE(wait_for_gnss_diagnostics(
+      [this]() { return gnss_diagnostics_value("accepted_total") >= 1; }));
+  EXPECT_EQ(gnss_diagnostics_value("gps_status"), 1);
 }

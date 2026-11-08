@@ -82,10 +82,34 @@ LiDAR の外部パラメータ（`base_frame→点群の frame_id`）と GPS ア
 | `voxel_size_m` / `keyframe_distance_m` / `keyframe_time_s` | 0.5 / 1.0 / 1.0 | LiDAR オドメトリ |
 | `map_inlier_ratio_min` / `map_gate_translation_m` / `map_gate_rotation_rad` | 0.5 / 1.0 / 0.2 | 事前地図照合 |
 | `gps_std_m_by_status` | `[2.0, 1.0, 0.3]` | GST 無しの FIX / SBAS / GBAS |
+| `gps_min_status` | -1 | この `NavSatStatus` 未満の fix は `Localizer` に渡さない（-1 = 全部受ける）。`docker/config/robot.yaml` は 1（Float 以上）。Single（status 0）は初期化・mapping の原点・因子のどれにも使わず、棄却数にも数えない |
+| `gps_min_interval_s` | 0.0 | 前回 `Localizer` に渡した fix の `header.stamp` からこの秒数未満の fix を捨てる（0 = 間引かない）。`robot.yaml` は 1.0（受信機の 5 Hz を 1 Hz に） |
 | `gps_gate_mahalanobis` / `gps_trusted_std_m` / `gps_absolute_gate_m` | 3.0 / 0.3 / 2.0 | GPS ゲート |
 | `correction_slew_mps` / `correction_slew_rps` / `large_correction_threshold_m` | 0.2 / 0.1 / 1.0 | 補正の平滑化 |
 | `tracking_window_s` / `lost_position_std_m` | 5.0 / 2.0 | 状態判定 |
 | `odom_only_max_distance_m` / `odom_only_max_s` / `drift_rate` | 50 / 60 / 0.02 | ODOM_ONLY の上限。**`mode: mapping` では無効**（この 2 つで LOST にしない。D5） |
+
+## GNSS の入力と `/diagnostics`
+
+`gps_topic`（`robot.yaml` は `/rtk/fix_all`）の fix は、購読コールバックで次の順に扱う: 最後に受けた fix の
+`gps_status`・`gps_std_m`（status の表の σ）を記録 → `gps_min_status` 未満なら捨てる → 初期化・mapping の原点 →
+`gps_min_interval_s` で間引く → `Localizer::on_gps`（Mahalanobis ゲート）。`LocalizationStatus` の
+`gps_status`・`gps_std_m` は、落とす前に記録した**最後に受けた fix** の値（Float から Single に落ちたことが見える）。
+
+`/diagnostics` に 1 Hz で `localization_node: GNSS`（`diagnostic_msgs/DiagnosticArray`）を出す。
+`is_gps_conflict` が真のとき WARN、それ以外は OK。
+
+| key | 中身 |
+|---|---|
+| `gate_rejected_total` | Mahalanobis ゲートで棄却した累計 |
+| `time_gap_rejected_total` | 最寄りキーフレームとの時刻差が `gps_keyframe_max_gap_s` を超えて捨てた累計 |
+| `conflict_window_rejects` | 直近 `gps_conflict_window` 個のうち、ゲートなら棄却した数（trusted 分岐で受理した分も含む） |
+| `accepted_total` | 因子として入れた累計 |
+| `gps_status` / `gps_std_m` | 最後に受けた fix の status（-1 は 255）と表の σ |
+| `is_gps_conflict` | `true` / `false` |
+
+`gps_min_status` で落とした分と `gps_min_interval_s` で間引いた分は棄却数に入れない（外れ値ではない）。
+累計は `Localizer` を作り直す（初期化し直す）と 0 に戻る。
 
 ## 既知の限界
 

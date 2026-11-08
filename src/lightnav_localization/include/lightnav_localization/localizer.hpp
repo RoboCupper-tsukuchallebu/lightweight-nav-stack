@@ -104,6 +104,9 @@ class Localizer {
   double last_accepted_gps_stamp_sec() const;
   std::size_t gps_time_gap_rejection_count() const;
   std::size_t gps_gate_rejection_count() const;
+  // Gate rejections among the last `gps_conflict_window` fixes; counts the fixes the gate would
+  // have rejected, including those a trusted fix let through (Issue #43 section 4.3).
+  std::size_t gps_conflict_window_reject_count() const;
   std::size_t max_gps_factors_per_keyframe() const;
   double max_keyframe_interval_sec() const;
   double last_absolute_observation_stamp_sec() const;

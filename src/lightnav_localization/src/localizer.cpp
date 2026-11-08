@@ -543,6 +543,9 @@ std::optional<Eigen::Vector3d> Localizer::last_match_weakest_axis() const {
 double Localizer::last_accepted_gps_stamp_sec() const { return implementation_->last_gps_sec; }
 std::size_t Localizer::gps_time_gap_rejection_count() const { return implementation_->gps_time_gap_rejections; }
 std::size_t Localizer::gps_gate_rejection_count() const { return implementation_->gps_gate_rejections; }
+std::size_t Localizer::gps_conflict_window_reject_count() const {
+  return static_cast<std::size_t>(implementation_->conflict.rejected_count());
+}
 std::size_t Localizer::max_gps_factors_per_keyframe() const { return implementation_->max_gps_factors_per_keyframe; }
 double Localizer::max_keyframe_interval_sec() const { return implementation_->max_keyframe_interval_sec; }
 double Localizer::last_absolute_observation_stamp_sec() const { return implementation_->absolute_reference_sec; }

@@ -16,6 +16,9 @@ localization_node:
 
     # Initial alignment (Issue #2 section 8, localization mode).
     init_gps_max_std_m: 3.0
+    # GNSS input contract (Issue #43 section 4.3). The defaults keep every fix; docker/config/robot.yaml sets 1 and 1.0.
+    gps_min_status: -1
+    gps_min_interval_s: 0.0
     init_scan_count: 3
     init_yaw_step_deg: 15.0
     init_coarse_corr_m: 2.0

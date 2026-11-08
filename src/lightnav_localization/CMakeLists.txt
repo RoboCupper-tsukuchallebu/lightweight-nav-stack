@@ -14,6 +14,7 @@ find_package(GeographicLib REQUIRED)
 
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
+find_package(diagnostic_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
@@ -68,6 +69,7 @@ target_link_libraries(lightnav_localization_node_lib PUBLIC
   tf2::tf2
   tf2_ros::tf2_ros
   tf2_eigen::tf2_eigen
+  diagnostic_msgs::diagnostic_msgs__rosidl_typesupport_cpp
   geometry_msgs::geometry_msgs__rosidl_typesupport_cpp
   nav_msgs::nav_msgs__rosidl_typesupport_cpp
   sensor_msgs::sensor_msgs__rosidl_typesupport_cpp
@@ -87,7 +89,7 @@ install(TARGETS lightnav_localization_core EXPORT export_lightnav_localization
   ARCHIVE DESTINATION lib LIBRARY DESTINATION lib RUNTIME DESTINATION bin)
 ament_export_targets(export_lightnav_localization HAS_LIBRARY_TARGET)
 ament_export_dependencies(Eigen3 GTSAM GeographicLib lightnav_msgs rclcpp rclcpp_lifecycle
-  nav_msgs sensor_msgs geometry_msgs std_msgs std_srvs tf2 tf2_ros tf2_eigen)
+  diagnostic_msgs nav_msgs sensor_msgs geometry_msgs std_msgs std_srvs tf2 tf2_ros tf2_eigen)
 
 if(BUILD_TESTING)
   # Plain GTest (not ament_add_gtest): the vendored gtest source of ament_cmake_gtest does not

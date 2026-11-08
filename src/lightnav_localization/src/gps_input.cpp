@@ -27,16 +27,19 @@ Eigen::Vector3d GpsConverter::to_enu(const GpsFix& fix) const {
   return {east, north, up};
 }
 
-double GpsConverter::horizontal_std_m(const GpsFix& fix) const {
-  // A receiver can report a covariance of 0 or NaN: fall back to the status table then.
+double GpsParameters::horizontal_std_m(const GpsFix& fix) const {
   if (fix.has_known_covariance && std::isfinite(fix.known_std_m) && fix.known_std_m > 0.0) {
     return fix.known_std_m;
   }
   switch (fix.status) {
-    case GpsFixStatus::kSbasFix: return parameters_.std_sbas_m;
-    case GpsFixStatus::kGbasFix: return parameters_.std_gbas_m;
-    default: return parameters_.std_fix_m;
+    case GpsFixStatus::kSbasFix: return std_sbas_m;
+    case GpsFixStatus::kGbasFix: return std_gbas_m;
+    default: return std_fix_m;
   }
+}
+
+double GpsConverter::horizontal_std_m(const GpsFix& fix) const {
+  return parameters_.horizontal_std_m(fix);
 }
 
 GpsDecision GpsConverter::evaluate(const GpsFix& fix, const Eigen::Isometry3d& predicted_map_to_base,

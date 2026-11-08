@@ -38,6 +38,10 @@ struct GpsParameters {
   double altitude_sigma_scale = 3.0;
   double altitude_sigma_floor_m = 1.0;
   Eigen::Vector3d antenna_in_base = Eigen::Vector3d::Zero();
+
+  // Horizontal std of a fix: its own covariance when the receiver gave a usable one, else the
+  // status table. A receiver can report a covariance of 0 or NaN: the table is used then.
+  double horizontal_std_m(const GpsFix& fix) const;
 };
 
 struct GpsMeasurement {
@@ -72,6 +76,8 @@ class GpsConflictCounter {
       observations_.pop_front();
     }
   }
+  // Number of gate rejections among the last `window` observations.
+  int rejected_count() const { return rejected_count_; }
   bool is_conflict() const {
     return observations_.size() == static_cast<std::size_t>(window_) &&
            static_cast<double>(rejected_count_) / window_ >= ratio_;
