@@ -47,8 +47,12 @@ FROM base AS build
 WORKDIR /ws
 COPY src src
 # BUILD_TESTING stays ON (default): the gtest executables are small and the `test` stage reuses this build.
+# The Ubuntu libgeographiclib-dev ships only FindGeographicLib.cmake (no GeographicLibConfig.cmake, which conda has),
+# in a directory that is not on CMake's search path.
 RUN . /opt/ros/jazzy/setup.sh \
-    && colcon build --merge-install --cmake-args -DCMAKE_BUILD_TYPE=Release
+    && colcon build --merge-install --cmake-args \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_MODULE_PATH=/usr/share/cmake/geographiclib
 
 
 # CI only. Tests use the production XML (inherited from base), not LOCALHOST like `pixi run test`.
