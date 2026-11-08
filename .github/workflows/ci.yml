@@ -70,12 +70,13 @@ jobs:
           tags: lightnav:runtime
           cache-from: type=gha,scope=lightnav-runtime
           cache-to: type=gha,mode=min,scope=lightnav-runtime
-      # The ROS_HOME of the image (/tmp/ros_home) hides the rosdep cache of the base image, so unset it for this command.
+      # The ROS_HOME of the image (/tmp/ros_home) hides the rosdep cache of the base image, so remove it for this command only
+      # (an empty ROS_HOME does not work: rosdep then reports it is not initialized).
       # rviz2 is a GUI dependency of lightnav_sim and is not in the image.
       - name: rosdep check (a package.xml dependency missing from the Dockerfile fails here)
         run: |
           docker run --rm --entrypoint sh lightnav:test -c \
-            'ROS_HOME= rosdep check --from-paths src --ignore-src --skip-keys rviz2'
+            'env -u ROS_HOME rosdep check --from-paths src --ignore-src --skip-keys rviz2'
       # Production Fast DDS XML, so --ipc host is not used: a participant takes about 16.75 MiB of /dev/shm.
       - name: colcon test in the image
         run: docker run --rm --shm-size=1g lightnav:test
