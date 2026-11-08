@@ -205,7 +205,7 @@ params ファイル `docker/config/localization_indoor.yaml` で切り替える
 
 `LocalizationNode`（`localization_node.cpp`）:
 
-- パラメータ `imu_topic`（既定 `""` = 無効）を足す（`declare_parameters` 141〜224 行目、`read_parameters` 227 行目）。空を許すので、257〜258 行目の
+- パラメータ `imu_topic`（既定 `""` = 無効）を足す（`declare_parameters` 141〜224 行目、`read_parameters` 227 行目）。空を許すので、256〜260 行目の
   「入力 topic が空でない」検査には入れない。**空のときは購読を作らず、`Localizer::on_imu` も呼ばない。今の挙動は何も変わらない。**
 - `on_configure`（570〜578 行目）で、`imu_topic` が空でなければ `sensor_msgs/Imu` を購読する。QoS は IMU のドライバに合わせる（best effort なら `SensorDataQoS`）。
   `handle_imu` は `handle_wheel_odom`（799 行目）と同じく `is_active()` を確かめ、非有限の値を捨ててから `Localizer::on_imu` を呼ぶ。
@@ -232,7 +232,7 @@ params ファイル `docker/config/localization_indoor.yaml` で切り替える
 - **`pending_stamps` への登録**。`IncrementalFixedLagSmoother` は鍵ごとの stamp で窓から外す。今は `add_first_node`（103〜104 行目）、`restart_window`（135 行目）、`add_node_with_wheel_factor`（188 行目）が `x` の stamp だけを登録している。
   `v` と `b` の stamp も同じ 3 か所で登録しないと、窓から外れない鍵が残るおそれがある（GTSAM の挙動は実装時に確かめる）。
 - **`x` 以外の鍵を知らない処理が多い**。`pose` / `position_and_yaw_std`（326〜348 行目）は `x` だけを返す。`optimize` の `history_values` の更新（248〜254 行目）は `history_stamps` を回して `key_of` だけを更新するので、
-  `v` と `b` の初期値が作成時のまま残り、バッチ再最適化が遠い初期値から始まる。`BatchPose`（34〜39 行目）にも速度とバイアスが無い。
+  `v` と `b` の初期値が作成時のまま残り、バッチ再最適化が遠い初期値から始まる。`BatchPose`（ 34〜39 行目）にも速度とバイアスが無い。
 - **窓の作り直し**。`restart_window`（119〜160 行目）は、新しいノードの prior と、前のノードへの弱い `BetweenFactor` だけを作る。`v` と `b` の prior と、前の `v` / `b` とのつなぎも要る。
   最適化に失敗した localization の復旧（`localizer.cpp` の `refresh_after_optimize`、185〜196 行目）は `PoseGraph` を作り直して `add_first_node` を呼ぶので、そこでも `v` と `b` を現在の推定から取り直す。
 - **`Localizer` が `x` だけを持つ**。`NodeRecord`（43〜47 行目）、`pose_cache`、`lidar_nodes` は姿勢だけ。窓から出るときの後始末（210〜214 行目）に、`v` と `b` の推定値の持ち回りを足す。
