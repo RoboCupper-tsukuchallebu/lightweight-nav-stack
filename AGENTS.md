@@ -7,7 +7,7 @@
 - PR は `develop` 向けに出します。`main` へは人が入れます。
 - **自動マージしてよい条件**（すべて満たすとき）:
   1. 実装したセッションとは別のレビュー役（独立した REVIEW）が、PR の今の head SHA について、重大度「クリティカル・高・中」の指摘が残っていないと報告している。新しく push したら、レビューをやり直す。
-  2. その SHA で、必須の CI がすべて成功している。必須の CI: `build-test (ubuntu-latest)` と `no-nav2-dependency`。`build-test (macos-14)` は必須にしない（runner の都合で止まることがあり、合否の基準は ubuntu。CLAUDE.md のとおり）。このリポジトリにはブランチの保護が無いので、マージする側が `gh pr checks` で確かめる。
+  2. その SHA で、必須の CI がすべて成功している。必須の CI: `build-test (ubuntu-latest)`、`no-nav2-dependency`、`docker`（X13 と同じ apt 環境のイメージのビルドと試験。2026-11-08 ユーザー決定）。`build-test (macos-14)` は必須にしない（runner の都合で止まることがあり、合否の基準は ubuntu。CLAUDE.md のとおり）。このリポジトリにはブランチの保護が無いので、マージする側が `gh pr checks` で確かめる。
   3. base が `develop` で、レビューした差分と commit の一覧が一致している。
   4. 仕様 Issue の受け入れ条件に「実機（ロボット PC）での確認がマージ条件」と書かれているときは、その確認が済み、結果が PR に記録されている。確認を省く場合は、ユーザーの決定を PR に記録する。
 - マージは `gh pr merge <番号> --merge --match-head-commit <レビューした SHA>` で行います。マージするのは、作業を割り振って結果を確かめる統括役のセッション（その PR を実装していないセッション）か人です。実装したセッション自身は、自分の PR をマージしません。

@@ -49,7 +49,7 @@ LIGHTNAV_BUILD_HOST=<ssh 宛先> LIGHTNAV_ROBOT_HOST=<ssh 宛先> scripts/deploy
 
 ## 合否の基準と Mac の差
 
-- 合否の基準は ubuntu の CI。Mac では Python とコンパイラが異なる（`-Werror` は gcc で落ちることがある）。
+- 合否の基準は ubuntu の CI。必須の CI は `build-test (ubuntu-latest)`・`no-nav2-dependency`・`docker`（AGENTS.md のとおり。`build-test (macos-14)` は必須にしない）。Mac では Python とコンパイラが異なる（`-Werror` は gcc で落ちることがある）。
 
 ## 独自 msg を使うノードの実行（macOS）
 
