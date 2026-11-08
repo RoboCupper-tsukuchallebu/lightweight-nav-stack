@@ -15,3 +15,6 @@ controller_node:
     # First runs only (Issue #35, tentative decision 6). The code defaults stay as they are.
     v_max: 0.3
     w_max: 0.4
+    # The controller refuses to configure without it (no code default, since it depends on the width of the course).
+    # 1.5 is the value of the contract table of Issue #1; set the width of the real course before the first run on a path.
+    max_path_deviation_m: 1.5

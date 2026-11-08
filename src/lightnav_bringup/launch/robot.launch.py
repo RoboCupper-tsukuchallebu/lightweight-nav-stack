@@ -9,6 +9,7 @@ Launch arguments:
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, EmitEvent, OpaqueFunction, RegisterEventHandler
+from launch.events import matches_action
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import LifecycleNode
 from launch_ros.descriptions import ParameterFile
@@ -43,7 +44,7 @@ def build_lifecycle_entities(package, executable, node_name, robot_config):
             entities=[
                 EmitEvent(
                     event=ChangeState(
-                        lifecycle_node_matcher=node,
+                        lifecycle_node_matcher=matches_action(node),
                         transition_id=Transition.TRANSITION_ACTIVATE,
                     )
                 )
@@ -51,7 +52,9 @@ def build_lifecycle_entities(package, executable, node_name, robot_config):
         )
     )
     configure = EmitEvent(
-        event=ChangeState(lifecycle_node_matcher=node, transition_id=Transition.TRANSITION_CONFIGURE)
+        event=ChangeState(
+            lifecycle_node_matcher=matches_action(node), transition_id=Transition.TRANSITION_CONFIGURE
+        )
     )
     return [node, activate_after_configure, configure]
 

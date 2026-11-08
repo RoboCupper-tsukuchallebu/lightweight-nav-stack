@@ -1,6 +1,11 @@
-"""robot.launch.py with safety_gate:=false starts the nodes but not safety_gate_node (no /cmd_vel publisher)."""
+"""robot.launch.py with safety_gate:=false starts the nodes but not safety_gate_node (no /cmd_vel publisher).
+
+launch_testing runs the unittest.TestCase classes of this module while the launch is up. A plain `def test_...`
+function is not run (the item reports "Ran 0 tests" and still passes), so the checks must be in a TestCase.
+"""
 
 import time
+import unittest
 from pathlib import Path
 
 import launch_testing.actions
@@ -38,42 +43,42 @@ def generate_test_description():
     return LaunchDescription([robot_launch, launch_testing.actions.ReadyToTest()])
 
 
-@pytest.fixture(scope="module")
-def helper_node():
-    rclpy.init()
-    node = rclpy.create_node("test_robot_launch_helper")
-    yield node
-    node.destroy_node()
-    rclpy.shutdown()
+class TestRobotLaunchWithoutGate(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        rclpy.init()
+        cls.helper_node = rclpy.create_node("test_robot_launch_helper")
 
+    @classmethod
+    def tearDownClass(cls):
+        cls.helper_node.destroy_node()
+        rclpy.shutdown()
 
-def read_lifecycle_state_id(node, node_name):
-    """The lifecycle state id of `node_name`, or None while its get_state service does not answer."""
-    client = node.create_client(GetState, f"/{node_name}/get_state")
-    try:
-        if not client.wait_for_service(timeout_sec=SERVICE_TIMEOUT_SECONDS):
-            return None
-        future = client.call_async(GetState.Request())
-        rclpy.spin_until_future_complete(node, future, timeout_sec=SERVICE_TIMEOUT_SECONDS)
-        return future.result().current_state.id if future.done() else None
-    finally:
-        node.destroy_client(client)
+    def read_lifecycle_state_id(self, node_name):
+        """The lifecycle state id of `node_name`, or None while its get_state service does not answer."""
+        client = self.helper_node.create_client(GetState, f"/{node_name}/get_state")
+        try:
+            if not client.wait_for_service(timeout_sec=SERVICE_TIMEOUT_SECONDS):
+                return None
+            future = client.call_async(GetState.Request())
+            rclpy.spin_until_future_complete(self.helper_node, future, timeout_sec=SERVICE_TIMEOUT_SECONDS)
+            return future.result().current_state.id if future.done() else None
+        finally:
+            self.helper_node.destroy_client(client)
 
+    def wait_until_active(self, node_name):
+        deadline = time.monotonic() + ACTIVATION_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            if self.read_lifecycle_state_id(node_name) == State.PRIMARY_STATE_ACTIVE:
+                return True
+        return False
 
-def wait_until_active(node, node_name):
-    deadline = time.monotonic() + ACTIVATION_TIMEOUT_SECONDS
-    while time.monotonic() < deadline:
-        if read_lifecycle_state_id(node, node_name) == State.PRIMARY_STATE_ACTIVE:
-            return True
-    return False
+    def test_nodes_become_active_and_safety_gate_is_not_started(self):
+        # Positive control first: if the launch had failed as a whole, "no gate" would pass for the wrong reason.
+        for node_name in ACTIVE_NODE_NAMES:
+            self.assertTrue(self.wait_until_active(node_name), f"{node_name} did not become active")
 
-
-def test_nodes_become_active_and_safety_gate_is_not_started(helper_node):
-    # Positive control first: if the launch had failed as a whole, "no gate" would pass for the wrong reason.
-    for node_name in ACTIVE_NODE_NAMES:
-        assert wait_until_active(helper_node, node_name), f"{node_name} did not become active"
-
-    time.sleep(SETTLE_SECONDS)
-    node_names = helper_node.get_node_names()
-    assert "safety_gate_node" not in node_names, node_names
-    assert helper_node.count_publishers("/cmd_vel") == 0
+        time.sleep(SETTLE_SECONDS)
+        node_names = self.helper_node.get_node_names()
+        self.assertNotIn("safety_gate_node", node_names)
+        self.assertEqual(self.helper_node.count_publishers("/cmd_vel"), 0)
