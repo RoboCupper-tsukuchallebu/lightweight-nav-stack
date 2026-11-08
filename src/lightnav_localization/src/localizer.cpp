@@ -65,13 +65,15 @@ PoseGraphParameters history_parameters_for(const LocalizerParameters& parameters
   return graph_parameters;
 }
 
-// Mapping has no prior map and often loses GNSS for long stretches, so the ODOM_ONLY distance/time
-// limits must not turn a long drive into LOST (Issue #43 D5). The localization mode keeps them.
+// Mapping has no prior map and often loses GNSS for long stretches, so neither the ODOM_ONLY distance/time
+// limits nor the position-uncertainty limit (the drift_rate term grows with the distance since the last
+// absolute observation) may turn a long drive into LOST (Issue #43 D5). The localization mode keeps them.
 StateMachineParameters state_parameters_for(const LocalizerParameters& parameters) {
   StateMachineParameters state_parameters = parameters.state;
   if (parameters.mapping) {
     state_parameters.odom_only_max_distance_m = std::numeric_limits<double>::infinity();
     state_parameters.odom_only_max_s = std::numeric_limits<double>::infinity();
+    state_parameters.lost_position_std_m = std::numeric_limits<double>::infinity();
   }
   return state_parameters;
 }
