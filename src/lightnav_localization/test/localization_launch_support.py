@@ -17,9 +17,9 @@ import launch
 import launch.actions
 import launch_testing.actions
 import rclpy
+from geometry_msgs.msg import TransformStamped
 from lifecycle_msgs.msg import State
 from lifecycle_msgs.srv import GetState
-from geometry_msgs.msg import TransformStamped
 from nav_msgs.msg import Odometry
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import PointCloud2, PointField
@@ -66,8 +66,7 @@ def write_binary_pcd(file_path, points):
     )
     with open(file_path, "wb") as stream:
         stream.write(header.encode("ascii"))
-        for point in points:
-            stream.write(struct.pack("<fff", *point))
+        stream.writelines(struct.pack("<fff", *point) for point in points)
 
 
 def build_launch_description(mode):

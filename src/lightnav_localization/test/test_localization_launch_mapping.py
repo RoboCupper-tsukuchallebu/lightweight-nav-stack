@@ -1,6 +1,5 @@
 """localization.launch.py mode:=mapping needs no map_file, reaches ACTIVE and saves once on SIGINT."""
 
-import launch_testing
 import pytest
 from localization_launch_support import (
     SHUTDOWN_TIMEOUT_SECONDS,
@@ -24,7 +23,7 @@ class TestMappingModeLaunch(LocalizationLaunchCase):
         self.assertTrue(self.wait_until_active(), "localization_node did not become active")
         self.publish_lidar_extrinsic()
         started = self.publish_inputs_until(
-            lambda: proc_output.waitFor("initialized mapping", process=launch_process, timeout=0.01),
+            lambda: proc_output.waitFor("initialized mapping", process=launch_process, timeout=0.01, stream="stdout"),
             MAPPING_START_TIMEOUT_SECONDS,
         )
         self.assertTrue(started, "mapping did not start")
@@ -35,7 +34,8 @@ class TestMappingModeLaunch(LocalizationLaunchCase):
 
         proc_info.assertWaitForShutdown(process=launch_process, timeout=SHUTDOWN_TIMEOUT_SECONDS)
         proc_output.assertWaitFor(
-            "mapping map saved on shutdown", process=launch_process, timeout=OUTPUT_TIMEOUT_SECONDS
+            "mapping map saved on shutdown", process=launch_process, timeout=OUTPUT_TIMEOUT_SECONDS,
+            stream="stdout"
         )
         for name in MAP_FILE_NAMES:
             self.assertTrue((output_directory / name).is_file(), f"{name} was not written")
