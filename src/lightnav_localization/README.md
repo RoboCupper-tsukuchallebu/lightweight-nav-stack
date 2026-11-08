@@ -51,6 +51,8 @@ pixi run ros2 lifecycle set /localization_node activate
    原点になる（INFO ログ `mapping origin set at ...` に緯度経度が出る。公開の場に貼るときは伏せる）。
    原点が決まるまでは `INITIALIZING` のまま `last_error` に出る。
 2. **初期 yaw**: 原点が決まってから `init_travel_m`（既定 3 m）を直進すると、その向きが初期 yaw になる。
+   `INITIALIZING` を抜けるのはここ（初期 yaw が決まったとき）。止めて待つだけでは抜けず、`last_error` は
+   `mapping origin set; waiting for init_travel_m` のまま。
 3. **走行**: キーフレームは `keyframe_distance_m` の移動**または** `keyframe_time_s` の経過で足される。
    静止していても 1 s に 1 個増える。mapping 中は `odom_only_max_distance_m`・`odom_only_max_s`・
    `lost_position_std_m` で LOST にしない。
@@ -63,9 +65,11 @@ pixi run ros2 lifecycle set /localization_node activate
 | `trajectory.csv` | 再最適化後の軌跡（`stamp_sec,x,y,z,roll,pitch,yaw,position_std_m`） |
 | `map.yaml` | 原点（緯度経度高度）・作成時刻などのメタデータ。localization が GNSS を使うのに要る |
 
-**書き込みは原子的**: 3 ファイルを同じディレクトリの一時名に書いてから、`map.pcd` → `trajectory.csv` →
-`map.yaml` の順に rename する。`map.yaml` を最後にするので、新しい `map.pcd` と古い `map.yaml`（別の GNSS 原点）
-の組は残らない。書き込みに失敗したら一時ファイルを消し、前の 3 ファイルを残してエラーを返す。
+**書き込み**: 3 ファイルを同じディレクトリの一時名に書いてから、`map.pcd` → `trajectory.csv` →
+`map.yaml` の順に rename する。一時ファイルの書き込みに失敗したら、一時ファイルを消し、前の 3 ファイルを残してエラーを返す。
+**3 ファイルをまとめた原子性は無い。** rename の途中（例えば `map.pcd` の rename の後）で失敗すると、新しい `map.pcd` と
+古い `map.yaml`（別の GNSS 原点）の組が残りうる。`map.yaml` を最後にしているのは、途中で止まっても `map.yaml` だけが
+先に新しくなる組を避けるため。rename 途中の失敗の扱いは #44 の範囲。
 
 **保存の契約（#30 の契約変更）**: 旧契約は「`save_map` と終了時（deactivate・shutdown）のどちらでも保存」だった。今は次のとおり。
 
@@ -211,5 +215,5 @@ NaN 入り点群・`/wheel/odom`・`/gps/fix`・静的 TF を流し、GPS + 未�
 `TRACKING`、`set_initial_pose`、入力途絶（G）、出力の契約（N）、地図ファイル無しの
 configure 失敗を確認する。`test_initial_alignment` / `test_point_cloud_extraction` が
 純ロジックと非有限点の除去を単体で確認する。`test_mapping` は合成コースで mapping（K/K2、停止時保存、
-書き込みの原子性、LOST にしないこと）を、`test_localization_launch_*.py`（launch_testing）は
+書き込み失敗時に前の地図が残ること、LOST にしないこと）を、`test_localization_launch_*.py`（launch_testing）は
 `mode:=localization` / `mode:=mapping` の activate と SIGINT での終了を確認する。

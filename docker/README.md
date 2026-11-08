@@ -44,8 +44,11 @@ compose のコメント（`compose.yaml` の先頭）、`scripts/deploy.sh`。�
    - `gnss` アンテナの位置（`base_link→gnss`）は仮の値のまま。車軸中心からアンテナ位相中心までの x・y・z を実測して
      tsukuchalle_description の `dimensions.yaml` の `gnss_xyz_above_ground_m` を更新してから、GNSS を使う確認を行う。
 2. **mapping を起動**: `LIGHTNAV_LOCALIZATION_MODE=mapping docker compose up -d localization`。
-   `/lightnav/localization/status` の `gps_status` が 1（Float）以上になり、`state` が `INITIALIZING` を抜けるまで
-   車を止めて待つ（この位置が地図の原点になる）。その後 3 m（`init_travel_m`）をまっすぐ走ると、その向きが初期 yaw になる。
+   `/lightnav/localization/status` の `gps_status` が 1（Float）以上になり、`last_error` が
+   `mapping origin set; waiting for init_travel_m` になるまで車を止めて待つ（この位置が地図の原点になる）。
+   **ここで待っても `INITIALIZING` は抜けない。** 続けて 3 m（`init_travel_m`）をまっすぐ走ると、その向きが初期 yaw になり、
+   そこで初めて `INITIALIZING` を抜ける（走り出すまでは `last_error` が `mapping origin set; ...` か
+   `mapping: waiting for init_travel_m (...)` のまま）。
    - **原点のログ行（`mapping origin set at ...`）には緯度経度が出る。** ログを Issue・PR に貼るときは
      `grep -v 'mapping origin set'` で伏せる。
 3. **ティーチ走行**: パッドで走る。速度は 0.3 m/s・0.4 rad/s 以下を目安にする（下の「速度の判定」）。`nav` は起動しない。
@@ -58,8 +61,9 @@ compose のコメント（`compose.yaml` の先頭）、`scripts/deploy.sh`。�
      停止時には保存しない（二重の保存と上書きを避ける）。
 5. **localization を起動**: `LIGHTNAV_LOCALIZATION_MODE=localization docker compose up -d localization`（既定）。
    静止したまま GNSS（σ ≤ 1.5 m）で位置、静止スキャン 3 個で yaw を決め、`state` が `TRACKING` になることを確認する。
-   - **`map.yaml` が無いか原点が無いと、GNSS は WARN ログだけを出して黙って無効になる。** `status` の `gps_status` が 1 以上で、
-     `/diagnostics` の `accepted_total` が増えることを確かめる。
+   - **`map.yaml` が無いか原点が無いと、GNSS は無効になる。** WARN ログと `status` の `last_error`
+     （`map has no GPS origin: GPS disabled`）に出るが、`state` は変わらない。`gps_status` が 1 以上で、
+     `last_error` にこの文字列が無く、`/diagnostics` の `accepted_total` が増えることを確かめる。
    - GNSS が取れない場所では `set_initial_pose` で位置を与える:
      ```bash
      docker compose exec localization bash -lc \
@@ -94,9 +98,14 @@ drive コンテナを再起動すると `odom` の原点が 0 に戻る。**loca
 
 4 つの PR が develop に入り、`gnss_xyz_above_ground_m` に実測の x・y・z が入ってから行い、結果を Issue #43 にコメントする。
 
+`/lightnav/pose` を出すのは `nav` サービスの `pose_adapter_node` だけで、本手順は `nav` を起動しない。位置は
+`/lightnav/localization/odom`（`map`→`base_footprint`）の pose で測る。
+
 共通で記録するもの:
 
 - `ros2 topic hz` の各入力
+- 手順 4 の `docker compose exec localization bash -lc '...'` が通ること（Dockerfile が `/etc/profile.d/lightnav.sh` で
+  ROS と overlay を source するので通るはずだが、実機では未確認）
 - `status` の `last_scan_time_ms`・`last_match_time_ms`・`position_std_m`
 - `free -m` の起動前後と、localization 単体の RSS
 - `/diagnostics` の各値（`gate_rejected_total`・`time_gap_rejected_total`・`conflict_window_rejects`・`accepted_total`・
@@ -109,14 +118,15 @@ drive コンテナを再起動すると `odom` の原点が 0 に戻る。**loca
 
 ログを貼るときは原点の行を伏せる。
 
-1. **止めたまま**: mapping で Float により `INITIALIZING` を抜ける。localization で静止初期化して `TRACKING`。10 分静止して
-   `/lightnav/pose` の漂いが 0.3 m 以内。`last_scan_time_ms` の中央値 < 100 ms、`last_match_time_ms` < 500 ms。
+1. **止めたまま**: mapping で Float により原点が決まる（`last_error` が `mapping origin set; waiting for init_travel_m`）。
+   3 m 直進して `INITIALIZING` を抜ける。localization で静止初期化して `TRACKING`。10 分静止して
+   `/lightnav/localization/odom` の漂いが 0.3 m 以内。`last_scan_time_ms` の中央値 < 100 ms、`last_match_time_ms` < 500 ms。
    `INPUT_STALE` がちらつかない。RAM が 6 GiB に収まる。`time_gap_rejected_total` が増え続けない（増えるなら遅延を測り
    `gps_keyframe_max_gap_s` を見直す）。
-2. **押して動かす**（モーター無効）: 直線 10 m 往復と 90° 旋回を含めて押し、戻った位置の `/lightnav/pose` が実位置とメジャーで
+2. **押して動かす**（モーター無効）: 直線 10 m 往復と 90° 旋回を含めて押し、戻った位置の `/lightnav/localization/odom` が実位置とメジャーで
    0.5 m 以内。`TRACKING` のまま。`is_large_correction` が立った回数を記録する。
 3. **パッドで走らせる**（teleop、`nav` は起動しない、Back を非常停止に使う）: ティーチ走行で地図を作り、別の走行で `TRACKING` を維持し、
-   始点に戻った `/lightnav/pose` が 0.5 m 以内。旋回で `LOST` にならない。drive の再起動後に localization を再起動して復帰できる。
+   始点に戻った `/lightnav/localization/odom` が 0.5 m 以内。旋回で `LOST` にならない。drive の再起動後に localization を再起動して復帰できる。
 4. mapping 中に GNSS が途切れる区間（建物の影、または Float が落ちて Single だけになる区間）を 1 回通り、`LOST` にならずに記録が続く。
 5. 停止経路:
    - (a) `save_map` を呼ばずに mapping を数十秒動かしてから `docker compose stop localization`。launch のログに
