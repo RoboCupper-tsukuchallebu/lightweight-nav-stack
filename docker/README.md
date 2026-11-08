@@ -88,7 +88,7 @@ mode は `up` のときに読まれる。切り替えるときは `stop` して�
 ## drive を再起動したとき
 
 drive コンテナを再起動すると `odom` の原点が 0 に戻る。**localization も再起動する**（`docker compose stop localization` →
-`up -d localization`）。mapping 中に drive を再起動した場合も、保存してから起動し直す。
+`up -d localization`）。
 
 ## 実機での確認
 
