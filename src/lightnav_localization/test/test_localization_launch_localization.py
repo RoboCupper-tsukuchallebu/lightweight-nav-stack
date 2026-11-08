@@ -1,13 +1,16 @@
 """localization.launch.py mode:=localization reaches ACTIVE and SIGINT goes through on_shutdown."""
 
+import unittest
+
+import launch_testing
 import pytest
 from localization_launch_support import (
-    SHUTDOWN_TIMEOUT_SECONDS,
+    OUTPUT_STREAM,
+    OUTPUT_TIMEOUT_SECONDS,
     LocalizationLaunchCase,
     build_launch_description,
+    read_all_output_text,
 )
-
-OUTPUT_TIMEOUT_SECONDS = 10
 
 
 @pytest.mark.launch_test
@@ -16,19 +19,26 @@ def generate_test_description():
 
 
 class TestLocalizationModeLaunch(LocalizationLaunchCase):
-    def test_activates_and_shuts_down_on_sigint(self, proc_info, proc_output, launch_process):
+    def test_activates_and_receives_sigint(self, proc_output, launch_process):
         self.assertTrue(self.wait_until_active(), "localization_node did not become active")
         proc_output.assertWaitFor(
-            "localization node active in localization mode", process=launch_process, timeout=OUTPUT_TIMEOUT_SECONDS,
-            stream="stdout"
+            "localization node active in localization mode",
+            process=launch_process,
+            timeout=OUTPUT_TIMEOUT_SECONDS,
+            stream=OUTPUT_STREAM,
         )
-
+        # The exit is checked after the launch has stopped (post_shutdown_test): an exit inside an active test races
+        # with launch_testing noticing that the processes under test have stopped.
         self.send_sigint_to(launch_process)
 
-        proc_info.assertWaitForShutdown(process=launch_process, timeout=SHUTDOWN_TIMEOUT_SECONDS)
-        proc_output.assertWaitFor(
-            "on_shutdown in localization mode", process=launch_process, timeout=OUTPUT_TIMEOUT_SECONDS,
-            stream="stdout"
+
+@launch_testing.post_shutdown_test()
+class TestLocalizationModeShutdown(unittest.TestCase):
+    def test_exits_cleanly_through_on_shutdown(self, proc_info, proc_output, launch_process):
+        launch_testing.asserts.assertExitCodes(proc_info)
+        launch_testing.asserts.assertInStream(
+            proc_output, "on_shutdown in localization mode", launch_process, strip_ansi_escape_sequences=True,
+            stream=OUTPUT_STREAM,
         )
         # A SIGTERM-style kill of the children would print this (Issue #43 section 2, review H2).
-        self.assertNotIn("orphaned processes", "".join(o.text.decode(errors="replace") for o in proc_output))
+        self.assertNotIn("orphaned processes", read_all_output_text(proc_output))

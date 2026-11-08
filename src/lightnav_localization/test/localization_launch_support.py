@@ -27,7 +27,9 @@ from tf2_msgs.msg import TFMessage
 
 NODE_NAME = "localization_node"
 ACTIVATION_TIMEOUT_SECONDS = 60.0
-SHUTDOWN_TIMEOUT_SECONDS = 30.0
+OUTPUT_TIMEOUT_SECONDS = 10
+# launch_testing waits on stderr by default, but the output of the nested ros2 launch arrives on stdout.
+OUTPUT_STREAM = "stdout"
 SERVICE_TIMEOUT_SECONDS = 1.0
 WHEEL_PERIOD_SECONDS = 0.02
 SCAN_PERIOD_SECONDS = 0.2
@@ -38,6 +40,10 @@ FLOAT32_BYTES = 4
 POINT_FIELD_NAMES = ("x", "y", "z", "time")
 LAUNCH_SIGTERM_TIMEOUT_SECONDS = 15
 LAUNCH_SIGKILL_TIMEOUT_SECONDS = 10
+
+
+def read_all_output_text(proc_output):
+    return "".join(output.text.decode(errors="replace") for output in proc_output)
 
 
 def build_room_points():
