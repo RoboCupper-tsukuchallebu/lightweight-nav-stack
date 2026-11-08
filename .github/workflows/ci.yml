@@ -4,6 +4,15 @@ on:
   push:
     branches: [develop, main]
 
+# build-test (ubuntu-latest) and docker run on the self-hosted runners (one ThinkCentre, label tsukuchalle-pixi /
+# tsukuchalle-docker) for pushes and for pull requests from branches of this repository; with this file, pull requests
+# from forks stay on GitHub-hosted runners. This condition is not the protection: a fork runs its own copy of this file
+# and can point runs-on at the self-hosted labels. What protects the machine is the repository setting that a person
+# approves every workflow run of an outside contributor (AGENTS.md: read the .github/ diff before approving).
+# One runner per label keeps those jobs serial: the pixi tests use the fixed ROS_DOMAIN_ID 44 on the host network.
+env:
+  SELF_HOSTED: ${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository }}
+
 jobs:
   no-nav2-dependency:
     runs-on: ubuntu-latest
@@ -27,14 +36,16 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-14]
-    runs-on: ${{ matrix.os }}
+    # The job name stays "build-test (ubuntu-latest)" (a required check) whichever runner it lands on.
+    runs-on: ${{ (matrix.os == 'ubuntu-latest' && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","tsukuchalle-pixi"]') || matrix.os }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: prefix-dev/setup-pixi@v0.8.1
         with:
           locked: true
-          cache: true
+          # On the self-hosted runner the package cache of rattler stays on the disk; the GitHub cache is only a download.
+          cache: ${{ !(matrix.os == 'ubuntu-latest' && env.SELF_HOSTED == 'true') }}
       - run: pixi run lint
       - run: pixi run test
       # `pixi run test` stops before `colcon test-result` on failure, so print which tests failed.
@@ -45,11 +56,15 @@ jobs:
   # apt environment of the robot (docker/Dockerfile). The pixi jobs above stay the reference for development.
   docker:
     needs: no-nav2-dependency
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","tsukuchalle-docker"]') || 'ubuntu-latest' }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      # Self-hosted: the docker driver of the local dockerd (containerd image store) keeps every layer between runs and
+      # loads the images without an export, so the GitHub cache is not used there (the docker driver cannot export it).
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver: ${{ env.SELF_HOSTED == 'true' && 'docker' || 'docker-container' }}
       # mode=min: only the apt layer is reused; every layer after `COPY src` changes with each commit.
       - name: Build the test image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
@@ -59,8 +74,8 @@ jobs:
           target: test
           load: true
           tags: lightnav:test
-          cache-from: type=gha,scope=lightnav-test
-          cache-to: type=gha,mode=min,scope=lightnav-test
+          cache-from: ${{ env.SELF_HOSTED != 'true' && 'type=gha,scope=lightnav-test' || '' }}
+          cache-to: ${{ env.SELF_HOSTED != 'true' && 'type=gha,mode=min,scope=lightnav-test' || '' }}
       - name: Build the runtime image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
@@ -68,8 +83,8 @@ jobs:
           file: docker/Dockerfile
           load: true
           tags: lightnav:runtime
-          cache-from: type=gha,scope=lightnav-runtime
-          cache-to: type=gha,mode=min,scope=lightnav-runtime
+          cache-from: ${{ env.SELF_HOSTED != 'true' && 'type=gha,scope=lightnav-runtime' || '' }}
+          cache-to: ${{ env.SELF_HOSTED != 'true' && 'type=gha,mode=min,scope=lightnav-runtime' || '' }}
       # The ROS_HOME of the image (/tmp/ros_home) hides the rosdep cache of the base image, so remove it for this command only
       # (an empty ROS_HOME does not work: rosdep then reports it is not initialized).
       # rviz2 is a GUI dependency of lightnav_sim and is not in the image.
