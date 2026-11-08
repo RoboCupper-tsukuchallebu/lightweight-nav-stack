@@ -27,7 +27,7 @@ pixi run lint    # ruff check src
 - 実機（`ROS_DOMAIN_ID=42`、SUBNET）に届くのは `pixi run ros2-robot ...` のみ。起動・publish・call は毎回人の承認が必須で、エージェントは使わない。試験は既定のまま `pixi run test` を使い、実機のドメイン 42 で試験用ノードを動かさない。
 - `nav2_*` への依存を入れない（CI が package.xml / CMakeLists.txt / pixi.toml を検査する）。
 - 変数名を省略しない（`pos` ではなく `position` など）。
-- マージは人間が行う。force push・履歴書き換えをしない。
+- マージの条件とマージする人は AGENTS.md に従う。force push・履歴書き換えをしない。
 
 ## 合否の基準と Mac の差
 
