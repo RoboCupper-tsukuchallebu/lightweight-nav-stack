@@ -5,6 +5,7 @@
 #include <memory>
 #include <string>
 #include <optional>
+#include <vector>
 
 namespace lightnav_localization {
 
@@ -25,6 +26,16 @@ struct PoseGraphParameters {
   double planar_sigma_tilt_rad = 0.05;
   double sigma_floor_m = 0.01;  // keeps a stationary wheel factor from becoming a hard constraint
   double sigma_floor_rad = 0.005;
+  // Keeps every factor and initial value so that mapping can batch-optimize the full graph.
+  // Off by default: localization keeps the fixed-lag window only.
+  bool record_history = false;
+};
+
+struct BatchPose {
+  int index = 0;
+  double stamp_sec = 0.0;
+  Eigen::Isometry3d map_to_base = Eigen::Isometry3d::Identity();
+  std::optional<Eigen::Vector3d> position_and_yaw_std;
 };
 
 // Pose3 node chain inside gtsam::IncrementalFixedLagSmoother. GTSAM types stay in the .cpp.
@@ -38,6 +49,12 @@ class PoseGraph {
   // First node. roll/pitch ~ 0 +- 0.1 rad and z ~ 0 +- 1 m are added as in the spec.
   int add_first_node(double stamp_sec, const Eigen::Isometry3d& pose, double sigma_xy_m,
                      double sigma_yaw_rad);
+  // Mapping recovery: replaces the fixed-lag window with a new node at `pose`, keeping the
+  // recorded factor history (when enabled) and continuing with a non-reused node index. A weak
+  // between factor connects `previous_pose` (the last estimate) to the new node.
+  int restart_window(double stamp_sec, const Eigen::Isometry3d& pose,
+                     const Eigen::Isometry3d& previous_pose, double sigma_xy_m,
+                     double sigma_yaw_rad);
   // Wheel odometry: relative motion (2D lifted to 3D) from the previous node to the new one.
   int add_node_with_wheel_factor(double stamp_sec, const Eigen::Isometry3d& guess,
                                  const Eigen::Isometry3d& wheel_relative);
@@ -50,6 +67,9 @@ class PoseGraph {
   void add_gps_factor(int index, const Eigen::Vector3d& position, const Eigen::Vector3d& sigma_m);
   // Optimizes. Returns false if GTSAM threw; the caller then rebuilds from the current estimate.
   bool optimize();
+  // Batch re-optimization of every retained factor (record_history must be on). Fills batch_poses().
+  bool batch_optimize(int max_iterations);
+  const std::vector<BatchPose>& batch_poses() const;
 
   // Estimate of a node; nullopt after it left the window.
   std::optional<Eigen::Isometry3d> pose(int index) const;
