@@ -5,3 +5,5 @@ log/
 __pycache__/
 *.pyc
 .ruff_cache/
+docker/.env
+docker/data/

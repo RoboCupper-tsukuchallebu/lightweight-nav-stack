@@ -1,0 +1,21 @@
+# Parameters of the nodes started by lightnav_bringup/robot.launch.py. The top-level keys are the node names.
+# Mounted read-only at /config/robot.yaml by docker/compose.yaml; scripts/deploy.sh stops when the copy on the
+# robot differs from this file, so a value changed on site goes back through a PR.
+#
+# safety_gate_node is left out on purpose: its limits stay at the defaults of lightnav_safety_gate.
+# points_qos_reliability of obstacle_monitor also stays at its default (reliable) until tsukuchalle_drivers #19 is in.
+
+obstacle_monitor:
+  ros__parameters:
+    # TF comes from the description container (base_footprint); the code default is base_link.
+    base_frame: base_footprint
+
+controller_node:
+  ros__parameters:
+    # First runs only (Issue #35, tentative decision 6). The code defaults stay as they are.
+    v_max: 0.3
+    w_max: 0.4
+    # The controller refuses to configure without it (no code default, since it depends on the width of the course).
+    # TENTATIVE: 1.5 is the value of the contract table of Issue #1, not a measured one. Decide it from the width of
+    # the real course before the first run on a path (before 1c).
+    max_path_deviation_m: 1.5

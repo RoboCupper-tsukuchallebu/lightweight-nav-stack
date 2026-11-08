@@ -60,6 +60,8 @@ RUN . /opt/ros/jazzy/setup.sh \
 # Domain 44 and the plugin are the same as the `test` task of pixi.toml; the plugin aborts unless the domain is 44.
 FROM build AS test
 COPY tools tools
+# lightnav_bringup's launch test reads the robot parameters (docker/config/robot.yaml) from the repository tree.
+COPY docker/config docker/config
 ENV ROS_DOMAIN_ID=44 \
     PYTHONPATH=/ws/tools/pytest_plugins \
     PYTEST_PLUGINS=lightnav_test_environment \
@@ -73,6 +75,8 @@ FROM base AS runtime
 WORKDIR /ws
 COPY --from=build /ws/install /ws/install
 COPY docker/docker-entrypoint.sh /ws/docker-entrypoint.sh
+# `docker compose exec` does not go through the ENTRYPOINT; `bash -l` reads this instead (same sources as the entrypoint).
+RUN printf '%s\n' '. /opt/ros/jazzy/setup.sh' '. /ws/install/setup.sh' > /etc/profile.d/lightnav.sh
 ENTRYPOINT ["/dds_check.sh", "/ws/docker-entrypoint.sh"]
-# PR 1b replaces this with `ros2 launch lightnav_bringup robot.launch.py`.
-CMD ["bash"]
+# Compose overrides this with the same command plus safety_gate:=...; /config/robot.yaml is mounted by compose.
+CMD ["ros2", "launch", "lightnav_bringup", "robot.launch.py"]
