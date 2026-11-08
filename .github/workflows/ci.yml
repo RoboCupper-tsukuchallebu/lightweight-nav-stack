@@ -91,21 +91,21 @@ jobs:
       # compose.yaml: no default uid/gid (a missing .env must stop `up`, see docker/.env.example), safety_gate defaults to true.
       - name: compose config stops without TSUKUCHALLE_UID / GID and passes with them
         run: |
-          if env -u TSUKUCHALLE_UID -u TSUKUCHALLE_GID -u LIGHTNAV_SAFETY_GATE docker compose -f docker/compose.yaml config > /dev/null 2> compose-error.txt; then
+          if env -u TSUKUCHALLE_UID -u TSUKUCHALLE_GID -u LIGHTNAV_SAFETY_GATE docker compose -f docker/compose.yaml config > /dev/null 2> "$RUNNER_TEMP/compose-error.txt"; then
             echo "compose config passed without TSUKUCHALLE_UID / TSUKUCHALLE_GID" >&2
             exit 1
           fi
-          grep -q 'TSUKUCHALLE_UID' compose-error.txt
+          grep -q 'TSUKUCHALLE_UID' "$RUNNER_TEMP/compose-error.txt"
           env -u LIGHTNAV_SAFETY_GATE TSUKUCHALLE_UID=1000 TSUKUCHALLE_GID=1000 \
-            docker compose -f docker/compose.yaml config --format json > compose.json
-          jq -e '.services.nav.user == "1000:1000" and .services.nav.environment.TSUKUCHALLE_UID == "1000"' compose.json
-          jq -e '.services.nav.command[4] == "safety_gate:=true"' compose.json
+            docker compose -f docker/compose.yaml config --format json > "$RUNNER_TEMP/compose.json"
+          jq -e '.services.nav.user == "1000:1000" and .services.nav.environment.TSUKUCHALLE_UID == "1000"' "$RUNNER_TEMP/compose.json"
+          jq -e '.services.nav.command[4] == "safety_gate:=true"' "$RUNNER_TEMP/compose.json"
           LIGHTNAV_SAFETY_GATE=false TSUKUCHALLE_UID=1000 TSUKUCHALLE_GID=1000 \
             docker compose -f docker/compose.yaml config --format json | jq -e '.services.nav.command[4] == "safety_gate:=false"'
       - name: Every compose service runs a launch file that exists in the runtime image
         run: |
-          service_count=$(jq '.services | length' compose.json)
-          launch_services=$(jq -r '.services[] | select(.command[0] == "ros2" and .command[1] == "launch") | "\(.command[2]) \(.command[3])"' compose.json)
+          service_count=$(jq '.services | length' "$RUNNER_TEMP/compose.json")
+          launch_services=$(jq -r '.services[] | select(.command[0] == "ros2" and .command[1] == "launch") | "\(.command[2]) \(.command[3])"' "$RUNNER_TEMP/compose.json")
           test "$(echo "$launch_services" | wc -l)" -eq "$service_count"
           echo "$launch_services" | while read -r package_name launch_file; do
             docker run --rm --entrypoint bash lightnav:runtime -lc \
@@ -116,6 +116,11 @@ jobs:
           bash -n scripts/deploy.sh
           status=0; env -u LIGHTNAV_BUILD_HOST -u LIGHTNAV_ROBOT_HOST scripts/deploy.sh > /dev/null 2>&1 || status=$?
           test "$status" -eq 2
+          # The earlier steps write to RUNNER_TEMP, so the tree is clean here: the same call must get past the dirty check
+          # (it then fails at ssh, which is not exit 1), and only the untracked file below makes it exit 1.
+          test -z "$(git status --porcelain)"
+          status=0; LIGHTNAV_BUILD_HOST=unused LIGHTNAV_ROBOT_HOST=unused scripts/deploy.sh > /dev/null 2>&1 || status=$?
+          test "$status" -ne 1
           touch untracked-file-for-the-dirty-check
           status=0; LIGHTNAV_BUILD_HOST=unused LIGHTNAV_ROBOT_HOST=unused scripts/deploy.sh > /dev/null 2>&1 || status=$?
           test "$status" -eq 1

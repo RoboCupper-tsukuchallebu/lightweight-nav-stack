@@ -8,7 +8,6 @@
 # no host name or address belongs in this repository. This script never starts a container on the robot.
 set -euo pipefail
 
-BUILD_CLONE_PATH='~/deploy/lightweight-nav-stack' # only for this script; do not use it by hand (it is checked out detached)
 ROBOT_PROJECT_PATH='~/lightnav'
 MINIMUM_FREE_GIB=3
 EXPECTED_ARCHITECTURE=x86_64
@@ -30,6 +29,8 @@ if [ -n "$(git status --porcelain)" ]; then
   echo "deploy: the working tree has uncommitted changes; commit or stash them first" >&2
   exit 1
 fi
+# Without this, a stale local origin/develop would deploy an old commit.
+git fetch --quiet origin
 commit_sha=$(git rev-parse --verify "${git_ref}^{commit}")
 short_sha=$(git rev-parse --short=7 "$commit_sha")
 repository_url=$(git remote get-url origin)
@@ -66,7 +67,7 @@ if ssh_robot "test -e ${ROBOT_PROJECT_PATH}/config/robot.yaml"; then
   fi
 fi
 
-# 3. Build on the build machine, in the clone that only this script uses.
+# 3. Build on the build machine, in the clone that only this script uses (do not use it by hand: it is checked out detached).
 ssh_build bash -s -- "$repository_url" "$commit_sha" "$image_tag" <<'REMOTE_SCRIPT'
 set -euo pipefail
 repository_url=$1
