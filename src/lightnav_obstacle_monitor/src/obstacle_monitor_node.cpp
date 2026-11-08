@@ -29,6 +29,7 @@ ObstacleMonitorNode::ObstacleMonitorNode(const rclcpp::NodeOptions & options)
 {
   const ObstacleMonitorParameters defaults;
   declare_parameter("points_topic", "/velodyne_points");
+  declare_parameter("points_qos_reliability", "reliable");
   declare_parameter("scan_topic", "");
   declare_parameter("base_frame", "base_link");
   declare_parameter("points_timeout_s", 0.5);
@@ -76,10 +77,24 @@ ObstacleMonitorNode::CallbackReturn ObstacleMonitorNode::on_configure(const rclc
   baseFrame_ = get_parameter("base_frame").as_string();
   pointsTopic_ = get_parameter("points_topic").as_string();
   scanTopic_ = get_parameter("scan_topic").as_string();
+  const std::string pointsQosReliability = get_parameter("points_qos_reliability").as_string();
   pointsTimeoutSeconds_ = get_parameter("points_timeout_s").as_double();
   scanTimeoutSeconds_ = get_parameter("scan_timeout_s").as_double();
   tfTimeoutSeconds_ = get_parameter("tf_timeout_s").as_double();
   watchdogHz_ = get_parameter("watchdog_hz").as_double();
+
+  rclcpp::QoS pointsQos(5);
+  if (pointsQosReliability == "reliable") {
+    pointsQos.reliable();
+  } else if (pointsQosReliability == "best_effort") {
+    pointsQos.best_effort();
+  } else {
+    RCLCPP_ERROR(
+      get_logger(), "invalid points_qos_reliability '%s': must be 'reliable' or 'best_effort'",
+      pointsQosReliability.c_str());
+    return CallbackReturn::FAILURE;
+  }
+  pointsQos.durability_volatile();
 
   const bool isValid = parameters_.cellSizeMeters > 0.0 && parameters_.gridSizeMeters > 0.0 &&
     std::isfinite(parameters_.stepNeighborRadiusMeters) &&
@@ -106,7 +121,7 @@ ObstacleMonitorNode::CallbackReturn ObstacleMonitorNode::on_configure(const rclc
     "/lightnav/local_grid", rclcpp::QoS(1).reliable().durability_volatile());
   if (!pointsTopic_.empty()) {
     pointsSubscription_ = create_subscription<sensor_msgs::msg::PointCloud2>(
-      pointsTopic_, rclcpp::SensorDataQoS(),
+      pointsTopic_, pointsQos,
       [this](sensor_msgs::msg::PointCloud2::SharedPtr cloud) {handlePointCloud(cloud);});
   }
   if (!scanTopic_.empty()) {

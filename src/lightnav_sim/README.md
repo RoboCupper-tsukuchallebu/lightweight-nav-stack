@@ -8,6 +8,8 @@
 
 障害物はパラメータ `obstacles`（`[x, y, radius, ...]`）と `walls`（`[x1, y1, x2, y2, ...]`）の平坦な double 配列で渡す。
 
+点群の publisher は reliable（depth 5, volatile）で、obstacle_monitor の既定の reliable 購読と繋がる（`LaserScan` は SensorDataQoS のまま）。1.5 MB の点群を best-effort で受けると rmw_fastrtps の共有メモリ 512 KiB があふれるため（tsukuchalle_drivers #19 が直れば best_effort に戻せる）。
+
 積分とレイキャストは `lightnav_sim/sim_math.py`（純 Python、pytest 済み）。
 
 ## TF とマーカー（RViz 用）
