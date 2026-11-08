@@ -79,6 +79,8 @@ struct Course {
 
 const Course kKCourse{{20.0, 20.0}, {1.0}};
 const Course kSpecCourse{{70.0, 60.0, 70.0}, {1.0, -1.0}};
+// 80 m: leaves room for a 60 s hole in the input (36 m) with the corner after it.
+const Course kGapCourse{{50.0, 30.0}, {1.0}};
 const Course kLoopCourse{{40.0, 40.0, 40.0, 40.0}, {1.0, 1.0, 1.0, 1.0}};
 
 GpsFix fix_at_enu(double east_m, double north_m) {
@@ -142,7 +144,8 @@ MappingRun run_mapping(const Course& course, bool has_pillars,
                        double gps_off_begin_sec, double gps_off_end_sec,
                        bool gps_enabled, double wheel_scale, double gps_noise_m,
                        const std::filesystem::path& output_directory,
-                       double fail_optimization_at_sec = -1.0) {
+                       double fail_optimization_at_sec = -1.0,
+                       double wheel_gap_begin_sec = -1.0, double wheel_gap_end_sec = -1.0) {
   SyntheticWorld world(course.centerline(), true);
   if (has_pillars) {
     world.add_pillars(0.1, 0.5, 1.25, 1.5, true);
@@ -186,6 +189,8 @@ MappingRun run_mapping(const Course& course, bool has_pillars,
       odom = odom * drifted;
     }
     previous_truth = truth;
+    // No wheel, scan or GPS input in the gap; the odometry keeps integrating (Issue #45).
+    if (time_sec > wheel_gap_begin_sec && time_sec < wheel_gap_end_sec) continue;
     if (step > 0 && step % static_cast<int>(0.1 / kDt) == 0 && time_sec >= kScanDuration) {
       localizer.on_scan(time_sec,
                         world.synthesize_scan(truth_at, time_sec - kScanDuration, kScanDuration,
@@ -414,6 +419,20 @@ double start_cap_double_wall_gap(const PointList& map_points) {
   return largest_gap;
 }
 
+// Share of the wall-height points on the first straight leg of kGapCourse (corridor walls at
+// y = +-2 m) that lie more than 0.5 m outside a wall: a map smeared by a wrong keyframe pose has them.
+double straight_leg_points_outside_walls_ratio(const PointList& map_points) {
+  std::size_t wall_height_count = 0;
+  std::size_t outside_count = 0;
+  for (const Eigen::Vector3f& point : map_points) {
+    const bool is_wall_height = point.z() > 0.3F && point.z() < 2.5F;
+    if (point.x() < 3.0F || point.x() > 45.0F || !is_wall_height) continue;
+    ++wall_height_count;
+    if (std::abs(point.y()) > 2.5F) ++outside_count;
+  }
+  return wall_height_count == 0 ? 1.0 : static_cast<double>(outside_count) / wall_height_count;
+}
+
 }  // namespace
 
 TEST(MapBuilder, K_ClasSigma0p2_ShortCourse) {
@@ -524,6 +543,30 @@ TEST(MapBuilder, K2_SpecCourseSigma1p0) {
   EXPECT_LT(summary.maximum, kSigma1K2MaximumErrorM);
   std::error_code error;
   std::filesystem::remove_all(output_directory, error);
+}
+
+// Issue #45: a wheel-odometry gap (60 s) longer than the 30 s window must neither keep an unknown-node
+// error nor smear the map: mapping continues after the gap and the no keyframe is placed off the corridor.
+TEST(MapBuilder, MappingContinuesAfterWheelGapLongerThanTheWindow) {
+  constexpr double kGapBeginSec = 20.0;
+  constexpr double kGapEndSec = 80.0;
+  const std::string output_directory = unique_directory("wheel_gap");
+  const MappingRun mapping = run_mapping(kGapCourse, false, -1.0, -1.0, true, 1.01, 0.2,
+                                         output_directory, -1.0, kGapBeginSec, kGapEndSec);
+  EXPECT_EQ(mapping.last_error.find("unknown node"), std::string::npos) << mapping.last_error;
+  EXPECT_TRUE(mapping.last_error.empty()) << mapping.last_error;
+  std::size_t keyframes_after_gap = 0;
+  for (const CsvRow& row : mapping.trajectory) {
+    if (row.stamp_sec > kGapEndSec) ++keyframes_after_gap;
+  }
+  EXPECT_GE(keyframes_after_gap, 30u);  // about 1 keyframe/s for the 57 s after the gap
+  const ErrorSummary after_gap = summarize_error_in_window(
+      kGapCourse, mapping.trajectory, kGapEndSec, kGapCourse.total_sec());
+  const double outside_ratio = straight_leg_points_outside_walls_ratio(mapping.map_points);
+  std::printf("[ GAP ] keyframes_after_gap=%zu error_after_gap_m=%.3f points_outside_walls=%.4f\n",
+              keyframes_after_gap, after_gap.maximum, outside_ratio);
+  EXPECT_LT(after_gap.maximum, 0.5);
+  EXPECT_LT(outside_ratio, 0.01);
 }
 
 TEST(MapBuilder, MappingSaveSurvivesOptimizationFailure) {

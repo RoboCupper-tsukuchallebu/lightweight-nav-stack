@@ -1,5 +1,6 @@
 #include "lightnav_localization/lidar_odometry.hpp"
 
+#include <algorithm>
 #include <cmath>
 
 #include "lightnav_localization/downsample.hpp"
@@ -19,6 +20,20 @@ void LidarOdometry::update_keyframe_poses(const std::vector<Eigen::Isometry3d>& 
     keyframes_[keyframes_.size() - count + offset].map_to_base =
         map_to_base_poses[map_to_base_poses.size() - count + offset];
   }
+}
+
+void LidarOdometry::drop_oldest_keyframes(std::size_t count) {
+  if (count == 0) return;
+  keyframes_.erase(keyframes_.begin(),
+                   keyframes_.begin() + static_cast<std::ptrdiff_t>(std::min(count, keyframes_.size())));
+  rebuild_submap();
+}
+
+std::vector<Eigen::Isometry3d> LidarOdometry::keyframe_poses() const {
+  std::vector<Eigen::Isometry3d> poses;
+  poses.reserve(keyframes_.size());
+  for (const Keyframe& keyframe : keyframes_) poses.push_back(keyframe.map_to_base);
+  return poses;
 }
 
 void LidarOdometry::rebuild_submap() {
