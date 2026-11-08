@@ -7,7 +7,13 @@ from lightnav_msgs.srv import PlanPath
 
 def test_runs_on_isolated_test_domain():
     assert os.environ["ROS_DOMAIN_ID"] == "44"
-    assert os.environ["ROS_AUTOMATIC_DISCOVERY_RANGE"] == "LOCALHOST"
+    discovery_range = os.environ["ROS_AUTOMATIC_DISCOVERY_RANGE"]
+    # pixi: LOCALHOST. docker/Dockerfile `test` stage: the production Fast DDS profile (UDP on 127.0.0.1 only,
+    # no multicast) with SYSTEM_DEFAULT, because LOCALHOST would add a default SHM transport after the XML.
+    uses_localhost_only_profile = (
+        discovery_range == "SYSTEM_DEFAULT" and os.environ.get("FASTRTPS_DEFAULT_PROFILES_FILE")
+    )
+    assert discovery_range == "LOCALHOST" or uses_localhost_only_profile
 
 
 def test_faulthandler_timeout_is_enabled(pytestconfig):
