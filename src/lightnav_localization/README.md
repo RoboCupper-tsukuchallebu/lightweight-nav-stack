@@ -64,6 +64,35 @@ LiDAR の外部パラメータ（`base_frame→点群の frame_id`）と GPS ア
 入力途絶はタイマで `Localizer::poll_state` を呼んで判定する。`/wheel/odom` が
 `wheel_timeout_s` 途絶すると odom の出版を止め、status を `INPUT_STALE` にする。
 
+## 室内（GNSS 無し）
+
+GNSS を使わず、LiDAR と車輪だけで mapping と localization を行う（Issue #43 §12）。ノードのコードは屋外と同じで、
+params ファイル `docker/config/localization_indoor.yaml` で切り替える
+（compose では `.env` の `LIGHTNAV_LOCALIZATION_PARAMS`。compose の 1 行は 1c-3 の後に足す）。
+
+- `gps_topic` を**誰も出していない topic 名**（`/lightnav/gnss_disabled`）にする。`allow_mapping_without_gps: true` だけでは
+  GNSS の購読は止まらず、初期化の前に使える fix が 1 つでも届くとそこが GNSS の原点になる。室内の Float（σ 1.0 m）は
+  `init_gps_max_std_m` を通る。topic 名を実在のものに間違えると、黙って GNSS に戻る。
+- `map.yaml` が `has_gps_origin: false` であれば、localization は GNSS を `gps_topic` に関係なく無効にする。status の
+  `last_error` に `map has no GPS origin: GPS disabled` が出るが、知らせのためのもの。
+- 状態は mapping 中ずっと `ODOM_ONLY` と出る。事前地図も GNSS も無いためで、正常（mapping 中は LOST にならない）。
+
+手順:
+
+1. 床の目印（テープで十字を描き、車体の前方向も印す）に、車体の中心と向きを合わせて置く。
+2. mapping を起動したら、**state が `INITIALIZING` を抜けるまで目印の上で静止する**（activate から `gps_timeout_s`
+   3 s の間）。目印の位置が map の原点 (0, 0, 0)、そのときの**車体の前方が +x**、yaw 0 になる。抜けたら**まっすぐ前進して
+   走り始める**。パッドでティーチ走行し、`save_map` を呼ぶ。
+3. localization を起動し、目印に同じ向きで置いて、`set_initial_pose` で (0, 0, 0)・yaw 0 を与える。`covariance[35]` は 0 のまま
+   にする（yaw を指定したことになる。負にすると yaw 未指定で、静止スキャンの照合で yaw を決める）。`TRACKING` になることを確かめる。
+
+   ```bash
+   ros2 service call /localization_node/set_initial_pose lightnav_msgs/srv/SetInitialPose \
+     "{pose: {header: {frame_id: map}, pose: {pose: {position: {x: 0.0, y: 0.0, z: 0.0}, orientation: {w: 1.0}}}}}"
+   ```
+
+4. 走らせてから目印に戻し、`/lightnav/pose` の (x, y, yaw) と (0, 0, 0) の差を記録する（評価値。合否は Issue #43 §7-3 の 0.5 m）。
+
 ## パラメータ
 
 既定値は `config/localization.yaml`。主なもの:
@@ -139,5 +168,7 @@ pixi run lint
 `test_localization_node` は合成環境（`test/synthetic_world.hpp`）の地図・organized な
 NaN 入り点群・`/wheel/odom`・`/gps/fix`・静的 TF を流し、GPS + 未知 yaw からの
 `TRACKING`、`set_initial_pose`、入力途絶（G）、出力の契約（N）、地図ファイル無しの
-configure 失敗を確認する。`test_initial_alignment` / `test_point_cloud_extraction` が
+configure 失敗に加え、室内（GNSS 無し）の mapping（`gps_topic` を別名にして `/gps/fix` に fix を流しても原点が
+GNSS にならない、始点が原点・yaw 0・前進が +x・`has_gps_origin: false`）と、原点の無い地図 + `set_initial_pose`
+での `TRACKING` の維持を確認する。`test_initial_alignment` / `test_point_cloud_extraction` が
 純ロジックと非有限点の除去を単体で確認する。

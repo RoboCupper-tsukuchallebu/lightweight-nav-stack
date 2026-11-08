@@ -115,6 +115,7 @@ if(BUILD_TESTING)
 
   find_package(ament_cmake_pytest REQUIRED)
   ament_add_pytest_test(test_pose_adapter_acceptance test/test_pose_adapter_acceptance.py)
+  ament_add_pytest_test(test_localization_indoor_params test/test_localization_indoor_params.py)
   # localization.launch.py in both modes: activate, then SIGINT through on_shutdown.
   foreach(launch_test_name localization_launch_localization localization_launch_mapping)
     ament_add_pytest_test(test_${launch_test_name} test/test_${launch_test_name}.py TIMEOUT 180)

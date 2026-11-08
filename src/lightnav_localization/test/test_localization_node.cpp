@@ -65,6 +65,32 @@ double yaw_from_quaternion(const geometry_msgs::msg::Quaternion& quaternion) {
                                  quaternion.z * quaternion.z));
 }
 
+struct TrajectoryRow {
+  double x = 0.0;
+  double y = 0.0;
+  double z = 0.0;
+  double yaw = 0.0;
+};
+
+// Rows of trajectory.csv (stamp_sec,x,y,z,roll,pitch,yaw,position_std_m) without the header.
+std::vector<TrajectoryRow> read_trajectory_rows(const std::filesystem::path& file_path) {
+  std::ifstream stream(file_path);
+  std::string line;
+  std::getline(stream, line);  // header
+  std::vector<TrajectoryRow> rows;
+  while (std::getline(stream, line)) {
+    if (line.empty()) continue;
+    std::istringstream fields(line);
+    std::vector<double> values;
+    std::string field;
+    while (std::getline(fields, field, ',')) values.push_back(std::stod(field));
+    constexpr std::size_t kYawColumn = 6;
+    if (values.size() <= kYawColumn) continue;
+    rows.push_back({values[1], values[2], values[3], values[kYawColumn]});
+  }
+  return rows;
+}
+
 }  // namespace
 
 class LocalizationNodeTest : public ::testing::Test {
@@ -143,6 +169,7 @@ class LocalizationNodeTest : public ::testing::Test {
         rclcpp::QoS(1).reliable().transient_local(),
         [this](LocalizationStatus::SharedPtr message) {
           last_status_ = *message;
+          observed_states_.insert(message->state);
           ++status_count_;
         });
     diagnostics_subscription_ = helper_->create_subscription<diagnostic_msgs::msg::DiagnosticArray>(
@@ -397,9 +424,9 @@ class LocalizationNodeTest : public ::testing::Test {
     message.altitude = kOrigin.altitude_m + antenna_position.z();
     message.position_covariance_type =
         sensor_msgs::msg::NavSatFix::COVARIANCE_TYPE_KNOWN;
-    message.position_covariance[0] = 0.36;
-    message.position_covariance[4] = 0.36;
-    message.position_covariance[8] = 0.36;
+    message.position_covariance[0] = gps_variance_m2_;
+    message.position_covariance[4] = gps_variance_m2_;
+    message.position_covariance[8] = gps_variance_m2_;
     gps_publisher_->publish(message);
   }
 
@@ -630,6 +657,10 @@ class LocalizationNodeTest : public ::testing::Test {
   uint8_t last_gnss_diagnostics_level_ = 255;
   int published_fix_count_ = 0;
   std::set<int64_t> published_wheel_stamps_;
+  // Every state published on /lightnav/localization/status since the last clear().
+  std::set<uint8_t> observed_states_;
+  // Position variance of the fixes sent by publish_gps_at (sigma 0.6 m by default).
+  double gps_variance_m2_ = 0.36;
   int odom_count_ = 0;
   int status_count_ = 0;
   bool all_odom_stamps_matched_ = true;
@@ -1057,4 +1088,113 @@ TEST_F(LocalizationNodeTest, GpsMinStatusKeepsSinglePointOutOfEverythingButTheSt
   EXPECT_TRUE(wait_for_gnss_diagnostics(
       [this]() { return gnss_diagnostics_value("accepted_total") >= 1; }));
   EXPECT_EQ(gnss_diagnostics_value("gps_status"), 1);
+}
+
+// Issue #43 section 12 (indoors, no GNSS), acceptance (a). gps_topic points at a topic nobody publishes, as
+// docker/config/localization_indoor.yaml does: a fix on /gps/fix (sigma 1.0 m passes init_gps_max_std_m) would
+// otherwise become the map origin. The map origin and +x are the pose of the vehicle when mapping starts.
+TEST_F(LocalizationNodeTest, MappingWithoutGpsStartsAtTheStartPoseAndDrivesAlongPlusX) {
+  constexpr double kStartX = 5.0;
+  constexpr double kStartY = 3.0;
+  constexpr double kStartYaw = 0.7;
+  constexpr double kForwardSpeedMps = 0.8;
+  constexpr double kForwardSeconds = 2.0;
+  constexpr double kForwardDistanceM = kForwardSpeedMps * kForwardSeconds;
+  constexpr double kMaxStartPositionErrorM = 0.05;
+  constexpr double kMaxStartYawErrorRad = 0.02;
+  constexpr double kMaxLateralRatio = 0.1;
+  constexpr double kMaxHeightM = 0.1;
+
+  // The corridor around y = 3 holds the start pose (the fixture corridor is around y = 0).
+  world_ = std::make_unique<SyntheticWorld>(
+      std::vector<Eigen::Vector2d>{Eigen::Vector2d(0.0, kStartY), Eigen::Vector2d(30.0, kStartY)},
+      true);
+  const std::filesystem::path output_directory = temp_directory_ / "mapping_without_gps";
+  rclcpp::NodeOptions options = make_mapping_options(output_directory);
+  std::vector<rclcpp::Parameter> overrides = options.parameter_overrides();
+  overrides.emplace_back("gps_topic", "/lightnav/gnss_disabled");
+  overrides.emplace_back("allow_mapping_without_gps", true);
+  overrides.emplace_back("gps_timeout_s", 1.0);
+  options.parameter_overrides(overrides);
+  create_node(options);
+  gps_variance_m2_ = 1.0;
+  bring_up();
+
+  Eigen::Isometry3d start_pose = Eigen::Isometry3d::Identity();
+  start_pose.translation() = Eigen::Vector3d(kStartX, kStartY, kSensorHeightM);
+  start_pose.linear() =
+      Eigen::AngleAxisd(kStartYaw, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+  const Eigen::Vector3d heading(std::cos(kStartYaw), std::sin(kStartYaw), 0.0);
+  const auto pose_after = [&start_pose, &heading](double distance_m) {
+    Eigen::Isometry3d pose = start_pose;
+    pose.translation() += distance_m * heading;
+    return pose;
+  };
+
+  // Stand still until the node leaves INITIALIZING (gps_timeout_s), drive straight ahead, stop.
+  drive_mapping([&start_pose](double /*elapsed*/) { return start_pose; }, 1500ms);
+  drive_mapping(
+      [&pose_after](double elapsed) { return pose_after(kForwardSpeedMps * elapsed); },
+      std::chrono::milliseconds(static_cast<int>(kForwardSeconds * 1000.0)));
+  drive_mapping([&pose_after](double /*elapsed*/) { return pose_after(kForwardDistanceM); },
+                1000ms);
+  ASSERT_GT(odom_count_, 0) << "last_error: " << last_status_.last_error;
+  EXPECT_EQ(observed_states_.count(LocalizationStatus::LOST), 0U);
+
+  const auto response = call_save_map();
+  ASSERT_NE(response, nullptr);
+  ASSERT_TRUE(response->success) << response->message;
+  const MapMetadata metadata = read_map_metadata((output_directory / "map.yaml").string());
+  EXPECT_FALSE(metadata.has_gps_origin);
+
+  const std::vector<TrajectoryRow> rows = read_trajectory_rows(output_directory / "trajectory.csv");
+  ASSERT_GE(rows.size(), 2U);
+  const TrajectoryRow& first = rows.front();
+  const TrajectoryRow& last = rows.back();
+  EXPECT_LT(std::hypot(first.x, first.y), kMaxStartPositionErrorM);
+  EXPECT_LT(std::abs(first.yaw), kMaxStartYawErrorRad);
+  EXPECT_GT(last.x, 0.75 * kForwardDistanceM);
+  EXPECT_LT(last.x, 1.25 * kForwardDistanceM);
+  EXPECT_LT(std::abs(last.y), kMaxLateralRatio * last.x);
+  for (const TrajectoryRow& row : rows) {
+    EXPECT_LT(std::abs(row.z), kMaxHeightM);
+  }
+  std::printf("[ INDOOR_MAPPING ] keyframes=%zu first=(%.3f,%.3f,yaw %.3f) last=(%.3f,%.3f,z %.3f)\n",
+              rows.size(), first.x, first.y, first.yaw, last.x, last.y, last.z);
+}
+
+// Acceptance (b): a map without a GPS origin plus set_initial_pose (with yaw) keeps TRACKING with only the
+// wheel and the point cloud, for longer than gps_timeout_s (3 s) + tracking_window_s (5 s).
+TEST_F(LocalizationNodeTest, TracksWithoutGpsOnAMapWithoutGpsOrigin) {
+  constexpr auto kHold = 10000ms;
+  create_node(make_options(map_file_.string(), no_origin_yaml_.string()));
+  bring_up();
+  run_for(600ms, kInputWheel | kInputScans);
+
+  auto request = std::make_shared<SetInitialPose::Request>();
+  request->pose.header.frame_id = "map";
+  request->pose.pose.pose.position.x = kTruthPosition.x();
+  request->pose.pose.pose.position.y = kTruthPosition.y();
+  request->pose.pose.pose.position.z = kTruthPosition.z();
+  request->pose.pose.pose.orientation = quaternion_from_yaw(kTruthYaw);
+  request->pose.pose.covariance[35] = 0.0;  // yaw is specified
+  auto future = set_initial_pose_client_->async_send_request(request);
+  ASSERT_TRUE(run_until(
+      [&future]() { return future.wait_for(0ms) == std::future_status::ready; }, 3000ms,
+      kInputWheel | kInputScans));
+  const std::shared_ptr<SetInitialPose::Response> response = future.get();
+  ASSERT_TRUE(response->accepted) << response->message;
+  ASSERT_TRUE(run_until(
+      [this]() { return last_status_.state == LocalizationStatus::TRACKING && odom_count_ > 0; },
+      10000ms, kInputWheel | kInputScans))
+      << "last_error: " << last_status_.last_error;
+
+  observed_states_.clear();
+  run_for(kHold, kInputWheel | kInputScans);
+  EXPECT_EQ(observed_states_, std::set<uint8_t>{LocalizationStatus::TRACKING})
+      << "last_error: " << last_status_.last_error;
+  const Eigen::Vector2d position_error =
+      Eigen::Vector2d(last_odom_.pose.pose.position.x, last_odom_.pose.pose.position.y) -
+      kTruthPosition.head<2>();
+  EXPECT_LT(position_error.norm(), 0.2);
 }
