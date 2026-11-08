@@ -85,6 +85,11 @@ TEST_F(ControllerNodeLifecycle, ConfigureFailsWithInvalidMaxPathDeviation) {
   }
 }
 
+TEST_F(ControllerNodeLifecycle, ConfigureFailsWithEmptyGridFrame) {
+  node_->set_parameter(rclcpp::Parameter("grid_frame", ""));
+  EXPECT_EQ(node_->configure().label(), "unconfigured");
+}
+
 namespace {
 
 // Drives the real node over topics inside one process (domain taken from the env).
@@ -93,6 +98,7 @@ class ControllerNodeAvoidWiring : public ControllerNodeLifecycle {
   void SetUp() override {
     ControllerNodeLifecycle::SetUp();
     node_->set_parameter(rclcpp::Parameter("grid_timeout_s", 0.3));
+    node_->set_parameter(rclcpp::Parameter("grid_frame", configured_grid_frame_));
     configureAndActivate();
     helper_ = std::make_shared<rclcpp::Node>("controller_node_test_helper");
     path_publisher_ = helper_->create_publisher<lightnav_msgs::msg::PathWithId>(
@@ -160,6 +166,7 @@ class ControllerNodeAvoidWiring : public ControllerNodeLifecycle {
     }
   }
 
+  std::string configured_grid_frame_{"base_link"};
   std::string frame_id_{"base_link"};
   std::shared_ptr<rclcpp::Node> helper_;
   rclcpp::executors::SingleThreadedExecutor executor_;
@@ -169,6 +176,16 @@ class ControllerNodeAvoidWiring : public ControllerNodeLifecycle {
   rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr grid_publisher_;
   rclcpp::Subscription<lightnav_msgs::msg::FollowStatus>::SharedPtr follow_subscription_;
   std::optional<lightnav_msgs::msg::FollowStatus> last_status_;
+};
+
+// The robot configuration (docker/config/robot.yaml) sets grid_frame to the frame obstacle_monitor stamps.
+class ControllerNodeAvoidWiringInFootprintFrame : public ControllerNodeAvoidWiring {
+ protected:
+  void SetUp() override {
+    configured_grid_frame_ = "base_footprint";
+    frame_id_ = "base_footprint";
+    ControllerNodeAvoidWiring::SetUp();
+  }
 };
 
 }  // namespace
@@ -187,6 +204,19 @@ TEST_F(ControllerNodeAvoidWiring, BlockedGridSwitchesToAvoidAndGridLossFallsBack
 
 TEST_F(ControllerNodeAvoidWiring, GridWithWrongFrameIsTreatedAsMissing) {
   frame_id_ = "map";
+  spinFor(std::chrono::milliseconds(500), true);
+  ASSERT_TRUE(last_status_.has_value());
+  EXPECT_NE(last_status_->active_layer, lightnav_msgs::msg::FollowStatus::LAYER_AVOID);
+}
+
+TEST_F(ControllerNodeAvoidWiringInFootprintFrame, GridInConfiguredFrameSwitchesToAvoid) {
+  spinFor(std::chrono::milliseconds(500), true);
+  ASSERT_TRUE(last_status_.has_value());
+  EXPECT_EQ(last_status_->active_layer, lightnav_msgs::msg::FollowStatus::LAYER_AVOID);
+}
+
+TEST_F(ControllerNodeAvoidWiringInFootprintFrame, GridInDefaultFrameIsDroppedWhenAnotherFrameIsConfigured) {
+  frame_id_ = "base_link";
   spinFor(std::chrono::milliseconds(500), true);
   ASSERT_TRUE(last_status_.has_value());
   EXPECT_NE(last_status_->active_layer, lightnav_msgs::msg::FollowStatus::LAYER_AVOID);

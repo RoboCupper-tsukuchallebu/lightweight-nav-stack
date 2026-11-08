@@ -37,6 +37,7 @@ double yawFromQuaternion(const geometry_msgs::msg::Quaternion& quaternion) {
 class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
  public:
   ControllerNode() : rclcpp_lifecycle::LifecycleNode("controller_node") {
+    declare_parameter("grid_frame", "base_link");
     declare_parameter("control_hz", 20.0);
     declare_parameter("lookahead_m", 1.0);
     declare_parameter("search_window_m", 5.0);
@@ -72,6 +73,11 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
       RCLCPP_ERROR(get_logger(),
                    "Specify max_path_deviation_m in the course-specific yaml; "
                    "the value must be finite and positive (got %f)", max_path_deviation_m);
+      return CallbackReturn::FAILURE;
+    }
+    grid_frame_ = get_parameter("grid_frame").as_string();
+    if (grid_frame_.empty()) {
+      RCLCPP_ERROR(get_logger(), "parameter grid_frame must not be empty");
       return CallbackReturn::FAILURE;
     }
     const std::vector<std::string> positive_names = {
@@ -216,10 +222,11 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
     const auto& orientation = message.info.origin.orientation;
     const bool is_unrotated = std::fabs(orientation.x) < 1e-6 && std::fabs(orientation.y) < 1e-6 &&
                               std::fabs(orientation.z) < 1e-6 && std::fabs(orientation.w - 1.0) < 1e-6;
-    if (message.header.frame_id != "base_link" || !is_unrotated ||
+    if (message.header.frame_id != grid_frame_ || !is_unrotated ||
         !std::isfinite(message.info.resolution) || !std::isfinite(message.info.origin.position.x) ||
         !std::isfinite(message.info.origin.position.y)) {
-      RCLCPP_WARN(get_logger(), "rejected local_grid: need frame base_link, unrotated finite origin");
+      RCLCPP_WARN(get_logger(), "rejected local_grid: need frame %s, unrotated finite origin",
+                  grid_frame_.c_str());
       last_grid_.reset();
       return;
     }
@@ -326,6 +333,7 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
   std::unique_ptr<FollowLayer> follow_layer_;
   std::unique_ptr<AvoidLayer> avoid_layer_;
   FreshnessTimeouts timeouts_;
+  std::string grid_frame_;
   std::optional<ReceivedGrid> last_grid_;
   std::optional<ReceivedPose> last_pose_;
   std::optional<ReceivedObstacleStatus> last_obstacle_status_;
