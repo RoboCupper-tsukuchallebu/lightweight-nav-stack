@@ -102,6 +102,19 @@ jobs:
           jq -e '.services.nav.command[4] == "safety_gate:=true"' "$RUNNER_TEMP/compose.json"
           LIGHTNAV_SAFETY_GATE=false TSUKUCHALLE_UID=1000 TSUKUCHALLE_GID=1000 \
             docker compose -f docker/compose.yaml config --format json | jq -e '.services.nav.command[4] == "safety_gate:=false"'
+      # localization: SIGINT is what makes `ros2 launch` shut the node down (SIGTERM kills it without saving the map), a tty/stdin
+      # would stop launch from forwarding SIGINT, and sigterm + sigkill timeouts must fit in stop_grace_period. .env.example must work as .env.
+      - name: compose localization service stops with SIGINT and .env.example is valid
+        run: |
+          env -u TSUKUCHALLE_UID -u TSUKUCHALLE_GID -u LIGHTNAV_LOCALIZATION_MODE \
+            docker compose -f docker/compose.yaml --env-file docker/.env.example config --format json > "$RUNNER_TEMP/compose-example.json"
+          jq -e '.services.nav.user == "1000:1000" and .services.localization.user == "1000:1000"' "$RUNNER_TEMP/compose-example.json"
+          jq -e '.services.localization | .stop_signal == "SIGINT" and .stop_grace_period == "1m0s" and (has("tty") | not) and (has("stdin_open") | not)' "$RUNNER_TEMP/compose-example.json"
+          jq -e '.services.localization.command | index("mode:=localization") != null and index("map_file:=/data/map/map.pcd") != null' "$RUNNER_TEMP/compose-example.json"
+          jq -e '.services.localization.volumes | map(.target) | sort == ["/config/robot.yaml", "/data"]' "$RUNNER_TEMP/compose-example.json"
+          jq -e '.services.localization.command | (map(select(startswith("sigterm_timeout:=")) | ltrimstr("sigterm_timeout:=") | tonumber) | add) + (map(select(startswith("sigkill_timeout:=")) | ltrimstr("sigkill_timeout:=") | tonumber) | add) < 60' "$RUNNER_TEMP/compose-example.json"
+          env -u TSUKUCHALLE_UID -u TSUKUCHALLE_GID LIGHTNAV_LOCALIZATION_MODE=mapping \
+            docker compose -f docker/compose.yaml --env-file docker/.env.example config --format json | jq -e '.services.localization.command | index("mode:=mapping") != null'
       - name: Every compose service runs a launch file that exists in the runtime image
         run: |
           service_count=$(jq '.services | length' "$RUNNER_TEMP/compose.json")
