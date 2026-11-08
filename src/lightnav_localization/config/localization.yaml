@@ -22,6 +22,14 @@ localization_node:
     init_fine_corr_m: 0.5
     init_inlier_ratio_min: 0.6
 
+    # Mapping mode (Issue #2 sections 8-9).
+    map_output_dir: ""
+    map_voxel_size_m: 0.2
+    keyframe_cloud_voxel_m: 0.25
+    batch_max_iterations: 100
+    init_travel_m: 3.0
+    allow_mapping_without_gps: false
+
     # State machine and input timeouts.
     wheel_timeout_s: 0.2
     scan_timeout_s: 0.5
