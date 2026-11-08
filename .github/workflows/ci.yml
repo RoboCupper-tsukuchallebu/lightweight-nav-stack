@@ -84,5 +84,7 @@ jobs:
         run: |
           docker run --rm lightnav:runtime bash -c \
             'for package_name in lightnav_controller lightnav_safety_gate lightnav_localization; do ros2 pkg prefix "$package_name"; done; test ! -e /ws/src && test ! -e /ws/build'
+          # The robot runs as a non-root uid: ROS_LOG_DIR / ROS_HOME must be writable and dds_check must accept it.
+          docker run --rm --user 1000:1000 -e TSUKUCHALLE_UID=1000 lightnav:runtime ros2 pkg prefix lightnav_controller
           size_bytes=$(docker save lightnav:runtime | gzip | wc -c)
           echo "lightnav:runtime compressed: $((size_bytes / 1024 / 1024)) MiB"

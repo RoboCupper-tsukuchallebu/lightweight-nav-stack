@@ -7,7 +7,7 @@
 # Same base as tsukuchalle_drivers/ros2/Dockerfile. Digest taken 2026-11-06 (docker buildx imagetools inspect ros:jazzy-ros-base-noble).
 FROM ros:jazzy-ros-base-noble@sha256:8eed0a4669bbf43ee331878a4c39bd8ebddea8e3312a58b4fae8edb14526b617 AS base
 
-# Fast DDS is configured by /fastdds_profiles.xml (a copy of tsukuchalle_drivers/ros2/dds/): SHM with a 16 MiB
+# Fast DDS is configured by /fastdds_profiles.xml (a copy of ros2/dds/ on the develop branch of tsukuchalle_drivers): SHM with a 16 MiB
 # segment plus UDPv4 on 127.0.0.1 only, no multicast. The transports and the discovery range must come from the
 # XML and ROS_AUTOMATIC_DISCOVERY_RANGE=SYSTEM_DEFAULT, not from LOCALHOST (LOCALHOST makes rmw_fastrtps add a
 # default 512 KiB SHM transport after reading the XML). FASTDDS_BUILTIN_TRANSPORTS is not set on purpose.
@@ -48,7 +48,8 @@ WORKDIR /ws
 COPY src src
 # BUILD_TESTING stays ON (default): the gtest executables are small and the `test` stage reuses this build.
 # The Ubuntu libgeographiclib-dev ships only FindGeographicLib.cmake (no GeographicLibConfig.cmake, which conda has),
-# in a directory that is not on CMake's search path.
+# in a directory that is not on CMake's search path. lightnav_localization exports GeographicLib with
+# ament_export_dependencies, so a package that later does find_package(lightnav_localization) needs the same path.
 RUN . /opt/ros/jazzy/setup.sh \
     && colcon build --merge-install --cmake-args \
         -DCMAKE_BUILD_TYPE=Release \
