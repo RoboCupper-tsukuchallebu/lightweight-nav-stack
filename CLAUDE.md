@@ -56,6 +56,7 @@ LIGHTNAV_BUILD_HOST=<ssh 宛先> LIGHTNAV_ROBOT_HOST=<ssh 宛先> scripts/deploy
 - macOS の SIP は /bin/sh・/usr/bin/env などを通ると `DYLD_*` を落とす。`pixi run test` では colcon が試験を `/bin/sh -c ". hook && env -0"` で作った環境で起動するため、`DYLD_LIBRARY_PATH` が pytest に届かない（実測）。
 - 対策（パッケージ側の conftest や回避は不要）: dlopen は起動時の `DYLD_LIBRARY_PATH` が必要なので、test タスクが `LIGHTNAV_DYLD_LIBRARY_PATH` で渡し、pytest プラグインが macOS でだけ DYLD 付きで pytest を再起動する。
 - ビルドは `--merge-install`（全ライブラリが `install/lib`）。`ros2` / `ros2-robot` タスクは従来どおり env で `DYLD_LIBRARY_PATH` を渡す。
+- Linux では test タスクの env に `LD_LIBRARY_PATH=$PIXI_PROJECT_ROOT/install/lib` も渡す。`lightnav_msgs` は自分の install prefix を colcon の環境に持たずに試験されるため、頼りにしていた activation（`install/local_setup.sh`）が最初のビルド前の起動で読まれないと、typesupport の `.so` が見つからず `test_custom_service_typesupport_is_loadable` が落ちた（CI で間欠的に再現。activation を外してビルド機で確かめた）。
 - `pixi run ros2 run ...` / `pixi run ros2 launch ...` と `pixi run test` を使う。素の `pixi run python ノード.py` は Mac では失敗する。
 
 ## テストの書き方

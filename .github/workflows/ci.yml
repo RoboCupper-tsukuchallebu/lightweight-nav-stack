@@ -117,10 +117,10 @@ jobs:
           status=0; env -u LIGHTNAV_BUILD_HOST -u LIGHTNAV_ROBOT_HOST scripts/deploy.sh > /dev/null 2>&1 || status=$?
           test "$status" -eq 2
           # The earlier steps write to RUNNER_TEMP, so the tree is clean here: the same call must get past the dirty check
-          # (it then fails at ssh, which is not exit 1), and only the untracked file below makes it exit 1.
+          # and fail at the first ssh (exit 255; a failed fetch would be 128), and only the untracked file below makes it exit 1.
           test -z "$(git status --porcelain)"
           status=0; LIGHTNAV_BUILD_HOST=unused LIGHTNAV_ROBOT_HOST=unused scripts/deploy.sh > /dev/null 2>&1 || status=$?
-          test "$status" -ne 1
+          test "$status" -eq 255
           touch untracked-file-for-the-dirty-check
           status=0; LIGHTNAV_BUILD_HOST=unused LIGHTNAV_ROBOT_HOST=unused scripts/deploy.sh > /dev/null 2>&1 || status=$?
           test "$status" -eq 1
