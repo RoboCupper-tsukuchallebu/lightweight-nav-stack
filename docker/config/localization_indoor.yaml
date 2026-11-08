@@ -1,0 +1,17 @@
+# Parameters of localization_node for indoor use, without GNSS (Issue #43 section 12).
+# Select it with LIGHTNAV_LOCALIZATION_PARAMS in .env (compose: params_file:=${LIGHTNAV_LOCALIZATION_PARAMS:-/config/robot.yaml});
+# the node code is the same as outdoors. This file replaces robot.yaml as params_file (the files are not layered): keys
+# not listed here use the code defaults, so copy any localization_node value of robot.yaml that is still needed indoors.
+localization_node:
+  ros__parameters:
+    # A topic nobody publishes. Do not set "" (configure rejects an empty topic) and do not leave the default.
+    # allow_mapping_without_gps does not stop the GNSS subscription: if one usable fix arrives before mapping starts,
+    # that fix becomes the GNSS origin of the map and the origin and yaw come from a 3 m drive again. An indoor
+    # Float fix (sigma about 1.0 m) passes init_gps_max_std_m, so the subscription must listen to nothing.
+    # If this name is mistyped to a real topic, GNSS silently comes back: check map.yaml for has_gps_origin: false.
+    gps_topic: /lightnav/gnss_disabled
+    # Start mapping at the vehicle pose after gps_timeout_s (3 s): origin (0, 0, 0), yaw 0, +x = the front of the vehicle.
+    allow_mapping_without_gps: true
+    # Same directory as the map that the localization mode reads (/data/map/map.pcd, map.yaml).
+    map_output_dir: /data/map
+    base_frame: base_footprint
