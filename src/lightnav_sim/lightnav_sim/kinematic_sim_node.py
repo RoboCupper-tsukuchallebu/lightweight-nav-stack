@@ -49,6 +49,8 @@ PATH_TOPIC = "/lightnav/path"
 PATH_VIEW_TOPIC = "/lightnav/sim/path_view"
 # Same QoS as the mission publisher so a late-started RViz still gets the last path.
 PATH_QOS = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+# Reliable also connects to best-effort subscribers; obstacle_monitor defaults to reliable points.
+POINTS_QOS = QoSProfile(depth=5, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.VOLATILE)
 
 
 def _chunks(flat_values, stride, name):
@@ -96,7 +98,7 @@ class KinematicSimNode(Node):
 
         self._odom_publisher = self.create_publisher(Odometry, self.get_parameter("odom_topic").value, 10)
         self._cloud_publisher = self.create_publisher(
-            PointCloud2, self.get_parameter("points_topic").value, qos_profile_sensor_data
+            PointCloud2, self.get_parameter("points_topic").value, POINTS_QOS
         )
         scan_topic = self.get_parameter("scan_topic").value
         self._scan_publisher = (

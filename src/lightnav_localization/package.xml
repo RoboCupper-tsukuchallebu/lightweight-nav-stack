@@ -3,14 +3,31 @@
 <package format="3">
   <name>lightnav_localization</name>
   <version>0.1.0</version>
-  <description>LiDAR, wheel odometry and GPS fusion localization and mapping for lightnav (L1: shared libraries)</description>
+  <description>LiDAR, wheel odometry and GPS fusion localization and mapping for lightnav</description>
   <maintainer email="maintainers@example.com">lightnav maintainers</maintainer>
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
   <depend>eigen</depend>
+  <depend>gtsam</depend>
+  <depend>geographiclib</depend>
+  <depend>rclcpp</depend>
+  <depend>rclcpp_lifecycle</depend>
+  <depend>nav_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf2_eigen</depend>
+  <depend>lightnav_msgs</depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
 
   <test_depend>gtest</test_depend>
+  <test_depend>ament_cmake_pytest</test_depend>
+  <test_depend>lightnav_pose_adapter</test_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

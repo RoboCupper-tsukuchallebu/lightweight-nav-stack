@@ -41,7 +41,7 @@ protected:
     monitor_ = std::make_shared<ObstacleMonitorNode>(options);
     helper_ = std::make_shared<rclcpp::Node>("obstacle_monitor_test_helper");
     pointsPublisher_ = helper_->create_publisher<sensor_msgs::msg::PointCloud2>(
-      "/velodyne_points", rclcpp::SensorDataQoS());
+      "/velodyne_points", rclcpp::QoS(5).reliable().durability_volatile());
     statusSubscription_ = helper_->create_subscription<ObstacleStatus>(
       "/lightnav/obstacle_status", rclcpp::QoS(10).reliable(),
       [this](ObstacleStatus::SharedPtr status) {
@@ -162,6 +162,24 @@ TEST_F(ObstacleMonitorNodeTest, NaNStepNeighborRadiusIsRejected)
 {
   ASSERT_TRUE(monitor_->set_parameter(rclcpp::Parameter(
     "step_neighbor_radius_m", std::numeric_limits<double>::quiet_NaN())).successful);
+  EXPECT_EQ(
+    monitor_->configure().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED);
+}
+
+TEST_F(ObstacleMonitorNodeTest, DefaultPointsQoSReliabilityAcceptsReliablePublisher)
+{
+  EXPECT_EQ(monitor_->get_parameter("points_qos_reliability").as_string(), "reliable");
+  bringUp();
+  publishIdentityTransform();
+  ASSERT_TRUE(waitUntil([this] {return lastStatus_.is_stop_zone_occupied;}, true));
+  EXPECT_FALSE(lastStatus_.is_input_stale);
+}
+
+TEST_F(ObstacleMonitorNodeTest, InvalidPointsQoSReliabilityIsRejected)
+{
+  ASSERT_TRUE(
+    monitor_->set_parameter(
+      rclcpp::Parameter("points_qos_reliability", "unreliable")).successful);
   EXPECT_EQ(
     monitor_->configure().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED);
 }
