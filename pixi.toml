@@ -54,6 +54,8 @@ build = "colcon build --merge-install --base-paths src --cmake-args -DCMAKE_BUIL
 # On Linux, LD_LIBRARY_PATH is set here too: lightnav_msgs tests itself without its own install prefix in the colcon environment,
 # and the activation script (install/local_setup.sh) is not sourced when pixi activates before the first build, so the typesupport
 # libraries were sometimes not found in CI (dlopen error in test_custom_service_typesupport_is_loadable).
+# This overwrites any LD_LIBRARY_PATH passed from outside (the task env wins); today CI and the build machine get the same value from activation,
+# so nothing is lost, but append the outside value here if a caller ever needs to pass its own.
 # Packages run one at a time: all package tests share domain 44 and the same topic and service names
 # (e.g. /lightnav/planner/plan_path, /lightnav/path, /lightnav/pose), so parallel packages see each other.
 # A test (including setup/teardown) that takes over 120 s dumps all thread stacks to stderr
