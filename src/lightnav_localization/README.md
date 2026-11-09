@@ -127,6 +127,8 @@ params ファイル `docker/config/localization_indoor.yaml` で切り替える
 
 保存時に再訪候補を二段の GICP で検証し、支持し合うループをバッチ最適化に加える。保存した地図と `trajectory.csv` に反映し、走行中の推定は変えない。保存時間を制限し、最適化に失敗した場合はループを加える前の結果で保存する。`map.yaml` の `loop_closure_count` は残った因子の数である。
 
+反復上限に達した場合はパス 0 の結果を保存する。時間予算によって上限を減らした場合は応答に `loop closure skipped: time budget`、通常の上限まで使った場合は `loop closure skipped: not converged` を含める。検証中に例外が発生した場合は `loop closure skipped: verification failed` を含める。
+
 | パラメータ | 既定 | 意味 |
 |---|---|---|
 | `loop_closure_enabled` | true | 保存時のループ閉じ込み |

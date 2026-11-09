@@ -43,6 +43,10 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
   explicit LocalizationNode(const rclcpp::NodeOptions& options = rclcpp::NodeOptions());
   ~LocalizationNode() override;
 
+  void seed_loop_closure_for_test(const std::vector<Eigen::Isometry3d>& poses,
+                                  const LoopClosureTestHooks* hooks);
+  void clear_loop_closure_hooks_for_test() { loop_closure_test_hooks_ = nullptr; }
+
   CallbackReturn on_configure(const rclcpp_lifecycle::State& state) override;
   CallbackReturn on_activate(const rclcpp_lifecycle::State& state) override;
   CallbackReturn on_deactivate(const rclcpp_lifecycle::State& state) override;
@@ -138,6 +142,7 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
   bool map_has_no_gps_origin_ = false;
 
   // Localizer and initial alignment.
+  const LoopClosureTestHooks* loop_closure_test_hooks_ = nullptr;
   std::unique_ptr<Localizer> localizer_;
   bool is_localizer_initialized_ = false;
   bool has_localizer_wheel_ = false;

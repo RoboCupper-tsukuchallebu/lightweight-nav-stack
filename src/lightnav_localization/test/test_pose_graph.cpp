@@ -248,7 +248,7 @@ TEST(PoseGraph, FailedMarginalConstructionIsAttemptedOnlyOnce) {
   graph.add_first_node(0.0, Eigen::Isometry3d::Identity(), 0.1, 0.1);
   const Eigen::Isometry3d motion = translation_pose(1.0, 0.0);
   graph.add_node_with_wheel_factor(1.0, motion, motion);
-  graph.inject_marginals_failure_once();
+  graph.inject_marginals_failure_once_for_test();
 
   ASSERT_TRUE(graph.batch_optimize(100));
 

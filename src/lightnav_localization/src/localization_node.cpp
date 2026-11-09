@@ -1368,6 +1368,12 @@ void LocalizationNode::save_mapping_outputs_on_stop(const char* phase) {
   }
 }
 
+void LocalizationNode::seed_loop_closure_for_test(
+    const std::vector<Eigen::Isometry3d>& poses, const LoopClosureTestHooks* hooks) {
+  localizer_->seed_mapping_for_test(poses);
+  loop_closure_test_hooks_ = hooks;
+}
+
 bool LocalizationNode::save_mapping_outputs(std::string& message) {
   if (!is_mapping()) {
     message = "save_map is only available in mapping mode";
@@ -1382,6 +1388,10 @@ bool LocalizationNode::save_mapping_outputs(std::string& message) {
   parameters.map_voxel_size_m = map_voxel_size_m_;
   parameters.batch_max_iterations = batch_max_iterations_;
   parameters.loop_closure = loop_closure_parameters_;
+  parameters.loop_closure_test_hooks = loop_closure_test_hooks_;
+  parameters.loop_closure.info_logger = [this](const std::string& text) {
+    RCLCPP_INFO(get_logger(), "%s", text.c_str());
+  };
   parameters.created = utc_now_iso8601();
   parameters.has_gps_origin = mapping_has_gps_origin_ && gps_origin_.has_value();
   if (parameters.has_gps_origin) parameters.gps_origin = *gps_origin_;

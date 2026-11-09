@@ -3,12 +3,14 @@
 #include <Eigen/Geometry>
 #include <cstddef>
 #include <functional>
+#include <limits>
 #include <optional>
 #include <set>
 #include <string>
 #include <vector>
 
 #include "lightnav_localization/pose_graph.hpp"
+#include "lightnav_localization/matcher.hpp"
 
 namespace lightnav_localization {
 
@@ -31,6 +33,7 @@ struct LoopClosureParameters {
   double covariance_scale = 1.0;
   double outlier_chi2 = 12.6;
   double time_budget_s = 25.0;
+  std::function<void(const std::string&)> info_logger;
 };
 
 struct LoopCandidate {
@@ -56,18 +59,31 @@ std::vector<VerifiedLoop> supported_loops(const std::vector<VerifiedLoop>& loops
 double loop_translation_gate(const LoopCandidate& candidate, const std::vector<BatchPose>& poses,
                              const std::vector<double>& path_lengths, const std::set<int>& gps_indices,
                              const LoopClosureParameters& parameters);
+// kCoarse means the coarse alignment returned a non-finite pose.
 enum class LoopVerificationFailure { kTarget, kCoarse, kFine, kInlier, kDegenerate, kCorrectionGate };
 std::optional<VerifiedLoop> assess_loop_match(
     const LoopCandidate& candidate, const MatchResult& match, const std::vector<BatchPose>& poses,
     const std::vector<double>& path_lengths, const std::set<int>& gps_indices,
     const LoopClosureParameters& parameters, double degeneracy_ratio,
     LoopVerificationFailure* failure = nullptr);
+struct LoopVerificationDiagnostics {
+  double correction_translation_m = std::numeric_limits<double>::quiet_NaN();
+  double correction_rotation_deg = std::numeric_limits<double>::quiet_NaN();
+  double fine_inlier_ratio = std::numeric_limits<double>::quiet_NaN();
+  bool coarse_converged = false;
+  bool fine_converged = false;
+};
+
+// Test only; do not call from production code. Overrides the two scan matches.
+using LoopMatcherForTest = std::function<MatchResult(
+    const PreparedTarget&, const PointList&, const Eigen::Isometry3d&, const MatcherParameters&)>;
 std::optional<VerifiedLoop> verify_loop_candidate(
     const LoopCandidate& candidate, const std::vector<BatchPose>& poses,
     const std::vector<KeyframeCloud>& keyframes, const std::vector<double>& path_lengths,
     const std::set<int>& gps_indices, const LoopClosureParameters& parameters,
     double degeneracy_ratio, LoopVerificationFailure* failure = nullptr,
-    double* fine_inlier_ratio = nullptr);
+    double* fine_inlier_ratio = nullptr, LoopVerificationDiagnostics* diagnostics = nullptr,
+    const LoopMatcherForTest* matcher_for_test = nullptr);
 // Optional seams for deterministic verification of save-time failure and budget handling.
 struct LoopClosureTestHooks {
   std::function<std::optional<VerifiedLoop>(const LoopCandidate&)> verify;

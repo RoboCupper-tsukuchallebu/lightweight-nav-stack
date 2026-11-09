@@ -83,7 +83,8 @@ class PoseGraph {
   double batch_marginals_seconds() const;
   bool calculate_batch_marginals();
   bool batch_marginals_failed() const;
-  void inject_marginals_failure_once() { should_fail_marginals_once_ = true; }
+  // Test only; do not call from production code.
+  void inject_marginals_failure_once_for_test() { should_fail_marginals_once_ = true; }
   void remove_history_prior_for_test();
   int marginal_construction_attempts() const;
   const std::vector<BatchPose>& batch_poses() const;

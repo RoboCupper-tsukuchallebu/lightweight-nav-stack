@@ -51,6 +51,16 @@ class SyntheticWorld {
     }
   }
 
+  double distance_to_wall(const Eigen::Vector2d& point) const {
+    double nearest_distance = std::numeric_limits<double>::infinity();
+    for (const WallSegment& wall : walls_) {
+      const Eigen::Vector2d segment = wall.end - wall.start;
+      const double fraction = std::clamp((point - wall.start).dot(segment) / segment.squaredNorm(), 0.0, 1.0);
+      nearest_distance = std::min(nearest_distance, (point - (wall.start + fraction * segment)).norm());
+    }
+    return nearest_distance;
+  }
+
   // Boxes along each leg at `spacing_m` intervals, starting half an interval from the leg start
   // (with the default 10 m spacing that is 5 m, not the old 10 m start). `half_length_m` is half
   // the size along the travel direction, `half_width_m` half the size across it. The defaults

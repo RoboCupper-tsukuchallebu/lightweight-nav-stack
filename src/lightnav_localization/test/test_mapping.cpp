@@ -155,9 +155,9 @@ MappingRun run_mapping(const Course& course, bool has_pillars,
                        const std::filesystem::path& output_directory,
                        double fail_optimization_at_sec = -1.0,
                        double wheel_gap_begin_sec = -1.0, double wheel_gap_end_sec = -1.0,
-                       bool loop_closure_enabled = true, double wheel_yaw_bias_deg_per_10m = 0.5) {
-  SyntheticWorld world(course.centerline(), true,
-                       course.total_sec() == kLoopCourse.total_sec() && !gps_enabled);
+                       bool loop_closure_enabled = true, double wheel_yaw_bias_deg_per_10m = 0.5,
+                       bool closed_course = false) {
+  SyntheticWorld world(course.centerline(), true, closed_course);
   if (has_pillars) {
     world.add_pillars(0.1, 0.5, 1.25, 1.5, true);
   }
@@ -476,36 +476,17 @@ std::string unique_directory(const std::string& name) {
   return path.string();
 }
 
-// Largest gap between clusters of wall points near the loop start (the double-wall seam).
-double start_cap_double_wall_gap(const PointList& map_points) {
-  std::vector<double> x_values;
+// Distance of seam wall points from the actual wall surfaces in the closed corridor.
+double seam_wall_distance_p95(const PointList& map_points, const SyntheticWorld& world) {
+  std::vector<double> distances;
   for (const Eigen::Vector3f& point : map_points) {
-    if (std::abs(point.y()) < 1.2F && std::abs(point.x()) < 3.0F && point.z() > 0.3F &&
-        point.z() < 2.5F) {
-      x_values.push_back(point.x());
+    if (point.head<2>().norm() < 5.0F && point.z() > 0.3F && point.z() < 2.5F) {
+      distances.push_back(world.distance_to_wall(point.head<2>().cast<double>()));
     }
   }
-  if (x_values.size() < 4) return std::numeric_limits<double>::quiet_NaN();
-  std::sort(x_values.begin(), x_values.end());
-  double largest_gap = 0.0;
-  double left_mean = x_values.front();
-  double right_sum = 0.0;
-  std::size_t right_count = 0;
-  for (std::size_t index = 1; index < x_values.size(); ++index) {
-    if (x_values[index] - x_values[index - 1] > 0.15) {
-      left_mean = x_values[index - 1];
-      right_sum = x_values[index];
-      right_count = 1;
-      for (std::size_t next = index + 1; next < x_values.size(); ++next) {
-        if (x_values[next] - x_values[next - 1] > 0.15) break;
-        right_sum += x_values[next];
-        ++right_count;
-      }
-      largest_gap = std::max(largest_gap, right_sum / right_count - left_mean);
-      break;
-    }
-  }
-  return largest_gap;
+  if (distances.empty()) return std::numeric_limits<double>::quiet_NaN();
+  std::sort(distances.begin(), distances.end());
+  return distances[static_cast<std::size_t>(0.95 * (distances.size() - 1))];
 }
 
 // Share of the wall-height points on the first straight leg of kGapCourse (corridor walls at
@@ -572,13 +553,14 @@ TEST(MapBuilder, K2_ClasSigma0p1_SpecCourse) {
   std::filesystem::remove_all(dropout_directory, dropout_error);
 }
 
-TEST(MapBuilder, LoopClosureClosesTheGpsFreeCourse) {
+// 仕様 A1 からの変更: 端壁が交差して互いを遮るため、端壁の無い回廊を使う（PR #62 参照）。
+TEST(MapBuilder, A1_ModifiedClosedCorridorWithoutIntersectingEndCaps) {
   const std::string baseline_directory = unique_directory("loop_baseline");
   const std::string closed_directory = unique_directory("loop_closed");
   const MappingRun baseline = run_mapping(kLoopCourse, false, -1.0, -1.0, false, 1.01, 1.0,
-                                          baseline_directory, -1.0, -1.0, -1.0, false, 1.2);
+                                          baseline_directory, -1.0, -1.0, -1.0, false, 1.2, true);
   const MappingRun closed = run_mapping(kLoopCourse, false, -1.0, -1.0, false, 1.01, 1.0,
-                                        closed_directory, -1.0, -1.0, -1.0, true, 1.2);
+                                        closed_directory, -1.0, -1.0, -1.0, true, 1.2, true);
   ASSERT_GE(baseline.trajectory.size(), 2U);
   ASSERT_GE(closed.trajectory.size(), 2U);
   const auto seam_gap = [](const MappingRun& run) {
@@ -587,9 +569,13 @@ TEST(MapBuilder, LoopClosureClosesTheGpsFreeCourse) {
   };
   const double baseline_gap = seam_gap(baseline);
   const double closed_gap = seam_gap(closed);
-  const double wall_gap = start_cap_double_wall_gap(closed.map_points);
-  std::printf("[ LOOP_A1 ] baseline=%.6f closed=%.6f wall=%.6f loops=%d\n",
-              baseline_gap, closed_gap, wall_gap, closed.metadata.loop_closure_count);
+  const SyntheticWorld world(kLoopCourse.centerline(), true, true);
+  const double baseline_wall_gap = seam_wall_distance_p95(baseline.map_points, world);
+  const double wall_gap = seam_wall_distance_p95(closed.map_points, world);
+  RecordProperty("baseline_seam_wall_distance_p95_m", baseline_wall_gap);
+  RecordProperty("closed_seam_wall_distance_p95_m", wall_gap);
+  std::printf("[ LOOP_A1 ] baseline=%.6f closed=%.6f baseline_wall=%.6f wall=%.6f loops=%d\n",
+              baseline_gap, closed_gap, baseline_wall_gap, wall_gap, closed.metadata.loop_closure_count);
   std::printf("[ LOOP_A1_STATS ] %s\n", closed.loop_statistics.c_str());
   EXPECT_GT(baseline_gap, 1.0);
   EXPECT_LT(baseline_gap, 2.5);

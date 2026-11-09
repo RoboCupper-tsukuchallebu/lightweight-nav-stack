@@ -21,6 +21,18 @@ constexpr double kGateSigmaMultiplier = 3.0;
 constexpr double kSupportSpacingMultiplier = 2.0;
 constexpr double kLoopSigmaFloorM = 0.05;
 constexpr double kLoopSigmaFloorRad = 0.01;
+
+const char* loop_verification_failure_string(LoopVerificationFailure failure) {
+  switch (failure) {
+    case LoopVerificationFailure::kTarget: return "target";
+    case LoopVerificationFailure::kCoarse: return "coarse non-finite";
+    case LoopVerificationFailure::kFine: return "fine";
+    case LoopVerificationFailure::kInlier: return "inlier";
+    case LoopVerificationFailure::kDegenerate: return "degenerate";
+    case LoopVerificationFailure::kCorrectionGate: return "correction gate";
+  }
+  return "unknown";
+}
 }
 
 std::vector<double> loop_path_lengths(const std::vector<BatchPose>& poses) {
@@ -156,7 +168,8 @@ std::optional<VerifiedLoop> verify_loop_candidate(
     const LoopCandidate& candidate, const std::vector<BatchPose>& poses,
     const std::vector<KeyframeCloud>& keyframes, const std::vector<double>& path_lengths,
     const std::set<int>& gps_indices, const LoopClosureParameters& parameters,
-    double degeneracy_ratio, LoopVerificationFailure* failure, double* fine_inlier_ratio) {
+    double degeneracy_ratio, LoopVerificationFailure* failure, double* fine_inlier_ratio,
+    LoopVerificationDiagnostics* diagnostics, const LoopMatcherForTest* matcher_for_test) {
   if (fine_inlier_ratio) *fine_inlier_ratio = std::numeric_limits<double>::quiet_NaN();
   if (failure) *failure = LoopVerificationFailure::kTarget;
   const std::size_t older_index = candidate.older_index;
@@ -180,15 +193,28 @@ std::optional<VerifiedLoop> verify_loop_candidate(
   matcher_parameters.max_correspondence_distance_m = parameters.coarse_correspondence_m;
   matcher_parameters.gate_translation_m = std::numeric_limits<double>::max();
   matcher_parameters.gate_rotation_rad = std::numeric_limits<double>::max();
-  const MatchResult coarse = match_scan(target, keyframes[newer_index].points_in_base, prediction, matcher_parameters);
-  if (!coarse.converged || !coarse.target_to_source.matrix().allFinite()) {
+  const auto run_match = [&](const Eigen::Isometry3d& initial_pose) {
+    return matcher_for_test ? (*matcher_for_test)(target, keyframes[newer_index].points_in_base, initial_pose, matcher_parameters)
+                            : match_scan(target, keyframes[newer_index].points_in_base, initial_pose, matcher_parameters);
+  };
+  const MatchResult coarse = run_match(prediction);
+  if (diagnostics) diagnostics->coarse_converged = coarse.converged;
+  if (!coarse.target_to_source.matrix().allFinite()) {
     if (failure) *failure = LoopVerificationFailure::kCoarse;
     return std::nullopt;
   }
   matcher_parameters.max_iterations = alignment_defaults.fine_max_iterations;
   matcher_parameters.max_correspondence_distance_m = parameters.fine_correspondence_m;
-  const MatchResult fine = match_scan(target, keyframes[newer_index].points_in_base,
-                                      coarse.target_to_source, matcher_parameters);
+  const MatchResult fine = run_match(coarse.target_to_source);
+  if (diagnostics) {
+    diagnostics->fine_converged = fine.converged;
+    diagnostics->fine_inlier_ratio = fine.inlier_ratio;
+    if (fine.target_to_source.matrix().allFinite()) {
+      const Eigen::Isometry3d correction = fine.target_to_source.inverse() * prediction;
+      diagnostics->correction_translation_m = correction.translation().norm();
+      diagnostics->correction_rotation_deg = Eigen::AngleAxisd(correction.rotation()).angle() * 180.0 / std::acos(-1.0);
+    }
+  }
   if (fine_inlier_ratio) *fine_inlier_ratio = fine.inlier_ratio;
   return assess_loop_match(candidate, fine, poses, path_lengths, gps_indices, parameters,
                            degeneracy_ratio, failure);
@@ -204,6 +230,9 @@ LoopClosureResult close_loops(PoseGraph& graph, const std::vector<KeyframeCloud>
   const auto elapsed = [&]() {
     if (hooks && hooks->elapsed_seconds) return hooks->elapsed_seconds();
     return elapsed_before_pass_zero_s + std::chrono::duration<double>(Clock::now() - start).count();
+  };
+  const auto log_info = [&](const std::string& message) {
+    if (parameters.info_logger) parameters.info_logger(message);
   };
   LoopClosureResult result;
   result.poses = graph.batch_poses();
@@ -232,6 +261,7 @@ LoopClosureResult close_loops(PoseGraph& graph, const std::vector<KeyframeCloud>
   const std::vector<double> lengths = loop_path_lengths(poses);
   const std::vector<LoopCandidate> candidates = select_loop_candidates(poses, lengths, parameters);
   std::vector<VerifiedLoop> accepted;
+  std::vector<LoopVerificationDiagnostics> accepted_diagnostics;
   int verification_count = 0;
   int rejected_target = 0;
   int rejected_coarse = 0;
@@ -245,14 +275,25 @@ LoopClosureResult close_loops(PoseGraph& graph, const std::vector<KeyframeCloud>
     ++verification_count;
     LoopVerificationFailure failure = LoopVerificationFailure::kFine;
     double fine_inlier_ratio = std::numeric_limits<double>::quiet_NaN();
+    LoopVerificationDiagnostics diagnostics;
     const auto verified = hooks && hooks->verify ? hooks->verify(candidate) :
         verify_loop_candidate(candidate, poses, aligned_keyframes, lengths,
-                              graph.gps_factor_indices(), parameters, degeneracy_ratio, &failure, &fine_inlier_ratio);
+                              graph.gps_factor_indices(), parameters, degeneracy_ratio, &failure, &fine_inlier_ratio, &diagnostics);
     if (std::isfinite(fine_inlier_ratio)) {
       best_fine_inlier_ratio = std::max(best_fine_inlier_ratio, fine_inlier_ratio);
     }
+    std::ostringstream candidate_log;
+    candidate_log << "loop " << (verified ? "accepted" : "rejected")
+                  << ": older_index=" << candidate.older_index << " newer_index=" << candidate.newer_index
+                  << " travel_m=" << candidate.travel_m << " reason=" << (verified ? "none" : loop_verification_failure_string(failure))
+                  << " correction_translation_m=" << diagnostics.correction_translation_m
+                  << " correction_rotation_deg=" << diagnostics.correction_rotation_deg
+                  << " fine_inlier_ratio=" << diagnostics.fine_inlier_ratio
+                  << " fine_converged=" << diagnostics.fine_converged << " coarse_converged=" << diagnostics.coarse_converged;
+    log_info(candidate_log.str());
     if (verified) {
       accepted.push_back(*verified);
+      accepted_diagnostics.push_back(diagnostics);
     } else if (failure == LoopVerificationFailure::kDegenerate) {
       ++rejected_degenerate;
     } else if (failure == LoopVerificationFailure::kCorrectionGate) {
@@ -268,6 +309,23 @@ LoopClosureResult close_loops(PoseGraph& graph, const std::vector<KeyframeCloud>
     }
   }
   const std::vector<VerifiedLoop> supported = supported_loops(accepted, poses, lengths, parameters);
+  for (std::size_t accepted_index = 0; accepted_index < accepted.size(); ++accepted_index) {
+    const VerifiedLoop& loop = accepted[accepted_index];
+    const LoopVerificationDiagnostics& diagnostics = accepted_diagnostics[accepted_index];
+    const bool has_support = std::any_of(supported.begin(), supported.end(), [&](const VerifiedLoop& item) {
+      return item.candidate.older_index == loop.candidate.older_index && item.candidate.newer_index == loop.candidate.newer_index;
+    });
+    if (!has_support) {
+      std::ostringstream unsupported_log;
+      unsupported_log << "loop rejected: older_index=" << loop.candidate.older_index
+                      << " newer_index=" << loop.candidate.newer_index << " travel_m=" << loop.candidate.travel_m
+                      << " reason=unsupported correction_translation_m=" << diagnostics.correction_translation_m
+                      << " correction_rotation_deg=" << diagnostics.correction_rotation_deg
+                      << " fine_inlier_ratio=" << diagnostics.fine_inlier_ratio;
+      log_info(unsupported_log.str());
+    }
+  }
+  std::vector<VerifiedLoop> active_loops = supported;
   double minimum_source_length = std::numeric_limits<double>::infinity();
   double maximum_source_length = 0.0;
   for (const VerifiedLoop& loop : accepted) {
@@ -322,7 +380,13 @@ LoopClosureResult close_loops(PoseGraph& graph, const std::vector<KeyframeCloud>
       if (worst == chi_squared.end() || *worst <= parameters.outlier_chi2) break;
       if (removals >= kMaximumRemovals) { failure = "inconsistent loops"; break; }
       statistics << ", removed chi2=" << *worst;
-      graph.remove_loop_factor(static_cast<std::size_t>(worst - chi_squared.begin()));
+      const std::size_t removed_index = static_cast<std::size_t>(worst - chi_squared.begin());
+      std::ostringstream removal_log;
+      removal_log << "loop removed: older_index=" << active_loops[removed_index].candidate.older_index
+                  << " newer_index=" << active_loops[removed_index].candidate.newer_index << " chi2=" << *worst;
+      log_info(removal_log.str());
+      active_loops.erase(active_loops.begin() + static_cast<std::ptrdiff_t>(removed_index));
+      graph.remove_loop_factor(removed_index);
       --result.count;
       ++removals;
       if (result.count == 0) break;
@@ -336,6 +400,14 @@ LoopClosureResult close_loops(PoseGraph& graph, const std::vector<KeyframeCloud>
       result.poses = graph.batch_poses();
     }
   } catch (const std::exception&) { failure = "optimization failed"; }
+  if (failure.empty()) {
+    for (const VerifiedLoop& loop : active_loops) {
+      std::ostringstream retained_log;
+      retained_log << "loop retained: older_index=" << loop.candidate.older_index
+                   << " newer_index=" << loop.candidate.newer_index;
+      log_info(retained_log.str());
+    }
+  }
   const int retained_count = result.count;
   graph.clear_loop_factors();
   result.count = retained_count;

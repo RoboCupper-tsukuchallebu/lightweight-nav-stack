@@ -421,7 +421,7 @@ TEST(LoopClosure, SaveMapFallsBackToAllPassZeroFilesAfterBatchFailure) {
 
   ASSERT_TRUE(localizer.save_map(parameters, failed_result, error)) << error;
 
-  EXPECT_NE(failed_result.warning.find("loop closure skipped:"), std::string::npos);
+  EXPECT_EQ(failed_result.warning, "loop closure skipped: optimization failed");
   EXPECT_EQ(read_map_metadata((fallback / "map.yaml").string()).loop_closure_count, 0);
   for (const char* filename : {"map.pcd", "map.yaml", "trajectory.csv"}) {
     ASSERT_TRUE(std::filesystem::exists(fallback / filename));
@@ -557,4 +557,45 @@ TEST(LoopClosure, DriftGateRejectsAdjacentPeriodAtOneThirdDrift) {
 
   EXPECT_TRUE(correct_period.has_value());
   EXPECT_FALSE(adjacent_period.has_value());
+}
+
+TEST(LoopClosure, UnconvergedCoarsePoseSeedsConvergedFineAlignment) {
+  PointList cloud;
+  for (int index = 0; index < 30; ++index) {
+    cloud.emplace_back(static_cast<float>(index % 5), static_cast<float>(index / 5),
+                       static_cast<float>(index % 3));
+  }
+  const std::vector<KeyframeCloud> keyframes{{0, 0.0, cloud}, {1, 1.0, cloud}};
+  const std::vector<BatchPose> poses{pose_at(0.0, 0.0), pose_at(0.5, 0.0)};
+  const LoopCandidate candidate{0, 1, 8.0};
+  int calls = 0;
+  Eigen::Isometry3d fine_initial_pose = Eigen::Isometry3d::Identity();
+  const LoopMatcherForTest matcher = [&](const PreparedTarget&, const PointList&,
+                                         const Eigen::Isometry3d& initial_pose,
+                                         const MatcherParameters&) {
+    MatchResult result;
+    ++calls;
+    if (calls == 1) {
+      result.target_to_source.translation().x() = 0.2;
+      result.converged = false;
+    } else {
+      fine_initial_pose = initial_pose;
+      result.target_to_source.translation().x() = 0.1;
+      result.converged = true;
+      result.inlier_ratio = 0.9;
+      result.information.setIdentity();
+    }
+    return result;
+  };
+
+  LoopVerificationDiagnostics diagnostics;
+  const auto result = verify_loop_candidate(candidate, poses, keyframes, {0.0, 8.0}, {}, {},
+                                             0.05, nullptr, nullptr, &diagnostics, &matcher);
+
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(calls, 2);
+  EXPECT_NEAR(fine_initial_pose.translation().x(), 0.2, 1e-9);
+  EXPECT_NEAR(diagnostics.correction_translation_m, 0.4, 1e-9);
+  EXPECT_FALSE(diagnostics.coarse_converged);
+  EXPECT_TRUE(diagnostics.fine_converged);
 }

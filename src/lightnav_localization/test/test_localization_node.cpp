@@ -31,8 +31,10 @@
 #include <tf2_ros/static_transform_broadcaster.h>
 
 #include "lightnav_localization/localization_node.hpp"
+#include "lightnav_localization/loop_closure.hpp"
 #include "lightnav_localization/map_metadata.hpp"
 #include "lightnav_localization/pcd_io.hpp"
+#include "lightnav_localization/pose_graph.hpp"
 #include "synthetic_world.hpp"
 
 using namespace lightnav_localization;
@@ -783,6 +785,40 @@ TEST_F(LocalizationNodeTest, MappingSavesMapOnShutdown) {
   EXPECT_GT(metadata.keyframe_count, 0);
   EXPECT_TRUE(metadata.batch_optimized);
   std::printf("[ MAPPING_SHUTDOWN ] keyframes=%d saved=1\n", metadata.keyframe_count);
+}
+
+TEST_F(LocalizationNodeTest, SaveMapReportsPassOneExceptionAndSucceeds) {
+  const std::filesystem::path output_directory = temp_directory_ / "loop_pass_one_failure";
+  create_node(make_mapping_options(output_directory));
+  bring_up();
+  drive_mapping_forward();
+  ASSERT_GT(odom_count_, 0) << last_status_.last_error;
+
+  std::vector<Eigen::Isometry3d> poses;
+  for (int index = 0; index <= 20; ++index) {
+    Eigen::Isometry3d pose = Eigen::Isometry3d::Identity();
+    pose.translation().x() = index <= 10 ? index : 20 - index;
+    poses.push_back(pose);
+  }
+  LoopClosureTestHooks hooks;
+  hooks.verify = [&poses](const LoopCandidate& candidate) -> std::optional<VerifiedLoop> {
+    VerifiedLoop loop;
+    loop.candidate = candidate;
+    loop.older_to_newer = poses[candidate.older_index].inverse() * poses[candidate.newer_index];
+    loop.information = diagonal_information(0.05, 0.01);
+    return loop;
+  };
+  hooks.elapsed_seconds = [] { return 0.0; };
+  hooks.before_batch = [](int) { throw std::runtime_error("injected pass one failure"); };
+  node_->seed_loop_closure_for_test(poses, &hooks);
+
+  const auto response = call_save_map();
+  node_->clear_loop_closure_hooks_for_test();
+
+  ASSERT_NE(response, nullptr);
+  EXPECT_TRUE(response->success) << response->message;
+  EXPECT_NE(response->message.find("loop closure skipped"), std::string::npos) << response->message;
+  EXPECT_TRUE(std::filesystem::exists(output_directory / "trajectory.csv"));
 }
 
 // Issue #43 D7 (2): after a successful save_map the recording stops, so the stop-time save is skipped
