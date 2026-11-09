@@ -59,6 +59,13 @@ if(BUILD_TESTING)
       GENERATE_RESULT_FOR_RETURN_CODE_ZERO)
   endforeach()
 
+  add_executable(test_arc_markers test/test_arc_markers.cpp)
+  target_link_libraries(test_arc_markers lightnav_controller_core GTest::gtest GTest::gtest_main ${controller_ros_libraries})
+  target_compile_options(test_arc_markers PRIVATE -Wall -Wextra -Werror)
+  ament_add_test(test_arc_markers COMMAND $<TARGET_FILE:test_arc_markers>
+    --gtest_output=xml:${AMENT_TEST_RESULTS_DIR}/${PROJECT_NAME}/test_arc_markers.gtest.xml
+    GENERATE_RESULT_FOR_RETURN_CODE_ZERO)
+
   add_executable(test_controller_node test/test_controller_node.cpp)
   target_link_libraries(test_controller_node lightnav_controller_core GTest::gtest GTest::gtest_main
     ${controller_ros_libraries})
