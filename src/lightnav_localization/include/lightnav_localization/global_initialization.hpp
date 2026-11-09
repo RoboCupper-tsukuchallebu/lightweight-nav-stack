@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cstddef>
 #include <string>
+#include <optional>
 #include <vector>
 #include "lightnav_localization/pcd_io.hpp"
 
@@ -70,7 +71,14 @@ GlobalInitializationPeakDecision decide_global_initialization_peaks(
 // The caller owns the abort flag and sets it when motion or cancellation is detected.
 // Candidate and wall-clock budgets are checked between bounded units of work; an in-flight
 // PreparedTarget construction or match_scan call cannot be interrupted.
+struct GlobalInitializationGnssWindow {
+  Eigen::Vector2d antenna_position = Eigen::Vector2d::Zero();
+  Eigen::Vector2d lever_arm = Eigen::Vector2d::Zero();
+  double radius_m = 5.0;
+};
+
 struct GlobalInitializationSearchParameters {
+  std::optional<GlobalInitializationGnssWindow> gnss_window;
   Eigen::Vector2d minimum = Eigen::Vector2d::Zero();
   Eigen::Vector2d maximum = Eigen::Vector2d::Zero();
   double grid_resolution_m = 0.1;

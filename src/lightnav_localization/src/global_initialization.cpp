@@ -252,6 +252,11 @@ std::vector<GlobalInitializationPeak> coarse_search(
         if (context.stopped()) return {};
         GlobalInitializationPeak peak;
         peak.position = {x, y}; peak.yaw_rad = yaw;
+        if (parameters.gnss_window) {
+          const auto& window = *parameters.gnss_window;
+          if ((peak.position - window.antenna_position).norm() > window.radius_m) continue;
+          peak.position -= Eigen::Rotation2Dd(yaw) * window.lever_arm;
+        }
         peak.coarse_score = likelihood(field, scan, peak, parameters.likelihood_sigma_m);
         ++context.candidates;
         candidates.push_back(peak);
@@ -259,6 +264,14 @@ std::vector<GlobalInitializationPeak> coarse_search(
     }
   }
   return suppress_peaks(std::move(candidates), parameters.peaks, false);
+}
+
+bool inside_gnss_window(const Eigen::Vector2d& base_position, double yaw,
+                        const GlobalInitializationSearchParameters& parameters) {
+  if (!parameters.gnss_window) return true;
+  const auto& window = *parameters.gnss_window;
+  const Eigen::Vector2d antenna = base_position + Eigen::Rotation2Dd(yaw) * window.lever_arm;
+  return (antenna - window.antenna_position).norm() <= window.radius_m;
 }
 
 GlobalInitializationPeak refine_peak(const GlobalInitializationLikelihoodField& field,
@@ -272,6 +285,7 @@ GlobalInitializationPeak refine_peak(const GlobalInitializationLikelihoodField& 
         if (context.stopped()) return peak;
         GlobalInitializationPeak candidate = center;
         candidate.position += Eigen::Vector2d(x, y); candidate.yaw_rad += yaw;
+        if (!inside_gnss_window(candidate.position, candidate.yaw_rad, parameters)) continue;
         if ((candidate.position.array() < parameters.minimum.array()).any() ||
             (candidate.position.array() > parameters.maximum.array()).any()) continue;
         candidate.coarse_score = likelihood(field, scan, candidate, parameters.likelihood_sigma_m);
@@ -398,7 +412,15 @@ GlobalInitializationSearchResult search_global_initialization(
     output.decision.error = "invalid_parameters";
     return output;
   }
-  if (extent.prod() > parameters.maximum_area_m2) {
+  if (parameters.gnss_window &&
+      (!parameters.gnss_window->antenna_position.allFinite() ||
+       !parameters.gnss_window->lever_arm.allFinite() ||
+       !std::isfinite(parameters.gnss_window->radius_m) || parameters.gnss_window->radius_m <= 0.0)) {
+    output.decision.error = "invalid_parameters";
+    return output;
+  }
+  if ((parameters.gnss_window ? M_PI * std::pow(parameters.gnss_window->radius_m +
+          parameters.gnss_window->lever_arm.norm(), 2) : extent.prod()) > parameters.maximum_area_m2) {
     output.decision.error = "map_too_large";
     return output;
   }
@@ -431,6 +453,12 @@ GlobalInitializationSearchResult search_global_initialization(
     if (output.decision.accepted && verified[output.decision.best_index].degenerate) {
       output.decision.accepted = false;
       output.decision.error = "degenerate";
+    }
+    if (output.decision.accepted && !inside_gnss_window(
+        poses[output.decision.best_index].translation().head<2>(),
+        verified[output.decision.best_index].yaw_rad, parameters)) {
+      output.decision.accepted = false;
+      output.decision.error = "outside_gnss_window";
     }
     if (output.decision.accepted) output.pose = poses[output.decision.best_index];
     output.evaluated_candidates = context.candidates;
