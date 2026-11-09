@@ -51,6 +51,8 @@ LiDAR の外部パラメータ（`base_frame→点群の frame_id`）と GPS ア
 | `/lightnav/localization/odom` | `nav_msgs/Odometry` | reliable, depth 10 | `map`→`base_footprint`、共分散あり、stamp は入力 `/wheel/odom` と同一 |
 | `/lightnav/localization/status` | `lightnav_msgs/LocalizationStatus` | reliable, transient_local, depth 1 | `status_rate_hz`（既定 2 Hz）+ 状態変化時 |
 | `/lightnav/localization/aligned_scan` | `sensor_msgs/PointCloud2` | SensorDataQoS | デバッグ（`map` 座標） |
+| `/lightnav/localization/map_cloud` | `sensor_msgs/PointCloud2` | reliable, transient_local, depth 1 | Foxglove 用のプレビュー（`map` 座標）。mapping: これまでのスキャンを `visualization_voxel_m` で間引いて積んだ点（オンライン推定の姿勢で置くので、保存される `map.pcd` とは少し違う）。localization: 事前地図。購読者がいて内容が変わったときだけ `visualization_rate_hz` で出す |
+| `/lightnav/localization/path` | `nav_msgs/Path` | reliable, transient_local, depth 1 | これまでの `map`→`base_footprint` の軌跡（`path_min_step_m` ごと、最大 `path_max_poses` 個）。`map_cloud` と同じ条件で出す |
 | `/tf` `map→odom` | TF | — | `publish_tf: false` で停止 |
 | `~/set_initial_pose` | `lightnav_msgs/SetInitialPose` | 既定 | `frame_id=map`。orientation が単位元かつ `covariance[35] < 0` なら yaw 未指定 |
 | `~/reload_map` | `std_srvs/Trigger` | 既定 | `map_file` / `map_yaml` を読み直して再初期化 |
@@ -112,6 +114,9 @@ params ファイル `docker/config/localization_indoor.yaml` で切り替える
 | `init_gps_max_std_m` / `init_scan_count` / `init_yaw_step_deg` | 3.0 / 3 / 15 | 初期位置合わせ |
 | `init_coarse_corr_m` / `init_fine_corr_m` / `init_inlier_ratio_min` | 2.0 / 0.5 / 0.6 | 初期 yaw 照合 |
 | `publish_tf` / `status_rate_hz` | true / 2.0 | |
+| `visualization_enabled` | true | `map_cloud` と `path` を出す。false で両方とも作らない |
+| `visualization_rate_hz` / `visualization_voxel_m` / `visualization_max_points` | 0.5 / 0.2 / 1000000 | プレビューの出力周期（ノードの時計）、点の間引き、点数の上限（超えた分は積まない） |
+| `path_min_step_m` / `path_max_poses` | 0.1 / 20000 | 軌跡に足す最小の移動量、最大の個数（超えたら古い方から捨てる） |
 | `window_s` / `huber_k` | 30.0 / 1.0 | 姿勢グラフ |
 | `voxel_size_m` / `keyframe_distance_m` / `keyframe_time_s` | 0.5 / 1.0 / 1.0 | LiDAR オドメトリ |
 | `map_inlier_ratio_min` / `map_gate_translation_m` / `map_gate_rotation_rad` | 0.5 / 1.0 / 0.2 | 事前地図照合 |
@@ -142,6 +147,23 @@ params ファイル `docker/config/localization_indoor.yaml` で切り替える
 | `loop_outlier_chi2` / `loop_time_budget_s` | 12.6 / 25.0 | 外れ値の閾値と保存処理の締め切り |
 
 周辺共分散に取っておく時間はパス0の測定値であり、ループ追加後に増える計算時間は反映しない。候補の探索半径を超えるドリフトは検出できず、周期的な構造で複数の誤照合が同じずれを支持し合う場合もある。
+
+## 診断とエラーの保持
+
+`/diagnostics` には GNSS に加え、state、map match、errors、performance を同じ配列で 1 Hz に出す。
+state は動作状態と位置の不確かさ、map match は一致率と棄却理由別の累計、errors はエラーと出来事の累計、
+performance は直近のスキャン処理時間とプロセスの CPU・メモリを示す。CPU は複数コアのため 100 % を超える。
+メモリは Linux の RSS で、他の OS では `unavailable` と表示する。
+
+| パラメータ | 既定 | 意味 |
+|---|---:|---|
+| `diagnostics_cpu_warn_percent` | 200 | CPU 使用率の警告閾値 |
+| `diagnostics_memory_warn_mb` | 2048 | RSS の警告閾値 |
+| `last_error_hold_s` | 10 | 出来事のエラーを保持する秒数 |
+
+`last_error` の状態エラーは条件が解消すると消える。最適化失敗、地図再構築失敗、車輪時刻の逆行は出来事として扱い、
+最後に起きてからノードの時計で `last_error_hold_s` が経過すると消える。累計は `error_events_total` に残る。
+これは従来の、再初期化まで出来事を保持する意味からの変更である。GNSS 原点なしと保存後の記録停止の注記は警告扱いにしない。
 
 ## GNSS の入力と `/diagnostics`
 
@@ -284,3 +306,5 @@ configure 失敗に加え、室内（GNSS 無し）の mapping（`gps_topic` を
 GNSS にならない、始点が原点・yaw 0・前進が +x・`has_gps_origin: false`）と、原点の無い地図 + `set_initial_pose`
 での `TRACKING` の維持を確認する。`test_initial_alignment` / `test_point_cloud_extraction` が
 純ロジックと非有限点の除去を単体で確認する。
+
+bag の再生で mapping するツールは [`tools/bag_replay`](../../tools/bag_replay/README.md)（`replay` Docker ターゲット）。

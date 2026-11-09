@@ -11,6 +11,7 @@
 #include <fstream>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <random>
 #include <set>
 #include <sstream>
@@ -23,6 +24,7 @@
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <lifecycle_msgs/msg/state.hpp>
 #include <nav_msgs/msg/odometry.hpp>
+#include <nav_msgs/msg/path.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/nav_sat_fix.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
@@ -188,11 +190,26 @@ class LocalizationNodeTest : public ::testing::Test {
     diagnostics_subscription_ = helper_->create_subscription<diagnostic_msgs::msg::DiagnosticArray>(
         "/diagnostics", rclcpp::QoS(10).reliable(),
         [this](diagnostic_msgs::msg::DiagnosticArray::SharedPtr message) {
+          std::set<std::string> names;
           for (const auto& status : message->status) {
+            names.insert(status.name);
+            diagnostics_levels_[status.name] = status.level;
+            if (status.name == "localization_node: performance") {
+              std::map<std::string, std::string> sample;
+              for (const auto& entry : status.values) sample[entry.key] = entry.value;
+              if (sample.count("scans_processed") && std::stoi(sample.at("scans_processed")) > 0) {
+                saw_scan_timing_ = std::stod(sample.at("scan_time_mean_ms")) > 0.0 &&
+                    std::stod(sample.at("scan_time_max_ms")) >= std::stod(sample.at("scan_time_mean_ms"));
+              }
+            }
+            for (const auto& entry : status.values) diagnostics_values_[status.name][entry.key] = entry.value;
             if (status.name != "localization_node: GNSS") continue;
             last_gnss_diagnostics_level_ = status.level;
             for (const auto& entry : status.values) last_gnss_diagnostics_[entry.key] = entry.value;
           }
+          if (names.count("localization_node: GNSS") && names.count("localization_node: state") &&
+              names.count("localization_node: map match") && names.count("localization_node: errors") &&
+              names.count("localization_node: performance")) ++complete_diagnostics_count_;
         });
     set_initial_pose_client_ =
         helper_->create_client<SetInitialPose>("/localization_node/set_initial_pose");
@@ -215,6 +232,10 @@ class LocalizationNodeTest : public ::testing::Test {
     set_initial_pose_client_.reset();
     save_map_client_.reset();
     status_subscription_.reset();
+    map_cloud_subscription_.reset();
+    path_subscription_.reset();
+    last_map_cloud_.reset();
+    last_path_.reset();
     diagnostics_subscription_.reset();
     odom_subscription_.reset();
     gps_publisher_.reset();
@@ -623,6 +644,43 @@ class LocalizationNodeTest : public ::testing::Test {
     return options;
   }
 
+  // Latched subscriptions to the live preview topics (the same QoS Foxglove uses).
+  void subscribe_visualization() {
+    const rclcpp::QoS latched_qos = rclcpp::QoS(1).reliable().transient_local();
+    map_cloud_subscription_ = helper_->create_subscription<sensor_msgs::msg::PointCloud2>(
+        "/lightnav/localization/map_cloud", latched_qos,
+        [this](sensor_msgs::msg::PointCloud2::SharedPtr message) { last_map_cloud_ = *message; });
+    path_subscription_ = helper_->create_subscription<nav_msgs::msg::Path>(
+        "/lightnav/localization/path", latched_qos,
+        [this](nav_msgs::msg::Path::SharedPtr message) { last_path_ = *message; });
+  }
+
+  // Mapping without GPS: stand still until INITIALIZING ends, then drive 1.6 m straight along +x.
+  void drive_mapping_without_gps_along_x() {
+    Eigen::Isometry3d start_pose = Eigen::Isometry3d::Identity();
+    start_pose.translation() = Eigen::Vector3d(5.0, 3.0, kSensorHeightM);
+    const auto pose_after = [&start_pose](double distance_m) {
+      Eigen::Isometry3d pose = start_pose;
+      pose.translation().x() += distance_m;
+      return pose;
+    };
+    drive_mapping([&start_pose](double /*elapsed*/) { return start_pose; }, 1500ms);
+    drive_mapping([&pose_after](double elapsed) { return pose_after(0.8 * elapsed); }, 2000ms);
+  }
+
+  rclcpp::NodeOptions make_indoor_mapping_options(const std::filesystem::path& output_directory,
+                                                  bool is_visualization_enabled) const {
+    rclcpp::NodeOptions options = make_mapping_options(output_directory);
+    std::vector<rclcpp::Parameter> overrides = options.parameter_overrides();
+    overrides.emplace_back("gps_topic", "/lightnav/gnss_disabled");
+    overrides.emplace_back("allow_mapping_without_gps", true);
+    overrides.emplace_back("gps_timeout_s", 1.0);
+    overrides.emplace_back("visualization_enabled", is_visualization_enabled);
+    overrides.emplace_back("visualization_rate_hz", 5.0);
+    options.parameter_overrides(overrides);
+    return options;
+  }
+
   // Mapping for 2 s, moving along +x. Returns the last pose sent.
   Eigen::Isometry3d drive_mapping_forward() {
     return drive_mapping(
@@ -646,6 +704,11 @@ class LocalizationNodeTest : public ::testing::Test {
     }
     return files;
   }
+
+  rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr map_cloud_subscription_;
+  rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr path_subscription_;
+  std::optional<sensor_msgs::msg::PointCloud2> last_map_cloud_;
+  std::optional<nav_msgs::msg::Path> last_path_;
 
   std::filesystem::path temp_directory_;
   std::filesystem::path map_file_;
@@ -676,11 +739,156 @@ class LocalizationNodeTest : public ::testing::Test {
   double gps_variance_m2_ = 0.36;
   int odom_count_ = 0;
   int status_count_ = 0;
+  int complete_diagnostics_count_ = 0;
+  bool saw_scan_timing_ = false;
+  std::map<std::string, std::map<std::string, std::string>> diagnostics_values_;
+  std::map<std::string, uint8_t> diagnostics_levels_;
   bool all_odom_stamps_matched_ = true;
   std::mt19937 gps_random_{20261106};
   std::normal_distribution<double> gps_normal_{0.0, 1.0};
   int gps_fix_count_ = 0;
 };
+
+TEST_F(LocalizationNodeTest, PublishesAllDiagnosticsTogether) {
+  create_node(make_options(map_file_.string(), map_yaml_.string()));
+  bring_up();
+  start_tracking_at_truth();
+  run_for(5000ms, kInputWheel | kInputScans);
+  EXPECT_GE(complete_diagnostics_count_, 3);
+  EXPECT_TRUE(saw_scan_timing_);
+  EXPECT_EQ(last_gnss_diagnostics_level_, diagnostic_msgs::msg::DiagnosticStatus::OK);
+  const auto& performance = diagnostics_values_.at("localization_node: performance");
+  EXPECT_GE(std::stod(performance.at("cpu_percent")), 0.0);
+#ifdef __linux__
+  EXPECT_GT(std::stod(performance.at("memory_rss_mb")), 0.0);
+#else
+  EXPECT_EQ(performance.at("memory_rss_mb"), "unavailable");
+#endif
+}
+
+TEST_F(LocalizationNodeTest, MapMatchDiagnosticsCountEachRejectionReason) {
+  create_node(make_options(map_file_.string(), map_yaml_.string()));
+  bring_up();
+  start_tracking_at_truth();
+  run_for(1200ms, kInputWheel | kInputScans);
+  const auto initial_match = diagnostics_values_.at("localization_node: map match");
+  int attempt = 0;
+  node_->set_map_match_hook_for_test([&attempt](MatchResult& result) {
+    ++attempt;
+    if (attempt > 4) {
+      result.converged = true;
+      result.inlier_ratio = 1.0;
+      result.target_to_source.translation() = kTruthPosition;
+      result.target_to_source.linear() =
+          Eigen::AngleAxisd(kTruthYaw, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+      return;
+    }
+    if (attempt == 1) result.converged = false;
+    if (attempt == 2) {
+      result.converged = true;
+      result.inlier_ratio = 0.0;
+    }
+    if (attempt == 3) {
+      result.converged = true;
+      result.inlier_ratio = 1.0;
+      result.target_to_source.translation().x() += 100.0;
+    }
+    if (attempt == 4) {
+      result.converged = true;
+      result.inlier_ratio = 1.0;
+      result.target_to_source.linear() =
+          result.target_to_source.linear() *
+          Eigen::AngleAxisd(1.0, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+    }
+  });
+  run_for(5000ms, kInputWheel | kInputScans);
+  ASSERT_GE(attempt, 4);
+  const auto& match = diagnostics_values_.at("localization_node: map match");
+  EXPECT_EQ(std::stoi(match.at("rejected_not_converged_total")) -
+                std::stoi(initial_match.at("rejected_not_converged_total")),
+            1);
+  EXPECT_EQ(std::stoi(match.at("rejected_inlier_total")) -
+                std::stoi(initial_match.at("rejected_inlier_total")),
+            1);
+  EXPECT_EQ(std::stoi(match.at("rejected_translation_gate_total")) -
+                std::stoi(initial_match.at("rejected_translation_gate_total")),
+            1);
+  EXPECT_EQ(std::stoi(match.at("rejected_rotation_gate_total")) -
+                std::stoi(initial_match.at("rejected_rotation_gate_total")),
+            1);
+}
+
+TEST_F(LocalizationNodeTest, StateDiagnosticsWarnOnOdomOnlyAndErrorOnLost) {
+  auto options = make_options(map_file_.string(), map_yaml_.string());
+  options.append_parameter_override("tracking_window_s", 0.5);
+  options.append_parameter_override("gps_timeout_s", 0.1);
+  options.append_parameter_override("odom_only_max_s", 3.0);
+  create_node(options);
+  bring_up();
+  start_tracking_at_truth();
+  node_->set_map_match_hook_for_test([](MatchResult& result) { result.converged = false; });
+  bool observed_odom_only = false;
+  bool observed_lost = false;
+  for (int index = 0; index < 35 && !observed_lost; ++index) {
+    run_for(200ms, kInputWheel | kInputScans);
+    const auto found = diagnostics_values_.find("localization_node: state");
+    if (found == diagnostics_values_.end()) continue;
+    if (found->second.at("state") == "ODOM_ONLY") {
+      EXPECT_EQ(diagnostics_levels_.at("localization_node: state"),
+                diagnostic_msgs::msg::DiagnosticStatus::WARN);
+      observed_odom_only = true;
+    }
+    if (found->second.at("state") == "LOST") {
+      EXPECT_EQ(diagnostics_levels_.at("localization_node: state"),
+                diagnostic_msgs::msg::DiagnosticStatus::ERROR);
+      observed_lost = true;
+    }
+  }
+  EXPECT_TRUE(observed_odom_only);
+  EXPECT_TRUE(observed_lost);
+}
+
+TEST_F(LocalizationNodeTest, MappingOdomOnlyStateIsOk) {
+  rclcpp::NodeOptions options;
+  options.parameter_overrides(
+      {rclcpp::Parameter("mode", "mapping"),
+       rclcpp::Parameter("map_output_dir", (temp_directory_ / "mapping_diagnostics").string()),
+       rclcpp::Parameter("allow_mapping_without_gps", true),
+       rclcpp::Parameter("gps_timeout_s", 0.5)});
+  create_node(options);
+  bring_up();
+  run_for(4000ms, kInputWheel | kInputScans);
+  ASSERT_EQ(diagnostics_values_.at("localization_node: state").at("state"), "ODOM_ONLY");
+  EXPECT_EQ(diagnostics_levels_.at("localization_node: state"),
+            diagnostic_msgs::msg::DiagnosticStatus::OK);
+}
+
+TEST_F(LocalizationNodeTest, OptimizationFailureExpiresFromErrorDiagnostics) {
+  auto options = make_options(map_file_.string(), map_yaml_.string());
+  options.append_parameter_override("last_error_hold_s", 2.0);
+  create_node(options);
+  bring_up();
+  start_tracking_at_truth();
+  node_->inject_optimization_failure_for_test();
+  bool observed_warning = false;
+  bool observed_clear = false;
+  for (int index = 0; index < 50 && !observed_clear; ++index) {
+    run_for(200ms, kInputWheel | kInputScans);
+    const auto found = diagnostics_values_.find("localization_node: errors");
+    if (found == diagnostics_values_.end() || found->second.at("error_events_total") != "1")
+      continue;
+    if (diagnostics_levels_.at("localization_node: errors") ==
+        diagnostic_msgs::msg::DiagnosticStatus::WARN)
+      observed_warning = true;
+    if (observed_warning &&
+        diagnostics_levels_.at("localization_node: errors") ==
+            diagnostic_msgs::msg::DiagnosticStatus::OK &&
+        found->second.at("last_error").empty())
+      observed_clear = true;
+  }
+  EXPECT_TRUE(observed_warning);
+  EXPECT_TRUE(observed_clear);
+}
 
 TEST_F(LocalizationNodeTest, ConfigureFailsWithoutMapFile) {
   create_node(make_options((temp_directory_ / "missing.pcd").string(),
@@ -890,13 +1098,27 @@ TEST_F(LocalizationNodeTest, StaysInitializingWithoutGpsOrService) {
 TEST_F(LocalizationNodeTest, ReportsAMapWithoutGpsOriginInLastError) {
   create_node(make_options(map_file_.string(), no_origin_yaml_.string()));
   bring_up();
-  ASSERT_TRUE(run_until([this]() { return status_count_ > 0; }, 2000ms,
-                        kInputWheel | kInputScans));
+  ASSERT_TRUE(run_until([this]() { return status_count_ > 0; }, 2000ms, kInputWheel | kInputScans));
   EXPECT_EQ(last_status_.state, LocalizationStatus::INITIALIZING);
   EXPECT_EQ(odom_count_, 0);
   EXPECT_NE(last_status_.last_error.find("GPS origin"), std::string::npos)
       << last_status_.last_error;
   std::printf("[ NO_ORIGIN ] last_error=%s\n", last_status_.last_error.c_str());
+}
+
+TEST_F(LocalizationNodeTest, MissingGpsOriginNoteKeepsErrorsLevelOk) {
+  create_node(make_options(map_file_.string(), no_origin_yaml_.string()));
+  bring_up();
+  ASSERT_TRUE(run_until(
+      [this]() {
+        return diagnostics_values_.count("localization_node: errors") > 0;
+      },
+      3000ms, kInputWheel | kInputScans));
+  const auto &errors = diagnostics_values_.at("localization_node: errors");
+  EXPECT_EQ(errors.at("last_error"), "map has no GPS origin: GPS disabled");
+  EXPECT_EQ(errors.at("error_events_total"), "0");
+  EXPECT_EQ(diagnostics_levels_.at("localization_node: errors"),
+            diagnostic_msgs::msg::DiagnosticStatus::OK);
 }
 
 TEST_F(LocalizationNodeTest, GpsWithUnknownYawTracksAndWheelStopGoesStale) {
@@ -1208,6 +1430,51 @@ TEST_F(LocalizationNodeTest, MappingWithoutGpsStartsAtTheStartPoseAndDrivesAlong
   }
   std::printf("[ INDOOR_MAPPING ] keyframes=%zu first=(%.3f,%.3f,yaw %.3f) last=(%.3f,%.3f,z %.3f)\n",
               rows.size(), first.x, first.y, first.yaw, last.x, last.y, last.z);
+}
+
+// Live preview for Foxglove (Issue #43 replay tooling): the map cloud and the path are latched topics.
+TEST_F(LocalizationNodeTest, MappingPublishesTheLivePreviewMapCloudAndPath) {
+  constexpr double kMinDrivenDistanceM = 0.5;
+  world_ = std::make_unique<SyntheticWorld>(
+      std::vector<Eigen::Vector2d>{Eigen::Vector2d(0.0, 3.0), Eigen::Vector2d(30.0, 3.0)}, true);
+  create_node(make_indoor_mapping_options(temp_directory_ / "preview", true));
+  subscribe_visualization();
+  gps_variance_m2_ = 1.0;
+  bring_up();
+
+  drive_mapping_without_gps_along_x();
+  spin_for(500ms);
+
+  ASSERT_TRUE(last_map_cloud_.has_value());
+  EXPECT_EQ(last_map_cloud_->header.frame_id, "map");
+  EXPECT_GT(last_map_cloud_->width, 100U);
+  ASSERT_TRUE(last_path_.has_value());
+  EXPECT_EQ(last_path_->header.frame_id, "map");
+  ASSERT_GE(last_path_->poses.size(), 2U);
+  const double driven_x =
+      last_path_->poses.back().pose.position.x - last_path_->poses.front().pose.position.x;
+  EXPECT_GT(driven_x, kMinDrivenDistanceM);
+}
+
+TEST_F(LocalizationNodeTest, VisualizationEnabledFalsePublishesNeitherMapCloudNorPath) {
+  create_node(make_indoor_mapping_options(temp_directory_ / "preview_off", false));
+  bring_up();
+
+  drive_mapping_without_gps_along_x();
+
+  EXPECT_EQ(helper_->count_publishers("/lightnav/localization/map_cloud"), 0U);
+  EXPECT_EQ(helper_->count_publishers("/lightnav/localization/path"), 0U);
+}
+
+TEST_F(LocalizationNodeTest, LocalizationModePublishesThePriorMapCloudOnActivate) {
+  create_node(make_options(map_file_.string(), map_yaml_.string()));
+  subscribe_visualization();
+
+  bring_up();
+
+  ASSERT_TRUE(last_map_cloud_.has_value());
+  EXPECT_EQ(last_map_cloud_->header.frame_id, "map");
+  EXPECT_GT(last_map_cloud_->width, 100U);
 }
 
 // Acceptance (b): a map without a GPS origin plus set_initial_pose (with yaw) keeps TRACKING with only the

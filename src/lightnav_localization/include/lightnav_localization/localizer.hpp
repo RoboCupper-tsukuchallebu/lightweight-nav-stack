@@ -38,6 +38,7 @@ struct LocalizerParameters {
   int gps_conflict_window = 10;
   double gps_conflict_ratio = 0.5;
   double drift_rate = 0.02;
+  double last_error_hold_s = 10.0;
   double map_submap_rebuild_distance_m = 50.0;
   double initial_sigma_xy_m = 0.5;
   double initial_sigma_yaw_rad = 0.1;
@@ -54,6 +55,22 @@ struct LocalizerOutput {
   bool is_large_correction = false;
   bool is_gps_conflict = false;
   double pending_correction_m = 0.0;
+};
+
+struct MapMatchStatistics {
+  std::size_t attempted_total = 0;
+  std::size_t accepted_total = 0;
+  std::size_t rejected_not_converged_total = 0;
+  std::size_t rejected_inlier_total = 0;
+  std::size_t rejected_translation_gate_total = 0;
+  std::size_t rejected_rotation_gate_total = 0;
+  double last_gate_scale = 1.0;
+};
+
+struct ScanTimeStatistics {
+  std::size_t count = 0;
+  double total_ms = 0.0;
+  double maximum_ms = 0.0;
 };
 
 // Thread contract: every public method must be called from ONE thread (the node's executor, with a
@@ -82,6 +99,7 @@ class Localizer {
   // thread-safe: Localizer must be called from one thread (the ROS node's executor).
   LocalizationState poll_state(double now_sec);
   const std::string& last_error() const;
+  std::size_t error_events_total() const;
   std::size_t pending_scan_count() const;
   void inject_optimization_failure_for_test();
   // Next prior-map rebuild: 1 = the worker throws, 2 = starting the worker throws system_error.
@@ -90,9 +108,11 @@ class Localizer {
   std::vector<Eigen::Isometry3d> lidar_keyframe_poses_for_test() const;
 
   double last_scan_time_ms() const;
+  ScanTimeStatistics take_scan_time_statistics();
   double last_match_time_ms() const;
   double last_submap_rebuild_time_ms() const;
   // Read-only diagnostics for LocalizationStatus.
+  MapMatchStatistics map_match_statistics() const;
   double last_inlier_ratio() const;
   double last_lidar_odom_inlier_ratio() const;
   double last_map_match_stamp_sec() const;
