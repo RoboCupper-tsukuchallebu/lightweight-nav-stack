@@ -30,6 +30,9 @@ controller_node:
 
 localization_node:
   ros__parameters:
+    # Issue #59, user decision 2026-11-09: accept map-match yaw corrections up to 2.0 rad (code default 0.2 rad
+    # rejected correct corrections after wheel slip, so the yaw stayed off).
+    map_gate_rotation_rad: 2.0
     # GNSS input contract (Issue #43 section 4.3, decisions D1, D8, D10). Mapping and localization use the same topic.
     gps_topic: /rtk/fix_all
     # 1 = SBAS (Float) or better. The single-point solution (status 0) is no GNSS observation: it does not
