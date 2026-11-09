@@ -111,6 +111,7 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
   double map_voxel_size_m_ = 0.2;
   double keyframe_cloud_voxel_m_ = 0.25;
   int batch_max_iterations_ = 100;
+  LoopClosureParameters loop_closure_parameters_;
   double init_travel_m_ = 3.0;
   bool allow_mapping_without_gps_ = false;
   std::string map_frame_;

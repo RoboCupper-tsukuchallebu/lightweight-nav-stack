@@ -82,7 +82,8 @@ void write_map_metadata(const std::string& file_path, const MapMetadata& metadat
   stream << "voxel_size_m: " << metadata.voxel_size_m << '\n'
          << "created: " << metadata.created << '\n'
          << "keyframe_count: " << metadata.keyframe_count << '\n'
-         << "batch_optimized: " << metadata.batch_optimized << '\n';
+         << "batch_optimized: " << metadata.batch_optimized << '\n'
+         << "loop_closure_count: " << metadata.loop_closure_count << '\n';
   stream.flush();
   stream.close();
   if (stream.fail()) throw std::runtime_error("map.yaml write failed: " + file_path);
@@ -105,6 +106,10 @@ MapMetadata read_map_metadata(const std::string& file_path) {
   metadata.created = require(values, "created", file_path);
   metadata.keyframe_count = parse_int(require(values, "keyframe_count", file_path), "keyframe_count", file_path);
   metadata.batch_optimized = parse_bool(require(values, "batch_optimized", file_path), "batch_optimized", file_path);
+  const auto loop_count = values.find("loop_closure_count");
+  if (loop_count != values.end()) {
+    metadata.loop_closure_count = parse_int(loop_count->second, "loop_closure_count", file_path);
+  }
   return metadata;
 }
 

@@ -36,6 +36,7 @@ add_library(lightnav_localization_core
   src/downsample.cpp
   src/matcher.cpp
   src/pose_graph.cpp
+  src/loop_closure.cpp
   src/gps_input.cpp
   src/lidar_odometry.cpp
   src/initial_alignment.cpp
@@ -103,6 +104,14 @@ if(BUILD_TESTING)
     target_compile_options(test_${test_name} PRIVATE -Wall -Wextra -Werror)
     add_test(NAME ${test_name} COMMAND test_${test_name})
   endforeach()
+
+  add_executable(test_loop_closure test/test_loop_closure.cpp)
+  target_link_libraries(test_loop_closure lightnav_localization_core GTest::gtest GTest::gtest_main)
+  target_compile_options(test_loop_closure PRIVATE -Wall -Wextra -Werror)
+  ament_add_test(loop_closure
+    COMMAND $<TARGET_FILE:test_loop_closure>
+      --gtest_output=xml:${AMENT_TEST_RESULTS_DIR}/${PROJECT_NAME}/loop_closure.gtest.xml
+    GENERATE_RESULT_FOR_RETURN_CODE_ZERO TIMEOUT 600)
 
   add_executable(test_localization_node test/test_localization_node.cpp)
   target_link_libraries(test_localization_node

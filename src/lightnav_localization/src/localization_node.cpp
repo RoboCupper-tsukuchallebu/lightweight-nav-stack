@@ -166,6 +166,21 @@ void LocalizationNode::declare_parameters() {
   declare_parameter<double>("map_voxel_size_m", 0.2);
   declare_parameter<double>("keyframe_cloud_voxel_m", 0.25);
   declare_parameter<int>("batch_max_iterations", 100);
+  declare_parameter<bool>("loop_closure_enabled", true);
+  declare_parameter<double>("loop_min_travel_m", 8.0);
+  declare_parameter<double>("loop_search_radius_m", 3.0);
+  declare_parameter<double>("loop_candidate_spacing_m", 0.5);
+  declare_parameter<int>("loop_max_verifications", 200);
+  declare_parameter<int>("loop_submap_half_keyframes", 5);
+  declare_parameter<double>("loop_coarse_correspondence_m", 2.0);
+  declare_parameter<double>("loop_fine_correspondence_m", 0.5);
+  declare_parameter<double>("loop_inlier_ratio_min", 0.7);
+  declare_parameter<double>("loop_max_drift_ratio", 0.1);
+  declare_parameter<double>("loop_max_rotation_correction_rad", 0.35);
+  declare_parameter<int>("loop_min_support", 1);
+  declare_parameter<double>("loop_covariance_scale", 1.0);
+  declare_parameter<double>("loop_outlier_chi2", 12.6);
+  declare_parameter<double>("loop_time_budget_s", 25.0);
   declare_parameter<double>("init_travel_m", 3.0);
   declare_parameter<bool>("allow_mapping_without_gps", false);
 
@@ -250,8 +265,40 @@ bool LocalizationNode::read_parameters(std::string& error) {
   map_voxel_size_m_ = get_parameter("map_voxel_size_m").as_double();
   keyframe_cloud_voxel_m_ = get_parameter("keyframe_cloud_voxel_m").as_double();
   batch_max_iterations_ = static_cast<int>(get_parameter("batch_max_iterations").as_int());
+  loop_closure_parameters_.enabled = get_parameter("loop_closure_enabled").as_bool();
+  loop_closure_parameters_.min_travel_m = get_parameter("loop_min_travel_m").as_double();
+  loop_closure_parameters_.search_radius_m = get_parameter("loop_search_radius_m").as_double();
+  loop_closure_parameters_.candidate_spacing_m = get_parameter("loop_candidate_spacing_m").as_double();
+  loop_closure_parameters_.max_verifications = static_cast<int>(get_parameter("loop_max_verifications").as_int());
+  loop_closure_parameters_.submap_half_keyframes = static_cast<int>(get_parameter("loop_submap_half_keyframes").as_int());
+  loop_closure_parameters_.coarse_correspondence_m = get_parameter("loop_coarse_correspondence_m").as_double();
+  loop_closure_parameters_.fine_correspondence_m = get_parameter("loop_fine_correspondence_m").as_double();
+  loop_closure_parameters_.inlier_ratio_min = get_parameter("loop_inlier_ratio_min").as_double();
+  loop_closure_parameters_.max_drift_ratio = get_parameter("loop_max_drift_ratio").as_double();
+  loop_closure_parameters_.max_rotation_correction_rad = get_parameter("loop_max_rotation_correction_rad").as_double();
+  loop_closure_parameters_.min_support = static_cast<int>(get_parameter("loop_min_support").as_int());
+  loop_closure_parameters_.covariance_scale = get_parameter("loop_covariance_scale").as_double();
+  loop_closure_parameters_.outlier_chi2 = get_parameter("loop_outlier_chi2").as_double();
+  loop_closure_parameters_.time_budget_s = get_parameter("loop_time_budget_s").as_double();
   init_travel_m_ = get_parameter("init_travel_m").as_double();
   allow_mapping_without_gps_ = get_parameter("allow_mapping_without_gps").as_bool();
+
+  const LoopClosureParameters& loop = loop_closure_parameters_;
+  if (!(std::isfinite(loop.min_travel_m) && loop.min_travel_m > 0.0 &&
+        std::isfinite(loop.search_radius_m) && loop.search_radius_m > 0.0 &&
+        std::isfinite(loop.candidate_spacing_m) && loop.candidate_spacing_m > 0.0 &&
+        loop.max_verifications >= 0 && loop.submap_half_keyframes >= 0 &&
+        std::isfinite(loop.coarse_correspondence_m) && loop.coarse_correspondence_m > 0.0 &&
+        std::isfinite(loop.fine_correspondence_m) && loop.fine_correspondence_m > 0.0 &&
+        std::isfinite(loop.inlier_ratio_min) && loop.inlier_ratio_min >= 0.0 && loop.inlier_ratio_min <= 1.0 &&
+        std::isfinite(loop.max_drift_ratio) && loop.max_drift_ratio >= 0.0 &&
+        std::isfinite(loop.max_rotation_correction_rad) && loop.max_rotation_correction_rad >= 0.0 &&
+        loop.min_support >= 0 && std::isfinite(loop.covariance_scale) && loop.covariance_scale > 0.0 &&
+        std::isfinite(loop.outlier_chi2) && loop.outlier_chi2 > 0.0 &&
+        std::isfinite(loop.time_budget_s) && loop.time_budget_s >= 0.0)) {
+    error = "invalid loop closure parameters";
+    return false;
+  }
 
   if (map_frame_.empty() || odom_frame_.empty() || base_frame_.empty() || gps_frame_.empty() ||
       wheel_odom_topic_.empty() || points_topic_.empty() || gps_topic_.empty()) {
@@ -1334,6 +1381,7 @@ bool LocalizationNode::save_mapping_outputs(std::string& message) {
   parameters.map_output_dir = map_output_dir_;
   parameters.map_voxel_size_m = map_voxel_size_m_;
   parameters.batch_max_iterations = batch_max_iterations_;
+  parameters.loop_closure = loop_closure_parameters_;
   parameters.created = utc_now_iso8601();
   parameters.has_gps_origin = mapping_has_gps_origin_ && gps_origin_.has_value();
   if (parameters.has_gps_origin) parameters.gps_origin = *gps_origin_;
@@ -1345,6 +1393,11 @@ bool LocalizationNode::save_mapping_outputs(std::string& message) {
   }
   message = "saved " + std::to_string(result.keyframe_count) + " keyframes, " +
             std::to_string(result.map_point_count) + " map points to " + map_output_dir_;
+  if (!result.statistics.empty()) RCLCPP_INFO(get_logger(), "%s", result.statistics.c_str());
+  if (!result.warning.empty()) {
+    message += "; " + result.warning;
+    RCLCPP_WARN(get_logger(), "%s", result.warning.c_str());
+  }
   RCLCPP_INFO(get_logger(), "%s", message.c_str());
   return true;
 }

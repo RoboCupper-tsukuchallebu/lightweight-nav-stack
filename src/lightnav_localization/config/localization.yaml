@@ -30,6 +30,21 @@ localization_node:
     map_voxel_size_m: 0.2
     keyframe_cloud_voxel_m: 0.25
     batch_max_iterations: 100
+    loop_closure_enabled: true
+    loop_min_travel_m: 8.0
+    loop_search_radius_m: 3.0
+    loop_candidate_spacing_m: 0.5
+    loop_max_verifications: 200
+    loop_submap_half_keyframes: 5
+    loop_coarse_correspondence_m: 2.0
+    loop_fine_correspondence_m: 0.5
+    loop_inlier_ratio_min: 0.7
+    loop_max_drift_ratio: 0.1
+    loop_max_rotation_correction_rad: 0.35
+    loop_min_support: 1
+    loop_covariance_scale: 1.0
+    loop_outlier_chi2: 12.6
+    loop_time_budget_s: 25.0
     init_travel_m: 3.0
     allow_mapping_without_gps: false
 

@@ -14,6 +14,8 @@
 #include <vector>
 
 #include "lightnav_localization/localizer.hpp"
+#include "lightnav_localization/loop_closure.hpp"
+#include "lightnav_localization/matcher.hpp"
 #include "lightnav_localization/map_builder.hpp"
 #include "lightnav_localization/map_metadata.hpp"
 #include "lightnav_localization/mapping_initialization.hpp"
@@ -141,6 +143,7 @@ struct MappingRun {
   std::size_t outputs_after_failure = 0;
   bool online_moved_after_failure = false;
   std::string last_error;
+  std::string loop_statistics;
   std::vector<std::pair<double, Eigen::Isometry3d>> online_poses;
   // Sub-map keyframes a few seconds after the input gap (empty without a gap).
   std::vector<Eigen::Isometry3d> lidar_keyframe_poses_after_gap;
@@ -151,8 +154,10 @@ MappingRun run_mapping(const Course& course, bool has_pillars,
                        bool gps_enabled, double wheel_scale, double gps_noise_m,
                        const std::filesystem::path& output_directory,
                        double fail_optimization_at_sec = -1.0,
-                       double wheel_gap_begin_sec = -1.0, double wheel_gap_end_sec = -1.0) {
-  SyntheticWorld world(course.centerline(), true);
+                       double wheel_gap_begin_sec = -1.0, double wheel_gap_end_sec = -1.0,
+                       bool loop_closure_enabled = true, double wheel_yaw_bias_deg_per_10m = 0.5) {
+  SyntheticWorld world(course.centerline(), true,
+                       course.total_sec() == kLoopCourse.total_sec() && !gps_enabled);
   if (has_pillars) {
     world.add_pillars(0.1, 0.5, 1.25, 1.5, true);
   }
@@ -189,7 +194,7 @@ MappingRun run_mapping(const Course& course, bool has_pillars,
       drifted.translation().z() = 0.0;
       drifted.linear() =
           Eigen::AngleAxisd(std::atan2(relative.rotation()(1, 0), relative.rotation()(0, 0)) +
-                                distance * (0.5 * M_PI / 180.0 / 10.0),
+                                distance * (wheel_yaw_bias_deg_per_10m * M_PI / 180.0 / 10.0),
                             Eigen::Vector3d::UnitZ())
               .toRotationMatrix();
       odom = odom * drifted;
@@ -234,14 +239,88 @@ MappingRun run_mapping(const Course& course, bool has_pillars,
     }
   }
 
+  if (course.total_sec() == kLoopCourse.total_sec() && !gps_enabled) {
+    std::size_t minimum_points = std::numeric_limits<std::size_t>::max();
+    std::size_t maximum_points = 0;
+    for (const KeyframeCloud& keyframe : localizer.mapping_keyframes()) {
+      minimum_points = std::min(minimum_points, keyframe.points_in_base.size());
+      maximum_points = std::max(maximum_points, keyframe.points_in_base.size());
+    }
+    std::printf("[ LOOP_A1_CLOUDS ] keyframes=%zu min=%zu max=%zu\n",
+                localizer.mapping_keyframe_count(), minimum_points, maximum_points);
+  }
+  if (course.total_sec() == kLoopCourse.total_sec() && !gps_enabled && loop_closure_enabled) {
+    const auto& keyframes = localizer.mapping_keyframes();
+    std::vector<BatchPose> truth_poses;
+    for (const auto& keyframe : keyframes) {
+      BatchPose pose;
+      pose.map_to_base = truth_at(keyframe.stamp_sec);
+      truth_poses.push_back(pose);
+    }
+    const auto lengths = loop_path_lengths(truth_poses);
+    const auto candidates = select_loop_candidates(truth_poses, lengths, LoopClosureParameters{});
+    EXPECT_FALSE(candidates.empty());
+    if (!candidates.empty()) {
+      const LoopCandidate candidate = candidates.front();
+      PointList target_points;
+      const std::size_t begin = candidate.older_index > 5 ? candidate.older_index - 5 : 0;
+      const std::size_t end = std::min(keyframes.size(), candidate.older_index + 6);
+      for (std::size_t index = begin; index < end; ++index) {
+        const Eigen::Isometry3d transform = truth_poses[candidate.older_index].map_to_base.inverse() *
+                                            truth_poses[index].map_to_base;
+        for (const Eigen::Vector3f& point : keyframes[index].points_in_base) {
+          target_points.push_back((transform * point.cast<double>()).cast<float>());
+        }
+      }
+      const PreparedTarget target(target_points);
+      for (const auto& offset : std::vector<std::pair<double, double>>{{0.0, 0.0}, {0.3, 3.0}, {1.0, 9.0}}) {
+        auto initial_poses = truth_poses;
+        initial_poses[candidate.newer_index].map_to_base.translation().x() += offset.first;
+        initial_poses[candidate.newer_index].map_to_base.linear() *=
+            Eigen::AngleAxisd(offset.second * M_PI / 180.0, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+        const Eigen::Isometry3d prediction = initial_poses[candidate.older_index].map_to_base.inverse() *
+                                              initial_poses[candidate.newer_index].map_to_base;
+        MatcherParameters matcher_parameters;
+        matcher_parameters.max_iterations = 10;
+        matcher_parameters.max_correspondence_distance_m = 2.0;
+        const MatchResult coarse = match_scan(target, keyframes[candidate.newer_index].points_in_base,
+                                               prediction, matcher_parameters);
+        matcher_parameters.max_iterations = 30;
+        matcher_parameters.max_correspondence_distance_m = 0.5;
+        const MatchResult fine = match_scan(target, keyframes[candidate.newer_index].points_in_base,
+                                             coarse.target_to_source, matcher_parameters);
+        const Eigen::Isometry3d correction = prediction.inverse() * fine.target_to_source;
+        std::printf("[ LOOP_TRUTH_STAGES ] offset=%.1f yaw=%.1f coarse=%d/%d/%.3f fine=%d/%d/%.3f correction=%.3f/%.3f\n",
+                    offset.first, offset.second, coarse.converged, coarse.iterations, coarse.inlier_ratio,
+                    fine.converged, fine.iterations, fine.inlier_ratio, correction.translation().norm(),
+                    Eigen::AngleAxisd(correction.rotation()).angle());
+        EXPECT_TRUE(coarse.converged);
+        EXPECT_TRUE(fine.converged);
+        EXPECT_GT(fine.inlier_ratio, 0.95);
+        LoopVerificationFailure failure;
+        double inlier = 0.0;
+        const auto verified = verify_loop_candidate(candidate, initial_poses, keyframes, lengths, {}, {}, 0.05, &failure, &inlier);
+        EXPECT_TRUE(verified.has_value()) << "failure=" << static_cast<int>(failure) << " inlier=" << inlier;
+        if (verified) {
+          const Eigen::Isometry3d expected = truth_poses[candidate.older_index].map_to_base.inverse() *
+                                              truth_poses[candidate.newer_index].map_to_base;
+          const Eigen::Isometry3d error = expected.inverse() * verified->older_to_newer;
+          EXPECT_LT(error.translation().norm(), 0.1);
+          EXPECT_LT(Eigen::AngleAxisd(error.rotation()).angle(), 0.05);
+        }
+      }
+    }
+  }
   MapOutputParameters output_parameters;
   output_parameters.map_output_dir = output_directory.string();
   output_parameters.map_voxel_size_m = 0.2;
   output_parameters.batch_max_iterations = 100;
+  output_parameters.loop_closure.enabled = loop_closure_enabled;
   output_parameters.created = "2026-01-01T00:00:00Z";
   MapOutputResult output_result;
   std::string error;
   EXPECT_TRUE(localizer.save_map(output_parameters, output_result, error)) << error;
+  result.loop_statistics = output_result.statistics;
   result.accepted_gps_factors = localizer.accepted_gps_factor_count();
   result.gps_gate_rejections = localizer.gps_gate_rejection_count();
   result.gps_time_gap_rejections = localizer.gps_time_gap_rejection_count();
@@ -491,21 +570,37 @@ TEST(MapBuilder, K2_ClasSigma0p1_SpecCourse) {
   EXPECT_LT(summary.maximum, 0.2);
   std::error_code dropout_error;
   std::filesystem::remove_all(dropout_directory, dropout_error);
+}
 
-  const std::string seam_directory = unique_directory("k2_seam");
-  const MappingRun loop =
-      run_mapping(kLoopCourse, false, 80.0 / kSpeed, 1e9, true, 1.01, 1.0, seam_directory);
-  ASSERT_GE(loop.trajectory.size(), 2U);
-  const CsvRow& first = loop.trajectory.front();
-  const CsvRow& last = loop.trajectory.back();
-  const double seam_pose_gap =
-      Eigen::Vector2d(last.x - first.x, last.y - first.y).norm();
-  const double double_wall_gap_m = start_cap_double_wall_gap(loop.map_points);
-  std::printf("[ K2_SEAM ] keyframes=%zu seam_pose_gap_m=%.6f double_wall_gap_m=%.6f\n",
-              loop.trajectory.size(), seam_pose_gap, double_wall_gap_m);
-  EXPECT_GT(loop.trajectory.size(), 10U);
-  std::error_code seam_error;
-  std::filesystem::remove_all(seam_directory, seam_error);
+TEST(MapBuilder, LoopClosureClosesTheGpsFreeCourse) {
+  const std::string baseline_directory = unique_directory("loop_baseline");
+  const std::string closed_directory = unique_directory("loop_closed");
+  const MappingRun baseline = run_mapping(kLoopCourse, false, -1.0, -1.0, false, 1.01, 1.0,
+                                          baseline_directory, -1.0, -1.0, -1.0, false, 1.2);
+  const MappingRun closed = run_mapping(kLoopCourse, false, -1.0, -1.0, false, 1.01, 1.0,
+                                        closed_directory, -1.0, -1.0, -1.0, true, 1.2);
+  ASSERT_GE(baseline.trajectory.size(), 2U);
+  ASSERT_GE(closed.trajectory.size(), 2U);
+  const auto seam_gap = [](const MappingRun& run) {
+    return Eigen::Vector2d(run.trajectory.back().x - run.trajectory.front().x,
+                           run.trajectory.back().y - run.trajectory.front().y).norm();
+  };
+  const double baseline_gap = seam_gap(baseline);
+  const double closed_gap = seam_gap(closed);
+  const double wall_gap = start_cap_double_wall_gap(closed.map_points);
+  std::printf("[ LOOP_A1 ] baseline=%.6f closed=%.6f wall=%.6f loops=%d\n",
+              baseline_gap, closed_gap, wall_gap, closed.metadata.loop_closure_count);
+  std::printf("[ LOOP_A1_STATS ] %s\n", closed.loop_statistics.c_str());
+  EXPECT_GT(baseline_gap, 1.0);
+  EXPECT_LT(baseline_gap, 2.5);
+  EXPECT_LT(closed_gap, 0.2);
+  EXPECT_LT(wall_gap, 0.3);
+  EXPECT_LT(summarize_trajectory_error(kLoopCourse, closed.trajectory).maximum, 0.5);
+  EXPECT_GE(closed.metadata.loop_closure_count, 2);
+  EXPECT_EQ(closed.loop_statistics.find("removed chi2="), std::string::npos);
+  std::error_code error;
+  std::filesystem::remove_all(baseline_directory, error);
+  std::filesystem::remove_all(closed_directory, error);
 }
 
 TEST(MapBuilder, K_SpecCourseSigma1p0) {

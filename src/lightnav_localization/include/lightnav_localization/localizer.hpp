@@ -121,6 +121,9 @@ class Localizer {
   std::size_t accepted_gps_factor_count() const;
   // Stops keeping new keyframe clouds after a LOST; the retained partial map can still be saved.
   void interrupt_mapping();
+  // Test seam: constructs a mapping history from synthetic keyframe poses.
+  void seed_mapping_for_test(const std::vector<Eigen::Isometry3d>& poses);
+  std::vector<BatchPose> batch_poses_for_test(int max_iterations);
   // Batch re-optimizes every retained factor and writes map.pcd / map.yaml / trajectory.csv.
   bool save_map(const MapOutputParameters& parameters, MapOutputResult& result,
                 std::string& error);

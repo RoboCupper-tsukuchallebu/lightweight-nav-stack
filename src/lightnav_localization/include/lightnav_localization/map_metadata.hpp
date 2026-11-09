@@ -13,6 +13,7 @@ struct MapMetadata {
   std::string created;
   int keyframe_count = 0;
   bool batch_optimized = false;
+  int loop_closure_count = 0;
 };
 
 void write_map_metadata(const std::string& file_path, const MapMetadata& metadata);

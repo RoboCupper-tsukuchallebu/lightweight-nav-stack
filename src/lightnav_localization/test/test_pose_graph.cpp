@@ -207,3 +207,74 @@ TEST(PoseGraph, GpsAltitudeDoesNotChangeHeightOrTilt) {
   EXPECT_NEAR(estimate->translation().z(), 3.0, 1e-9);
   EXPECT_NEAR(Eigen::AngleAxisd(initial.rotation().transpose() * estimate->rotation()).angle(), 0.0, 1e-9);
 }
+
+TEST(PoseGraph, LoopFactorsAreRecordedOnlyInHistoryAndCanBeRemoved) {
+  PoseGraphParameters parameters;
+  parameters.record_history = true;
+  PoseGraph graph(parameters);
+  graph.add_first_node(0.0, Eigen::Isometry3d::Identity(), 0.1, 0.1);
+  ASSERT_TRUE(graph.optimize());
+  const Eigen::Isometry3d motion = translation_pose(1.0, 0.0);
+  const int index = graph.add_node_with_wheel_factor(1.0, motion, motion);
+  ASSERT_TRUE(graph.optimize());
+  graph.add_gps_factor(index, Eigen::Vector3d(1.0, 0.0, 0.0), Eigen::Vector3d::Ones());
+  ASSERT_TRUE(graph.optimize());
+  ASSERT_TRUE(graph.batch_optimize(100));
+
+  ASSERT_TRUE(graph.add_loop_factor(0, index, motion, diagonal_information(0.1, 0.1)));
+  ASSERT_TRUE(graph.batch_optimize(100, true, false));
+  const std::vector<double> residuals = graph.loop_factor_chi_squared();
+
+  ASSERT_EQ(residuals.size(), 1u);
+  EXPECT_NEAR(residuals.front(), 0.0, 1e-8);
+  EXPECT_EQ(graph.gps_factor_indices().count(index), 1u);
+  EXPECT_FALSE(graph.batch_poses().front().position_and_yaw_std.has_value());
+  EXPECT_TRUE(graph.remove_loop_factor(0));
+  EXPECT_TRUE(graph.loop_factor_chi_squared().empty());
+}
+
+TEST(PoseGraph, LoopFactorIsRejectedWithoutHistory) {
+  PoseGraph graph(PoseGraphParameters{});
+  EXPECT_FALSE(graph.add_loop_factor(0, 1, Eigen::Isometry3d::Identity(),
+                                     diagonal_information(0.1, 0.1)));
+  EXPECT_FALSE(graph.remove_loop_factor(0));
+  EXPECT_TRUE(graph.gps_factor_indices().empty());
+}
+
+TEST(PoseGraph, FailedMarginalConstructionIsAttemptedOnlyOnce) {
+  PoseGraphParameters parameters;
+  parameters.record_history = true;
+  PoseGraph graph(parameters);
+  graph.add_first_node(0.0, Eigen::Isometry3d::Identity(), 0.1, 0.1);
+  const Eigen::Isometry3d motion = translation_pose(1.0, 0.0);
+  graph.add_node_with_wheel_factor(1.0, motion, motion);
+  graph.inject_marginals_failure_once();
+
+  ASSERT_TRUE(graph.batch_optimize(100));
+
+  EXPECT_TRUE(graph.batch_marginals_failed());
+  EXPECT_EQ(graph.marginal_construction_attempts(), 1);
+  ASSERT_EQ(graph.batch_poses().size(), 2u);
+  for (const BatchPose& pose : graph.batch_poses()) {
+    EXPECT_FALSE(pose.position_and_yaw_std.has_value());
+  }
+}
+
+TEST(PoseGraph, RankDeficientHistoryAttemptsMarginalsOnlyOnce) {
+  PoseGraphParameters parameters;
+  parameters.record_history = true;
+  PoseGraph graph(parameters);
+  graph.add_first_node(0.0, Eigen::Isometry3d::Identity(), 0.1, 0.1);
+  const Eigen::Isometry3d motion = translation_pose(1.0, 0.0);
+  graph.add_node_with_wheel_factor(1.0, motion, motion);
+  graph.remove_history_prior_for_test();
+
+  ASSERT_TRUE(graph.batch_optimize(100));
+
+  EXPECT_TRUE(graph.batch_marginals_failed());
+  EXPECT_EQ(graph.marginal_construction_attempts(), 1);
+  ASSERT_EQ(graph.batch_poses().size(), 2u);
+  for (const BatchPose& pose : graph.batch_poses()) {
+    EXPECT_FALSE(pose.position_and_yaw_std.has_value());
+  }
+}

@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "lightnav_localization/gps_input.hpp"
+#include "lightnav_localization/loop_closure.hpp"
 #include "lightnav_localization/pcd_io.hpp"
 
 namespace lightnav_localization {
@@ -33,6 +34,9 @@ struct MapOutputParameters {
   double map_voxel_size_m = 0.2;
   int batch_max_iterations = 100;
   bool batch_optimized = false;
+  int loop_closure_count = 0;
+  LoopClosureParameters loop_closure;
+  const LoopClosureTestHooks* loop_closure_test_hooks = nullptr;
   bool has_gps_origin = false;
   GpsOrigin gps_origin;
   std::string created;  // ISO-8601 UTC, e.g. 2026-01-02T03:04:05Z
@@ -41,6 +45,8 @@ struct MapOutputParameters {
 struct MapOutputResult {
   std::size_t keyframe_count = 0;
   std::size_t map_point_count = 0;
+  std::string warning;
+  std::string statistics;
 };
 
 // Transforms every keyframe cloud by its trajectory pose, concatenates them and voxel-downsamples

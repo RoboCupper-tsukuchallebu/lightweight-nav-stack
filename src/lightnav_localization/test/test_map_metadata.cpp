@@ -17,6 +17,7 @@ TEST(MapMetadata, round_trips_with_gps_origin) {
   metadata.created = "2026-11-02T00:00:00Z";
   metadata.keyframe_count = 1234;
   metadata.batch_optimized = true;
+  metadata.loop_closure_count = 3;
   const std::string path = ::testing::TempDir() + "map_with_origin.yaml";
 
   lightnav_localization::write_map_metadata(path, metadata);
@@ -29,6 +30,7 @@ TEST(MapMetadata, round_trips_with_gps_origin) {
   EXPECT_EQ(metadata.created, loaded.created);
   EXPECT_EQ(1234, loaded.keyframe_count);
   EXPECT_TRUE(loaded.batch_optimized);
+  EXPECT_EQ(loaded.loop_closure_count, 3);
 }
 
 TEST(MapMetadata, round_trips_without_gps_origin) {
