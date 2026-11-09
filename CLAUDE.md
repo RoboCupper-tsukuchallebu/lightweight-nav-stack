@@ -44,6 +44,8 @@ LIGHTNAV_BUILD_HOST=<ssh 宛先> LIGHTNAV_ROBOT_HOST=<ssh 宛先> scripts/deploy
 - `config/robot.yaml` を現地で変えない（次の deploy が差分を見せて止まる）。値の変更は `docker/config/robot.yaml` を PR で直す。
 - 起動（毎回人の承認）: `docker compose up -d nav`。`safety_gate_node` が起動と同時に active になり、Start の前に mission が `IDLE` であることを確かめる。ティーチ走行（パッドで `record_waypoints`）だけ `LIGHTNAV_SAFETY_GATE=false docker compose up -d nav`。その状態で `send_waypoints` をしない。gate の稼働中はパッドで操縦しない（止める手段はパッドの Back と 24 V）。
 - 停止: `docker compose exec nav bash -lc 'ros2 lifecycle set /safety_gate_node deactivate'`（Twist 0）→ `docker compose stop nav`。`stop` だけだと 0 は出ず、ドライバの 0.5 s のタイムアウトで止まる。
+- 全 ROS コンテナで `ipc: host`・`pid: host` と同一 uid/gid を揃える（drivers #33）。
+- `/dev/shm` は ROS 動作中に消さず、全 ROS コンテナ停止後のみ drivers の掃除手順を使う（docker/README.md）。
 - コンテナ内の確認用 CLI は `docker compose exec nav bash -lc '…'` で行う（`run --rm` だと毎回 daemon と共有メモリが増える）。`ros2 node list` / `ros2 topic list` など daemon を使うコマンドには `--no-daemon` を付ける（`ros2 topic hz` / `info` はこの引数が無い）。起動直後はノードが見えるまで数秒かかる。
 - DDS の `docker/dds/` は tsukuchalle_drivers `ros2/dds/` の複製（正は drivers 側）。
 

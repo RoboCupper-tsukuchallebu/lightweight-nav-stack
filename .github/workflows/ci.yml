@@ -128,6 +128,7 @@ jobs:
           env -u LIGHTNAV_SAFETY_GATE TSUKUCHALLE_UID=1000 TSUKUCHALLE_GID=1000 \
             docker compose -f docker/compose.yaml config --format json > "$RUNNER_TEMP/compose.json"
           jq -e '.services.nav.user == "1000:1000" and .services.nav.environment.TSUKUCHALLE_UID == "1000"' "$RUNNER_TEMP/compose.json"
+          jq -e '.services | length > 0 and (to_entries | all(.value.ipc == "host" and .value.pid == "host"))' "$RUNNER_TEMP/compose.json"
           jq -e '.services.nav.command[4] == "safety_gate:=true"' "$RUNNER_TEMP/compose.json"
           LIGHTNAV_SAFETY_GATE=false TSUKUCHALLE_UID=1000 TSUKUCHALLE_GID=1000 \
             docker compose -f docker/compose.yaml config --format json | jq -e '.services.nav.command[4] == "safety_gate:=false"'
