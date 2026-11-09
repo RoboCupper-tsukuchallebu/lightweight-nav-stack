@@ -156,10 +156,15 @@ std::vector<ArcCandidate> evaluateArcCandidates(const LocalGrid& grid, const Pos
     for (double travelled_m = parameters.arc_step_m;
          travelled_m <= parameters.arc_length_m + 1e-9; travelled_m += parameters.arc_step_m) {
       const Point2D sample = arcPointInBody(candidate.curvature_per_m, travelled_m);
-      if (grid.isOccupiedInBody(sample.x_m, sample.y_m) ||
-          distanceToPath(toWorld(pose, sample), path_points, first_index, last_index) >
-              parameters.max_path_deviation_m) {
+      if (grid.isOccupiedInBody(sample.x_m, sample.y_m)) {
         candidate.is_feasible = false;
+        candidate.rejection_reason = "collision";
+        break;
+      }
+      if (distanceToPath(toWorld(pose, sample), path_points, first_index, last_index) >
+          parameters.max_path_deviation_m) {
+        candidate.is_feasible = false;
+        candidate.rejection_reason = "deviation";
         break;
       }
     }
@@ -206,6 +211,8 @@ void ArcAvoidLayer::reset() {
 }
 
 LayerOutput ArcAvoidLayer::compute(const AvoidContext& context) {
+  candidates_.clear();
+  selected_candidate_.reset();
   if (!context.is_grid_fresh || context.grid == nullptr || context.path_points.empty()) {
     reset();
     return LayerOutput{};
@@ -247,9 +254,11 @@ LayerOutput ArcAvoidLayer::compute(const AvoidContext& context) {
                                           : StopReason::kObstacleStale);
   }
 
-  const auto best = selectBestCandidate(evaluateArcCandidates(
+  candidates_ = evaluateArcCandidates(
       grid, context.pose, context.path_points, context.closest_index, previous_curvature_per_m_,
-      parameters_));
+      parameters_);
+  const auto best = selectBestCandidate(candidates_);
+  selected_candidate_ = best;
   LayerOutput output;
   output.is_asserted = true;
   if (best.has_value()) {

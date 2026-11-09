@@ -33,6 +33,7 @@ RUN apt-get update \
         python3-numpy \
         python3-pytest \
         python3-yaml \
+        ros-jazzy-visualization-msgs \
         ros-jazzy-gtsam \
         ros-jazzy-tf2-eigen \
         ros-jazzy-tf2-ros-py \
