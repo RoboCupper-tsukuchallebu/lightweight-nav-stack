@@ -4,10 +4,9 @@ import math
 
 import pytest
 import rclpy
+from lightnav_mission.mission_node import MissionNode
 from rclpy.lifecycle import TransitionCallbackReturn
 from rclpy.parameter import Parameter
-
-from lightnav_mission.mission_node import MissionNode
 
 
 @pytest.fixture
