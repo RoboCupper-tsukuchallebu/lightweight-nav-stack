@@ -238,3 +238,31 @@ TEST(GlobalInitializationSearch, G5RejectsLongStraightCorridor) {
   EXPECT_TRUE(result.decision.error == "degenerate" || result.decision.error == "ambiguous")
       << result.decision.error;
 }
+
+TEST(GlobalInitializationSearch, G13MovedFurnitureNeverAcceptsWrongPose) {
+  using lightnav_localization::testing::SyntheticWorld;
+  SyntheticWorld map_world({{0.0, 0.0}, {9.0, 0.0}, {9.0, 6.0}});
+  SyntheticWorld scan_world({{0.0, 0.0}, {9.0, 0.0}, {9.0, 6.0}});
+  for (auto* world : {&map_world, &scan_world}) {
+    world->add_box({5.0, -1.7}, {5.5, -0.4});
+    world->add_box({8.0, 3.4}, {8.5, 4.2});
+  }
+  map_world.add_box({2.0, 0.5}, {2.8, 1.5});
+  scan_world.add_box({3.0, 0.5}, {3.8, 1.5});
+  const auto map = map_world.sample_map(0.15);
+  Eigen::Isometry3d sensor = Eigen::Isometry3d::Identity();
+  sensor.translation() = Eigen::Vector3d(1.0, 0.0, 0.5);
+  const auto timed = scan_world.synthesize_scan([&](double) { return sensor; }, 0.0, 0.1, true, 360, 8);
+  PointList scan;
+  for (const auto& point : timed) scan.push_back(point.position + Eigen::Vector3f(0, 0, 0.5f));
+  GlobalInitializationSearchParameters parameters;
+  parameters.minimum = {0.0, -1.5};
+  parameters.maximum = {10.5, 6.0};
+  parameters.maximum_range_m = 12.0;
+  std::atomic<bool> abort{false};
+  const auto result = search_global_initialization(map, scan, parameters, abort);
+  if (result.decision.accepted) {
+    EXPECT_LE((result.pose.translation().head<2>() - Eigen::Vector2d(1.0, 0.0)).norm(), 0.1);
+    EXPECT_LE(std::abs(std::atan2(result.pose.linear()(1, 0), result.pose.linear()(0, 0))), M_PI / 180.0);
+  }
+}
