@@ -46,3 +46,40 @@ TEST_F(LidarOdometryTest, RejectsMatchFarFromPredictionAcrossCorridor) {
   const MatchResult result = odometry_.match(scan_at(world_, truth), wrong_prediction, 0.6);
   EXPECT_FALSE(result.is_accepted);
 }
+
+TEST_F(LidarOdometryTest, AcceptsScanRotationBeyondWheelYawGateDuringSlip) {
+  Eigen::Isometry3d truth = pose_at_x(12.0);
+  truth.linear() = Eigen::AngleAxisd(0.2, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+  LidarOdometryParameters parameters;
+  parameters.slip_gate_yaw_rad = 0.35;
+  LidarOdometry odometry(parameters);
+  for (const double x : {10.0, 11.0, 12.0}) odometry.add_keyframe(pose_at_x(x), scan_at(world_, pose_at_x(x)));
+  const MatchResult result = odometry.match(scan_at(world_, truth), pose_at_x(12.0), 0.0, 0.0);
+  ASSERT_TRUE(result.is_accepted);
+  const Eigen::Matrix3d error = truth.rotation().transpose() * result.target_to_source.rotation();
+  EXPECT_LT(std::abs(std::atan2(error(1, 0), error(0, 0))), 0.05);
+}
+
+TEST_F(LidarOdometryTest, RejectsSameYawDisagreementWhenWheelIsTurning) {
+  Eigen::Isometry3d truth = pose_at_x(12.0);
+  truth.linear() = Eigen::AngleAxisd(0.2, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+  const MatchResult result = odometry_.match(scan_at(world_, truth), pose_at_x(12.0), 0.0, 0.2);
+  EXPECT_FALSE(result.is_accepted);
+}
+
+TEST_F(LidarOdometryTest, RejectsYawDisagreementBeyondDefaultGateWhileDrivingStraight) {
+  Eigen::Isometry3d truth = pose_at_x(12.0);
+  truth.linear() = Eigen::AngleAxisd(0.2, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+  const MatchResult result = odometry_.match(scan_at(world_, truth), pose_at_x(12.0), 0.0, 0.0);
+  EXPECT_FALSE(result.is_accepted);
+}
+
+TEST_F(LidarOdometryTest, DefaultSlipGateDoesNotOverrideSmallerYawGate) {
+  LidarOdometryParameters parameters;
+  parameters.gate_yaw_rad = 0.05;
+  LidarOdometry odometry(parameters);
+  for (const double x : {10.0, 11.0, 12.0}) odometry.add_keyframe(pose_at_x(x), scan_at(world_, pose_at_x(x)));
+  Eigen::Isometry3d truth = pose_at_x(12.0);
+  truth.linear() = Eigen::AngleAxisd(0.08, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+  EXPECT_FALSE(odometry.match(scan_at(world_, truth), pose_at_x(12.0), 0.0, 0.0).is_accepted);
+}

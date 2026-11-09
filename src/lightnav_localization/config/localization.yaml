@@ -55,12 +55,18 @@ localization_node:
     lidar_odom_gate_translation_m: 0.3
     lidar_odom_gate_translation_ratio: 0.2
     lidar_odom_gate_yaw_rad: 0.1
+    lidar_odom_slip_gate_yaw_rad: 0.0
+    lidar_odom_slip_wheel_yaw_rate_rad_s: 0.05
+    lidar_odom_slip_wheel_rate_window_s: 0.05
     lidar_odom_covariance_scale: 1.0
     lidar_odom_sigma_floor_m: 0.02
     lidar_odom_sigma_floor_rad: 0.005
 
     # Wheel factor.
     wheel_sigma_translation_per_m: 0.02
+    wheel_yaw_slip_threshold_rad: 0.0
+    wheel_robust_kernel: huber
+    wheel_robust_k: 8.0
     wheel_sigma_yaw_per_rad: 0.1
     wheel_sigma_yaw_per_m: 0.01
     planar_sigma_z_per_m: 0.05
