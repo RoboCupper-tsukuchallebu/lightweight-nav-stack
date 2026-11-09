@@ -75,8 +75,10 @@ def test_applied_and_rejected_changes_are_logged(mission, monkeypatch):
     monkeypatch.setattr(mission, "get_logger", lambda: logger)
     assert set_value(mission, "pose_timeout_s", 0.2).successful
     assert not set_value(mission, "pose_timeout_s", 0.8).successful
+    assert not set_value(mission, "tick_hz", 20.0).successful
     assert any("parameter changed: pose_timeout_s" in message for message in messages)
     assert any("parameter change rejected: pose_timeout_s" in message for message in messages)
+    assert any("parameter change rejected: tick_hz" in message for message in messages)
 
 
 def test_plan_retains_timeout_and_uses_tick_snapshot(mission, monkeypatch):
