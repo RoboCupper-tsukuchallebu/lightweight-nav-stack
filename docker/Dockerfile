@@ -36,6 +36,7 @@ RUN apt-get update \
         ros-jazzy-gtsam \
         ros-jazzy-tf2-eigen \
         ros-jazzy-tf2-ros-py \
+        ros-jazzy-visualization-msgs \
     && rm -rf /var/lib/apt/lists/*
 
 # Last in base, so editing them does not rebuild the apt layer above.

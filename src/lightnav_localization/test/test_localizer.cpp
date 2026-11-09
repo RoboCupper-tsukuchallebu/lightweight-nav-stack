@@ -116,6 +116,11 @@ struct Scenario {
   double wheel_gap_begin_sec = -1.0;
   double wheel_gap_end_sec = -1.0;
   bool reinitialize_after_gap = false;  // set_initial_pose with the truth when the input resumes
+  double correction_slew_rps = CorrectorParameters{}.slew_rps;
+  double slip_gate_yaw_rad = LidarOdometryParameters{}.slip_gate_yaw_rad;
+  double wheel_yaw_slip_threshold_rad = PoseGraphParameters{}.wheel_yaw_slip_threshold_rad;
+  double slip_begin_sec = -1.0;
+  double slip_end_sec = -1.0;
   double stop_sec = -1.0;  // ends the run early
 };
 
@@ -142,6 +147,7 @@ struct Report {
   bool saw_tracking_after_hole = false;
   bool saw_gps_only = false;
   bool saw_odom_only = false;
+  bool saw_odom_only_during_slip = false;
   bool saw_conflict = false;
   bool saw_lost = false;
   bool published_after_lost = false;
@@ -194,10 +200,13 @@ Report run(const Scenario& scenario) {
   const PointList full_map = world.sample_map(0.2);
   LocalizerParameters parameters;
   parameters.graph.wheel_sigma_translation_per_m = scenario.wheel_sigma_translation_per_m;
+  parameters.lidar_odometry.slip_gate_yaw_rad = scenario.slip_gate_yaw_rad;
+  parameters.graph.wheel_yaw_slip_threshold_rad = scenario.wheel_yaw_slip_threshold_rad;
   parameters.map_information.degeneracy_ratio = scenario.degeneracy_ratio;
   parameters.state.odom_only_max_distance_m = scenario.odom_only_max_distance_m;
   parameters.map_submap_rebuild_distance_m = scenario.map_rebuild_distance_m;
   parameters.corrector.large_correction_threshold_m = scenario.large_correction_threshold_m;
+  parameters.corrector.slew_rps = scenario.correction_slew_rps;
   Localizer* localizer_pointer = nullptr;
   PointList map = scenario.has_map ? full_map : PointList{};
   if (scenario.has_real_map_hole) {
@@ -278,6 +287,9 @@ Report run(const Scenario& scenario) {
                                                distance * (0.5 * M_PI / 180.0 / 10.0),
                                            Eigen::Vector3d::UnitZ())
                              .toRotationMatrix();     // 0.5 deg / 10 m yaw drift
+      if (time_sec >= scenario.slip_begin_sec && time_sec < scenario.slip_end_sec) {
+        drifted.linear() = Eigen::Matrix3d::Identity();
+      }
       odom = odom * drifted;
       wheel_only = wheel_only * drifted;
     }
@@ -378,6 +390,9 @@ Report run(const Scenario& scenario) {
     if (is_hole) report.max_error_in_hole_m = std::max(report.max_error_in_hole_m, position_error);
     report.saw_gps_only |= output->state == LocalizationState::kGpsOnly && is_hole;
     report.saw_odom_only |= output->state == LocalizationState::kOdomOnly;
+    if (time_sec >= scenario.slip_begin_sec && time_sec <= scenario.slip_end_sec) {
+      report.saw_odom_only_during_slip |= output->state == LocalizationState::kOdomOnly;
+    }
     report.saw_conflict |= output->is_gps_conflict;
     if (time_sec > scenario.map_hole_end_sec && output->state == LocalizationState::kTracking) report.saw_tracking_after_hole = true;
     report.is_tracking_at_end = output->state == LocalizationState::kTracking;
@@ -777,6 +792,40 @@ TEST(Localizer, CompensatesWheelDisplacementBetweenGpsAndKeyframe) {
   EXPECT_EQ(localizer.gps_time_gap_rejection_count(), 0u);
 }
 
+TEST(Localizer, CountsFirstMapMatchRejectionReason) {
+  const SyntheticWorld world(kShortCourse.centerline());
+  LocalizerParameters parameters;
+  parameters.keyframe_time_s = 0.1;
+  parameters.match_period_s = 0.0;
+  Localizer localizer(parameters, world.sample_map(0.2), std::nullopt);
+  const Eigen::Isometry3d pose = Eigen::Isometry3d::Identity();
+  localizer.initialize(pose);
+  int attempt = 0;
+  localizer.set_map_match_hook([&](MatchResult& result) {
+    ++attempt;
+    result.converged = attempt != 1;
+    result.inlier_ratio = attempt == 2 ? 0.0 : 1.0;
+    result.target_to_source = pose;
+    if (attempt == 3) result.target_to_source.translation().x() = 10.0;
+    if (attempt == 4) result.target_to_source.linear() = Eigen::AngleAxisd(1.0, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+    result.information = Eigen::Matrix<double, 6, 6>::Identity();
+  });
+  const auto truth = [&](double) { return pose; };
+  for (int index = 0; index <= 4; ++index) {
+    const double stamp = index * 0.2;
+    localizer.on_wheel_odom(stamp, pose);
+    localizer.on_scan(stamp, world.synthesize_scan(truth, stamp, 0.0, false));
+    localizer.on_wheel_odom(stamp + 0.01, pose);
+  }
+  const MapMatchStatistics counts = localizer.map_match_statistics();
+  EXPECT_EQ(counts.attempted_total, 4U);
+  EXPECT_EQ(counts.accepted_total, 0U);
+  EXPECT_EQ(counts.rejected_not_converged_total, 1U);
+  EXPECT_EQ(counts.rejected_inlier_total, 1U);
+  EXPECT_EQ(counts.rejected_translation_gate_total, 1U);
+  EXPECT_EQ(counts.rejected_rotation_gate_total, 1U);
+}
+
 TEST(Localizer, DegenerateMapMatchDoesNotRefreshAbsoluteObservation) {
   const SyntheticWorld world(kShortCourse.centerline());
   LocalizerParameters parameters;
@@ -825,6 +874,50 @@ TEST(Localizer, KeyframeTimeComparisonToleratesTimestampRounding) {
     }
   }
   EXPECT_NEAR(localizer.max_keyframe_interval_sec(), 1.0, 1e-12);
+}
+
+TEST(Localizer, EventErrorExpiresAndRetainsCumulativeCount) {
+  LocalizerParameters parameters;
+  parameters.last_error_hold_s = 1.0;
+  Localizer localizer(parameters, PointList{}, std::nullopt);
+  const Eigen::Isometry3d pose = Eigen::Isometry3d::Identity();
+  localizer.initialize(pose);
+  localizer.poll_state(10.0);
+  localizer.on_wheel_odom(2.0, pose);
+  localizer.on_wheel_odom(1.0, pose);
+  EXPECT_EQ(localizer.error_events_total(), 1U);
+  EXPECT_NE(localizer.last_error().find("time went backwards"), std::string::npos);
+  localizer.poll_state(10.9);
+  EXPECT_FALSE(localizer.last_error().empty());
+  localizer.on_wheel_odom(0.5, pose);
+  EXPECT_EQ(localizer.error_events_total(), 2U);
+  localizer.poll_state(11.0);
+  EXPECT_FALSE(localizer.last_error().empty());
+  localizer.poll_state(12.0);
+  EXPECT_TRUE(localizer.last_error().empty());
+  EXPECT_EQ(localizer.error_events_total(), 2U);
+}
+
+TEST(Localizer, ScanTimeStatisticsIncludeDeskewFailuresAndResetAfterReading) {
+  Localizer localizer(LocalizerParameters{}, PointList{}, std::nullopt);
+  const Eigen::Isometry3d pose = Eigen::Isometry3d::Identity();
+  localizer.initialize(pose);
+  localizer.on_wheel_odom(1.0, pose);
+  // The scan precedes the first wheel sample and cannot be deskewed.
+  localizer.on_scan(0.5, {TimedPoint{Eigen::Vector3f(1, 0, 0), 0.0F}});
+  localizer.on_wheel_odom(1.1, pose);
+  localizer.on_scan(1.1, std::vector<TimedPoint>(10, TimedPoint{Eigen::Vector3f(1, 0, 0), 0.0F}));
+  localizer.on_wheel_odom(1.1, pose);
+
+  const ScanTimeStatistics statistics = localizer.take_scan_time_statistics();
+  EXPECT_EQ(statistics.count, 2U);
+  EXPECT_GT(statistics.total_ms, 0.0);
+  EXPECT_GT(statistics.maximum_ms, 0.0);
+  EXPECT_LE(statistics.maximum_ms, statistics.total_ms);
+  const ScanTimeStatistics reset = localizer.take_scan_time_statistics();
+  EXPECT_EQ(reset.count, 0U);
+  EXPECT_DOUBLE_EQ(reset.total_ms, 0.0);
+  EXPECT_DOUBLE_EQ(reset.maximum_ms, 0.0);
 }
 
 TEST(Localizer, AcceptsOneHertzGpsAtLateKeyframePhases) {
@@ -903,4 +996,55 @@ TEST(Localizer, DegenerateCorridorWithoutGpsDoesNotBecomeLostOver150Meters) {
   ASSERT_FALSE(report.samples.empty());
   EXPECT_GT(report.samples.back().time_sec, 249.0);
   EXPECT_GT(report.samples.back().position_std_m, 2.0);
+}
+
+// This 10 Hz case monitors tracking; it also passes with develop-equivalent settings.
+TEST(Localizer, WheelYawSlipDuringTurnKeepsTrackingAndYawCloseToTruth) {
+  Scenario scenario;
+  scenario.has_pillars = true;
+  scenario.degeneracy_ratio = 0.0;
+  scenario.scan_period_sec = 0.1;
+  scenario.correction_slew_rps = 2.0;
+  scenario.is_gps_enabled = false;
+  scenario.wheel_scale = 1.0;
+  scenario.slip_gate_yaw_rad = 0.35;
+  scenario.wheel_yaw_slip_threshold_rad = 0.1;
+  scenario.slip_begin_sec = 20.0 / kSpeed + 0.5;
+  scenario.slip_end_sec = scenario.slip_begin_sec + 0.8;
+  scenario.stop_sec = scenario.slip_end_sec + 2.0;
+  const Report report = run(scenario);
+  std::printf("[ MEASURED ] wheel_yaw_slip_max_error_deg=%.9g\n", report.max_yaw_error_deg);
+  EXPECT_FALSE(report.saw_odom_only_during_slip);
+  EXPECT_TRUE(report.is_tracking_at_end);
+  EXPECT_LT(report.max_yaw_error_deg, 5.5);
+}
+
+// Sparse observations expose the effect of slip handling; retain the 10 Hz test above.
+TEST(Localizer, WheelYawSlipWithSparseScansKeepsYawBounded) {
+  Scenario scenario;
+  scenario.has_pillars = true;
+  scenario.degeneracy_ratio = 0.0;
+  scenario.scan_period_sec = 0.3;
+  scenario.correction_slew_rps = 2.0;
+  scenario.is_gps_enabled = false;
+  scenario.wheel_scale = 1.0;
+  scenario.slip_gate_yaw_rad = 0.35;
+  scenario.wheel_yaw_slip_threshold_rad = 0.1;
+  scenario.slip_begin_sec = 20.0 / kSpeed + 0.5;
+  scenario.slip_end_sec = scenario.slip_begin_sec + 0.8;
+  scenario.stop_sec = scenario.slip_end_sec + 2.0;
+  const Report report = run(scenario);
+  std::printf("[ MEASURED ] wheel_yaw_slip_max_error_deg=%.9g\n", report.max_yaw_error_deg);
+  EXPECT_FALSE(report.saw_odom_only_during_slip);
+  EXPECT_TRUE(report.is_tracking_at_end);
+  EXPECT_LT(report.max_yaw_error_deg, 10.0);
+}
+
+TEST(Localizer, RejectsInvalidSlipWheelRateWindow) {
+  for (double invalid : {0.0, -0.1, std::numeric_limits<double>::infinity(),
+                         std::numeric_limits<double>::quiet_NaN()}) {
+    LocalizerParameters parameters;
+    parameters.lidar_odometry.slip_wheel_rate_window_s = invalid;
+    EXPECT_THROW(Localizer localizer(parameters, PointList{}, std::nullopt), std::invalid_argument);
+  }
 }

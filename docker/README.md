@@ -2,6 +2,21 @@
 
 Docker image, compose and parameters of the nav-stack on the robot PC. The build and the test of the image are in CLAUDE.md ("Docker").
 
+## Fast DDS shared memory
+
+All ROS containers across the robot's Compose projects use `ipc: host`, `pid: host`, and the same uid and gid
+(`TSUKUCHALLE_UID` / `TSUKUCHALLE_GID`, 1000 on the robot). With different IPC namespaces, discovery can succeed while
+data silently fails to arrive. Sharing PID and uid is also part of the operating configuration decided in
+[drivers #33](https://github.com/RoboCupper-tsukuchallebu/tsukuchalle_drivers/issues/33); the PID mismatch itself was
+not confirmed as the cause. The existing SHM and loopback UDP profile stays in use without Data Sharing.
+
+Do not remove anything from `/dev/shm` while ROS is running. After stopping all ROS containers, use the cleanup script
+being added to drivers in its separate PR: `ros2/tools/dds_shm_clean.sh` ([drivers #33](https://github.com/RoboCupper-tsukuchallebu/tsukuchalle_drivers/issues/33),
+[PR #34](https://github.com/RoboCupper-tsukuchallebu/tsukuchalle_drivers/pull/34)); it is not yet in develop. The robot has
+multiple Compose projects, so the script checks `docker ps`, image names and Compose project labels for running containers
+before invoking `fastdds shm clean`. It conservatively refuses cleanup if any Compose container is running. Stop ROS
+processes outside containers too, and do not start ROS during cleanup.
+
 ## Indoors, without GNSS (Issue #43 section 12)
 
 `config/localization_indoor.yaml` is the params file of `localization_node` for a room: it listens to no GNSS topic, so

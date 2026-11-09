@@ -448,3 +448,145 @@ TEST_F(SafetyGateNodeTest, angularCommandMapsToAngularOutputWithSign)
     }
   }
 }
+
+TEST_F(SafetyGateNodeTest, runtimeLimitsApplyAndRespectStartupCeilings)
+{
+  reachMotion();
+  const auto result = gate_->set_parameters_atomically({
+    rclcpp::Parameter("v_max", 0.15), rclcpp::Parameter("w_max", 0.2)});
+  ASSERT_TRUE(result.successful) << result.reason;
+  const ObstacleStatus status = healthyStatus();
+  const VelocityCommand command = forwardCommand();
+  ASSERT_TRUE(runUntil([this] {return !received_.empty() && received_.back().linear.x == 0.15;},
+    &status, &command));
+  EXPECT_TRUE(gate_->set_parameter(rclcpp::Parameter("v_max", 0.8)).successful);
+  EXPECT_TRUE(gate_->set_parameter(rclcpp::Parameter("w_max", 0.6)).successful);
+  for (const auto & parameter : {rclcpp::Parameter("v_max", 5),
+    rclcpp::Parameter("v_max", "bad"), rclcpp::Parameter("v_max", true),
+    rclcpp::Parameter("v_max", kNaN),
+    rclcpp::Parameter("v_max", std::numeric_limits<double>::infinity()),
+    rclcpp::Parameter("v_max", -std::numeric_limits<double>::infinity())})
+  {
+    const auto rejected = gate_->set_parameter(parameter);
+    EXPECT_FALSE(rejected.successful);
+    EXPECT_FALSE(rejected.reason.empty());
+  }
+  EXPECT_DOUBLE_EQ(gate_->get_parameter("v_max").as_double(), 0.8);
+  const auto readonly = gate_->set_parameter(rclcpp::Parameter("deceleration_max_mps2", 0.5));
+  EXPECT_FALSE(readonly.successful);
+  EXPECT_FALSE(readonly.reason.empty());
+  EXPECT_FALSE(gate_->set_parameter(rclcpp::Parameter("use_sim_time", true)).successful);
+}
+
+TEST_F(SafetyGateNodeTest, useSimTimeRejectedInEveryLifecycleState)
+{
+  EXPECT_FALSE(gate_->set_parameter(rclcpp::Parameter("use_sim_time", true)).successful);
+  ASSERT_EQ(gate_->cleanup().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED);
+  EXPECT_FALSE(gate_->set_parameter(rclcpp::Parameter("use_sim_time", true)).successful);
+  ASSERT_EQ(gate_->configure().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE);
+  activate();
+  EXPECT_FALSE(gate_->set_parameter(rclcpp::Parameter("use_sim_time", true)).successful);
+}
+
+TEST_F(SafetyGateNodeTest, configureRejectsStartupLimitAboveFiniteCeiling)
+{
+  executor_.remove_node(gate_->get_node_base_interface());
+  gate_->shutdown();
+  for (const auto & overrides : {
+      std::vector<rclcpp::Parameter>{rclcpp::Parameter("v_max", 0.8),
+        rclcpp::Parameter("v_max_ceiling", 0.5)},
+      std::vector<rclcpp::Parameter>{rclcpp::Parameter("w_max", 0.6),
+        rclcpp::Parameter("w_max_ceiling", 0.5)}})
+  {
+    rclcpp::NodeOptions options;
+    options.parameter_overrides(overrides);
+    gate_ = std::make_shared<lightnav_safety_gate::SafetyGateNode>(options);
+    EXPECT_EQ(gate_->configure().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED);
+    gate_->shutdown();
+  }
+  gate_ = std::make_shared<lightnav_safety_gate::SafetyGateNode>();
+  executor_.add_node(gate_->get_node_base_interface());
+}
+
+TEST_F(SafetyGateNodeTest, configureAcceptsStartupLimitsAtOrBelowFiniteCeilings)
+{
+  executor_.remove_node(gate_->get_node_base_interface());
+  gate_->shutdown();
+  for (const auto & overrides : {
+      std::vector<rclcpp::Parameter>{rclcpp::Parameter("v_max", 0.5),
+        rclcpp::Parameter("v_max_ceiling", 0.5), rclcpp::Parameter("w_max", 0.4),
+        rclcpp::Parameter("w_max_ceiling", 0.5)},
+      std::vector<rclcpp::Parameter>{rclcpp::Parameter("v_max", 0.4),
+        rclcpp::Parameter("v_max_ceiling", 0.5), rclcpp::Parameter("w_max", 0.5),
+        rclcpp::Parameter("w_max_ceiling", 0.5)}})
+  {
+    rclcpp::NodeOptions options;
+    options.parameter_overrides(overrides);
+    gate_ = std::make_shared<lightnav_safety_gate::SafetyGateNode>(options);
+
+    const auto state = gate_->configure();
+
+    EXPECT_EQ(state.id(), lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE);
+    gate_->shutdown();
+  }
+  gate_ = std::make_shared<lightnav_safety_gate::SafetyGateNode>();
+  executor_.add_node(gate_->get_node_base_interface());
+}
+
+TEST_F(SafetyGateNodeTest, cleanupDoesNotRaiseCeiling)
+{
+  activate();
+  ASSERT_EQ(gate_->deactivate().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(gate_->cleanup().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED);
+  EXPECT_FALSE(gate_->set_parameter(rclcpp::Parameter("v_max", 0.9)).successful);
+  EXPECT_EQ(gate_->configure().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE);
+}
+
+TEST_F(SafetyGateNodeTest, explicitCeilingsPermitRaisingAndNonfiniteCeilingRejects)
+{
+  executor_.remove_node(gate_->get_node_base_interface());
+  gate_->shutdown();
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({rclcpp::Parameter("v_max_ceiling", 1.0),
+    rclcpp::Parameter("w_max_ceiling", kNaN)});
+  gate_ = std::make_shared<lightnav_safety_gate::SafetyGateNode>(options);
+  executor_.add_node(gate_->get_node_base_interface());
+  ASSERT_EQ(gate_->configure().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE);
+  activate();
+  EXPECT_TRUE(gate_->set_parameter(rclcpp::Parameter("v_max", 1.0)).successful);
+  const auto rejected = gate_->set_parameter(rclcpp::Parameter("w_max", 0.1));
+  EXPECT_FALSE(rejected.successful);
+  EXPECT_FALSE(rejected.reason.empty());
+  EXPECT_FALSE(gate_->set_parameter(rclcpp::Parameter("v_max_ceiling", 2.0)).successful);
+}
+
+TEST_F(SafetyGateNodeTest, parameterServiceValidatesEachValueSeparately)
+{
+  auto client = std::make_shared<rclcpp::AsyncParametersClient>(peer_, "safety_gate_node");
+  ASSERT_TRUE(client->wait_for_service(std::chrono::seconds(5)));
+  auto future = client->set_parameters({rclcpp::Parameter("v_max", 0.4),
+      rclcpp::Parameter("w_max", 5)});
+  ASSERT_EQ(executor_.spin_until_future_complete(future, std::chrono::seconds(5)),
+    rclcpp::FutureReturnCode::SUCCESS);
+  const auto results = future.get();
+  ASSERT_EQ(results.size(), 2U);
+  EXPECT_TRUE(results[0].successful);
+  EXPECT_FALSE(results[1].successful);
+  EXPECT_FALSE(results[1].reason.empty());
+  EXPECT_DOUBLE_EQ(gate_->get_parameter("v_max").as_double(), 0.4);
+  EXPECT_DOUBLE_EQ(gate_->get_parameter("w_max").as_double(), 0.6);
+}
+
+TEST_F(SafetyGateNodeTest, logsAcceptedAndRejectedChanges)
+{
+  testing::internal::CaptureStderr();
+  const auto accepted = gate_->set_parameter(rclcpp::Parameter("v_max", 0.4));
+  const auto rejected = gate_->set_parameter(rclcpp::Parameter("v_max", 2.0));
+  const auto output = testing::internal::GetCapturedStderr();
+  EXPECT_TRUE(accepted.successful);
+  EXPECT_FALSE(rejected.successful);
+  EXPECT_NE(rejected.reason.find("requested 2"), std::string::npos);
+  EXPECT_NE(rejected.reason.find("ceiling 0.800000"), std::string::npos);
+  EXPECT_NE(output.find("parameter changed: v_max"), std::string::npos);
+  EXPECT_NE(output.find("parameter rejected: v_max"), std::string::npos);
+}

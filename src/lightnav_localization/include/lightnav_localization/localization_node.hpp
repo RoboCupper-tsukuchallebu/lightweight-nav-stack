@@ -1,13 +1,17 @@
 #pragma once
 
+#include <chrono>
+
 #include <Eigen/Geometry>
 #include <builtin_interfaces/msg/time.hpp>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <diagnostic_msgs/msg/diagnostic_array.hpp>
@@ -44,6 +48,13 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
 
   explicit LocalizationNode(const rclcpp::NodeOptions& options = rclcpp::NodeOptions());
   ~LocalizationNode() override;
+
+  void set_map_match_hook_for_test(std::function<void(MatchResult&)> hook) {
+    if (localizer_) localizer_->set_map_match_hook(std::move(hook));
+  }
+  void inject_optimization_failure_for_test() {
+    if (localizer_) localizer_->inject_optimization_failure_for_test();
+  }
 
   CallbackReturn on_configure(const rclcpp_lifecycle::State& state) override;
   CallbackReturn on_activate(const rclcpp_lifecycle::State& state) override;
@@ -102,6 +113,12 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
                       const Eigen::Isometry3d& odom_to_base);
   void publish_status();
   void publish_aligned_scan(const PointList& points_in_base, const rclcpp::Time& stamp);
+  diagnostic_msgs::msg::DiagnosticStatus build_gnss_status(bool has_localizer) const;
+  diagnostic_msgs::msg::DiagnosticStatus build_state_status(const rclcpp::Time& now, bool has_localizer);
+  diagnostic_msgs::msg::DiagnosticStatus build_map_match_status(const rclcpp::Time& now, bool has_localizer) const;
+  diagnostic_msgs::msg::DiagnosticStatus build_errors_status(bool has_localizer) const;
+  diagnostic_msgs::msg::DiagnosticStatus build_performance_status(bool has_localizer);
+  double sample_cpu_percent();
   void publish_diagnostics(const rclcpp::Time& now);
   // Live preview for Foxglove / RViz (visualization_enabled). Mapping: the scans placed by the online
   // poses; localization: the prior map. Not the batch-optimized map that save_map writes.
@@ -129,6 +146,11 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
   std::string gps_topic_;
   bool publish_tf_ = true;
   double status_rate_hz_ = 2.0;
+  double diagnostics_cpu_warn_percent_ = 200.0;
+  double diagnostics_memory_warn_mb_ = 2048.0;
+  std::chrono::steady_clock::time_point last_cpu_time_{};
+  double last_cpu_usage_sec_ = 0.0;
+  bool has_cpu_sample_ = false;
   bool visualization_enabled_ = true;
   double visualization_rate_hz_ = 0.5;
   double visualization_voxel_m_ = 0.2;

@@ -1,5 +1,32 @@
 #include <gtest/gtest.h>
 
+#include <cstdlib>
+#include <filesystem>
+#include <system_error>
+#include <stdexcept>
+#include <string>
+
+namespace {
+// One directory per test process: fixed names under /tmp collide when several users run the tests on one machine
+// (self-hosted CI, 2026-11-10).
+std::string unique_temp_directory() {
+  static const std::string directory = [] {
+    std::string pattern = ::testing::TempDir() + "lightnav_map_metadata_XXXXXX";
+    if (mkdtemp(pattern.data()) == nullptr) {
+      throw std::runtime_error("cannot create a temporary directory from " + pattern);
+    }
+    // Removed when the test process exits, so repeated runs do not leave directories behind.
+    static const std::filesystem::path created{pattern};
+    std::atexit([] {
+      std::error_code ignored;
+      std::filesystem::remove_all(created, ignored);
+    });
+    return pattern + "/";
+  }();
+  return directory;
+}
+}  // namespace
+
 #include <fstream>
 #include <utility>
 #include <vector>
@@ -17,7 +44,7 @@ TEST(MapMetadata, round_trips_with_gps_origin) {
   metadata.created = "2026-11-02T00:00:00Z";
   metadata.keyframe_count = 1234;
   metadata.batch_optimized = true;
-  const std::string path = ::testing::TempDir() + "map_with_origin.yaml";
+  const std::string path = unique_temp_directory() + "map_with_origin.yaml";
 
   lightnav_localization::write_map_metadata(path, metadata);
   const MapMetadata loaded = lightnav_localization::read_map_metadata(path);
@@ -34,7 +61,7 @@ TEST(MapMetadata, round_trips_with_gps_origin) {
 TEST(MapMetadata, round_trips_without_gps_origin) {
   MapMetadata metadata;
   metadata.created = "2026-11-02T00:00:00Z";
-  const std::string path = ::testing::TempDir() + "map_without_origin.yaml";
+  const std::string path = unique_temp_directory() + "map_without_origin.yaml";
 
   lightnav_localization::write_map_metadata(path, metadata);
 
@@ -42,7 +69,7 @@ TEST(MapMetadata, round_trips_without_gps_origin) {
 }
 
 TEST(MapMetadata, missing_file_is_an_error) {
-  EXPECT_THROW(lightnav_localization::read_map_metadata(::testing::TempDir() + "absent.yaml"),
+  EXPECT_THROW(lightnav_localization::read_map_metadata(unique_temp_directory() + "absent.yaml"),
                std::runtime_error);
 }
 
@@ -58,18 +85,18 @@ void write_yaml(const std::string& path, const std::string& origin_lat, const st
 }  // namespace
 
 TEST(MapMetadata, missing_map_yaml_means_no_gps_origin) {
-  const MapMetadata loaded = lightnav_localization::read_map_metadata_or_no_origin(::testing::TempDir() + "absent2.yaml");
+  const MapMetadata loaded = lightnav_localization::read_map_metadata_or_no_origin(unique_temp_directory() + "absent2.yaml");
   EXPECT_FALSE(loaded.has_gps_origin);
 }
 
 TEST(MapMetadata, existing_but_malformed_map_yaml_is_still_an_error_for_the_lenient_reader) {
-  const std::string path = ::testing::TempDir() + "malformed.yaml";
+  const std::string path = unique_temp_directory() + "malformed.yaml";
   write_yaml(path, "12abc");
   EXPECT_THROW(lightnav_localization::read_map_metadata_or_no_origin(path), std::runtime_error);
 }
 
 TEST(MapMetadata, rejects_invalid_values) {
-  const std::string path = ::testing::TempDir() + "invalid.yaml";
+  const std::string path = unique_temp_directory() + "invalid.yaml";
   const std::vector<std::pair<std::string, std::string>> bad_latitudes = {
       {"12abc", "trailing garbage"}, {"1e999", "out of range for double"}, {"91.0", "latitude range"},
       {"nan", "not finite"}};
@@ -84,6 +111,6 @@ TEST(MapMetadata, rejects_invalid_values) {
 }
 
 TEST(MapMetadata, write_to_an_unwritable_location_is_an_error) {
-  EXPECT_THROW(lightnav_localization::write_map_metadata(::testing::TempDir() + "no_such_directory/map.yaml", MapMetadata{}),
+  EXPECT_THROW(lightnav_localization::write_map_metadata(unique_temp_directory() + "no_such_directory/map.yaml", MapMetadata{}),
                std::runtime_error);
 }

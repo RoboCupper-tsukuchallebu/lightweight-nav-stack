@@ -1,6 +1,11 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <chrono>
+#include <cstdarg>
+#include <cstdio>
+#include <vector>
+#include "rcutils/logging.h"
 #include <limits>
 #include <memory>
 #include <optional>
@@ -17,8 +22,8 @@ class ControllerNodeLifecycle : public ::testing::Test {
   static void TearDownTestSuite() { rclcpp::shutdown(); }
 
   void SetUp() override {
-    node_ = std::make_shared<lightnav_controller::ControllerNode>();
-    node_->set_parameter(rclcpp::Parameter("max_path_deviation_m", 2.5));
+    node_ = std::make_shared<lightnav_controller::ControllerNode>(rclcpp::NodeOptions().parameter_overrides({
+        rclcpp::Parameter("max_path_deviation_m", 2.5), rclcpp::Parameter("grid_frame", "base_footprint")}));
   }
 
   void configureAndActivate() {
@@ -62,7 +67,7 @@ TEST_F(ControllerNodeLifecycle, CleanupReleasesOutputs) {
 }
 
 TEST_F(ControllerNodeLifecycle, ConfigureFailsOnNonPositiveParameter) {
-  node_->set_parameter(rclcpp::Parameter("v_max", -1.0));
+  node_ = std::make_shared<lightnav_controller::ControllerNode>(rclcpp::NodeOptions().parameter_overrides({rclcpp::Parameter("max_path_deviation_m", 2.5), rclcpp::Parameter("v_max", -1.0)}));
   EXPECT_EQ(node_->configure().label(), "unconfigured");
 }
 
@@ -80,13 +85,13 @@ TEST_F(ControllerNodeLifecycle, ConfigureFailsWithInvalidMaxPathDeviation) {
        {0.0, -1.0, std::numeric_limits<double>::quiet_NaN(),
         std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity()}) {
     SCOPED_TRACE(max_path_deviation_m);
-    node_->set_parameter(rclcpp::Parameter("max_path_deviation_m", max_path_deviation_m));
+    node_ = std::make_shared<lightnav_controller::ControllerNode>(rclcpp::NodeOptions().parameter_overrides({rclcpp::Parameter("max_path_deviation_m", max_path_deviation_m)}));
     EXPECT_EQ(node_->configure().label(), "unconfigured");
   }
 }
 
 TEST_F(ControllerNodeLifecycle, ConfigureFailsWithEmptyGridFrame) {
-  node_->set_parameter(rclcpp::Parameter("grid_frame", ""));
+  node_ = std::make_shared<lightnav_controller::ControllerNode>(rclcpp::NodeOptions().parameter_overrides({rclcpp::Parameter("max_path_deviation_m", 2.5), rclcpp::Parameter("grid_frame", "")}));
   EXPECT_EQ(node_->configure().label(), "unconfigured");
 }
 
@@ -98,7 +103,7 @@ class ControllerNodeAvoidWiring : public ControllerNodeLifecycle {
   void SetUp() override {
     ControllerNodeLifecycle::SetUp();
     node_->set_parameter(rclcpp::Parameter("grid_timeout_s", 0.3));
-    node_->set_parameter(rclcpp::Parameter("grid_frame", configured_grid_frame_));
+    node_ = std::make_shared<lightnav_controller::ControllerNode>(rclcpp::NodeOptions().parameter_overrides({rclcpp::Parameter("max_path_deviation_m", 2.5), rclcpp::Parameter("grid_timeout_s", 0.3), rclcpp::Parameter("grid_frame", configured_grid_frame_)}));
     configureAndActivate();
     helper_ = std::make_shared<rclcpp::Node>("controller_node_test_helper");
     path_publisher_ = helper_->create_publisher<lightnav_msgs::msg::PathWithId>(
@@ -220,4 +225,170 @@ TEST_F(ControllerNodeAvoidWiringInFootprintFrame, GridInDefaultFrameIsDroppedWhe
   spinFor(std::chrono::milliseconds(500), true);
   ASSERT_TRUE(last_status_.has_value());
   EXPECT_NE(last_status_->active_layer, lightnav_msgs::msg::FollowStatus::LAYER_AVOID);
+}
+
+TEST_F(ControllerNodeLifecycle, RuntimeClassesAndStartupBaseline) {
+  configureAndActivate();
+  for (double value : {0.8, 0.4}) EXPECT_TRUE(node_->set_parameter(rclcpp::Parameter("v_max", value)).successful);
+  for (double value : {0.05, 0.1}) EXPECT_TRUE(node_->set_parameter(rclcpp::Parameter("arc_step_m", value)).successful);
+  for (double value : {0.2, std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN()}) {
+    const auto result = node_->set_parameter(rclcpp::Parameter("arc_step_m", value));
+    EXPECT_FALSE(result.successful); EXPECT_FALSE(result.reason.empty());
+  }
+  EXPECT_FALSE(node_->set_parameter(rclcpp::Parameter("use_sim_time", true)).successful);
+  { const auto result = node_->set_parameter(rclcpp::Parameter("grid_frame", "map")); EXPECT_FALSE(result.successful); EXPECT_FALSE(result.reason.empty()); }
+  node_->deactivate(); node_->cleanup();
+  EXPECT_FALSE(node_->set_parameter(rclcpp::Parameter("arc_step_m", 0.2)).successful);
+  EXPECT_EQ(node_->configure().label(), "inactive");
+}
+
+TEST_F(ControllerNodeLifecycle, RejectsInvalidCombinedConstraints) {
+  EXPECT_FALSE(node_->set_parameter(rclcpp::Parameter("v_slow", 0.9)).successful);
+  EXPECT_FALSE(node_->set_parameter(rclcpp::Parameter("avoid_trigger_m", 3.0)).successful);
+  auto result = node_->set_parameters_atomically({rclcpp::Parameter("v_max", 0.9), rclcpp::Parameter("v_slow", 0.8)});
+  EXPECT_TRUE(result.successful);
+}
+
+TEST_F(ControllerNodeLifecycle, NonfiniteStartupBaselineCannotBeChanged) {
+  node_ = std::make_shared<lightnav_controller::ControllerNode>();
+  const auto result = node_->set_parameter(rclcpp::Parameter("max_path_deviation_m", 2.5));
+  EXPECT_FALSE(result.successful); EXPECT_FALSE(result.reason.empty());
+}
+
+TEST_F(ControllerNodeLifecycle, TuningParametersAcceptBothDirections) {
+  configureAndActivate();
+  for (const auto& name : {"lookahead_m", "search_window_m", "v_max", "v_slow", "w_max",
+                           "w_rotate", "v_avoid", "k_end", "goal_tolerance_m",
+                           "rotate_in_place_heading_threshold_rad", "w_path", "w_heading", "w_smooth",
+                           "stuck_timeout_s"}) {
+    SCOPED_TRACE(name);
+    const double initial = node_->get_parameter(name).as_double();
+    EXPECT_TRUE(node_->set_parameter(rclcpp::Parameter(name, initial * 1.1)).successful);
+    EXPECT_TRUE(node_->set_parameter(rclcpp::Parameter(name, initial * 0.9)).successful);
+    EXPECT_TRUE(node_->set_parameter(rclcpp::Parameter(name, initial)).successful);
+  }
+  const auto count = node_->get_parameter("arc_candidate_count").as_int();
+  EXPECT_TRUE(node_->set_parameter(rclcpp::Parameter("arc_candidate_count", count + 1)).successful);
+  EXPECT_TRUE(node_->set_parameter(rclcpp::Parameter("arc_candidate_count", count - 1)).successful);
+  EXPECT_FALSE(node_->set_parameter(rclcpp::Parameter("arc_candidate_count", 0)).successful);
+}
+
+TEST_F(ControllerNodeLifecycle, EverySafetyParameterEnforcesStartupBaseline) {
+  configureAndActivate();
+  for (const auto& entry : std::vector<std::pair<std::string, bool>>{
+           {"v_min", false}, {"max_path_deviation_m", false}, {"pose_timeout_s", false},
+           {"obstacle_status_timeout_s", false}, {"grid_timeout_s", false},
+           {"arc_step_m", false}, {"rejoin_distance_m", false}, {"avoid_trigger_m", true},
+           {"avoid_release_m", true}, {"arc_length_m", true}, {"avoid_release_hold_s", true}}) {
+    SCOPED_TRACE(entry.first);
+    const double initial = node_->get_parameter(entry.first).as_double();
+    const double conservative = initial * (entry.second ? 1.01 : 0.99);
+    const double unsafe = initial * (entry.second ? 0.99 : 1.01);
+    ASSERT_TRUE(node_->set_parameter(rclcpp::Parameter(entry.first, conservative)).successful);
+    for (double invalid : {unsafe, std::numeric_limits<double>::quiet_NaN(),
+                           std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity()}) {
+      const auto result = node_->set_parameter(rclcpp::Parameter(entry.first, invalid));
+      EXPECT_FALSE(result.successful);
+      EXPECT_FALSE(result.reason.empty());
+      EXPECT_DOUBLE_EQ(node_->get_parameter(entry.first).as_double(), conservative);
+    }
+    EXPECT_TRUE(node_->set_parameter(rclcpp::Parameter(entry.first, initial)).successful);
+  }
+}
+
+TEST_F(ControllerNodeLifecycle, ReadOnlyAndInvalidValuesAreRejected) {
+  for (int state = 0; state < 3; ++state) {
+    if (state == 1) { ASSERT_EQ(node_->configure().label(), "inactive"); }
+    if (state == 2) { ASSERT_EQ(node_->activate().label(), "active"); }
+    const auto result = node_->set_parameter(rclcpp::Parameter("use_sim_time", true));
+    EXPECT_FALSE(result.successful);
+    EXPECT_FALSE(result.reason.empty());
+  }
+  { const auto result = node_->set_parameter(rclcpp::Parameter("control_hz", 30.0)); EXPECT_FALSE(result.successful); EXPECT_FALSE(result.reason.empty()); }
+  { const auto result = node_->set_parameter(rclcpp::Parameter("grid_frame", "map")); EXPECT_FALSE(result.successful); EXPECT_FALSE(result.reason.empty()); }
+  for (double invalid : {0.0, -1.0, std::numeric_limits<double>::quiet_NaN(),
+                         std::numeric_limits<double>::infinity()}) {
+    const auto old = node_->get_parameter("lookahead_m").as_double();
+    const auto result = node_->set_parameter(rclcpp::Parameter("lookahead_m", invalid));
+    EXPECT_FALSE(result.successful);
+    EXPECT_FALSE(result.reason.empty());
+    EXPECT_DOUBLE_EQ(node_->get_parameter("lookahead_m").as_double(), old);
+  }
+}
+
+TEST_F(ControllerNodeLifecycle, ConfigureRejectsInconsistentOverrides) {
+  for (const auto& invalid : {rclcpp::Parameter("v_slow", 1.0),
+                              rclcpp::Parameter("avoid_trigger_m", 10.0)}) {
+    node_ = std::make_shared<lightnav_controller::ControllerNode>(rclcpp::NodeOptions().parameter_overrides(
+        {rclcpp::Parameter("max_path_deviation_m", 2.5), invalid}));
+    EXPECT_EQ(node_->configure().label(), "unconfigured");
+  }
+}
+
+TEST_F(ControllerNodeAvoidWiring, RuntimeChangesPreserveAvoidanceAndPath) {
+  spinFor(std::chrono::milliseconds(500), true);
+  ASSERT_TRUE(last_status_.has_value());
+  ASSERT_EQ(last_status_->active_layer, lightnav_msgs::msg::FollowStatus::LAYER_AVOID);
+  ASSERT_TRUE(node_->set_parameter(rclcpp::Parameter("w_path", 2.0)).successful);
+  ASSERT_TRUE(node_->set_parameter(rclcpp::Parameter("arc_step_m", 0.05)).successful);
+  spinFor(std::chrono::milliseconds(200), true);
+  EXPECT_EQ(last_status_->active_layer, lightnav_msgs::msg::FollowStatus::LAYER_AVOID);
+}
+
+TEST_F(ControllerNodeAvoidWiring, ParameterServiceValidatesEachValueInOrder) {
+  auto client = std::make_shared<rclcpp::AsyncParametersClient>(helper_, "/controller_node");
+  ASSERT_TRUE(client->wait_for_service(std::chrono::seconds(5)));
+  auto future = client->set_parameters({rclcpp::Parameter("v_max", 0.9),
+                                        rclcpp::Parameter("v_slow", 0.8),
+                                        rclcpp::Parameter("arc_step_m", 1.0)});
+  ASSERT_EQ(executor_.spin_until_future_complete(future, std::chrono::seconds(5)),
+            rclcpp::FutureReturnCode::SUCCESS);
+  const auto results = future.get();
+  ASSERT_EQ(results.size(), 3u);
+  EXPECT_TRUE(results[0].successful);
+  EXPECT_TRUE(results[1].successful);
+  EXPECT_FALSE(results[2].successful);
+  EXPECT_FALSE(results[2].reason.empty());
+  EXPECT_DOUBLE_EQ(node_->get_parameter("v_max").as_double(), 0.9);
+  EXPECT_DOUBLE_EQ(node_->get_parameter("v_slow").as_double(), 0.8);
+}
+
+namespace {
+std::vector<std::string> captured_logs;
+void captureLog(const rcutils_log_location_t*, int, const char*, rcutils_time_point_value_t,
+                const char* format, va_list* arguments) {
+  char buffer[1024];
+  std::vsnprintf(buffer, sizeof(buffer), format, *arguments);
+  captured_logs.emplace_back(buffer);
+}
+}
+
+TEST_F(ControllerNodeLifecycle, ParameterChangesAndRejectionsAreLogged) {
+  configureAndActivate();
+  captured_logs.clear();
+  const auto previous_handler = rcutils_logging_get_output_handler();
+  rcutils_logging_set_output_handler(captureLog);
+  const auto accepted = node_->set_parameter(rclcpp::Parameter("v_max", 0.5));
+  const auto rejected = node_->set_parameter(rclcpp::Parameter("v_max", -1.0));
+  rcutils_logging_set_output_handler(previous_handler);
+  EXPECT_TRUE(accepted.successful);
+  EXPECT_FALSE(rejected.successful);
+  EXPECT_TRUE(std::any_of(captured_logs.begin(), captured_logs.end(), [](const auto& line) {
+    return line.find("parameter changed: v_max") != std::string::npos;
+  }));
+  EXPECT_TRUE(std::any_of(captured_logs.begin(), captured_logs.end(), [](const auto& line) {
+    return line.find("parameter rejected:") != std::string::npos;
+  }));
+}
+
+TEST_F(ControllerNodeAvoidWiring, RuntimeSpeedLimitChangesNextPublishedCommand) {
+  spinFor(std::chrono::milliseconds(400), false);
+  ASSERT_TRUE(last_status_.has_value());
+  ASSERT_GT(last_status_->commanded_linear_mps, 0.3);
+  const auto result = node_->set_parameters_atomically({rclcpp::Parameter("v_max", 0.3),
+                                                         rclcpp::Parameter("v_slow", 0.2)});
+  ASSERT_TRUE(result.successful);
+  spinFor(std::chrono::milliseconds(150), false);
+  ASSERT_TRUE(last_status_.has_value());
+  EXPECT_NEAR(last_status_->commanded_linear_mps, 0.3, 1e-5);
 }
