@@ -506,6 +506,10 @@ bool LocalizationNode::read_parameters(std::string& error) {
       get_parameter("map_max_correspondence_distance_m").as_double();
   localizer_parameters_.map_matcher.max_iterations =
       static_cast<int>(get_parameter("map_max_iterations").as_int());
+  if (!std::isfinite(matcher.max_correspondence_distance_m) || matcher.max_correspondence_distance_m <= 0.0) {
+    error = "map_max_correspondence_distance_m must be positive and finite";
+    return false;
+  }
   localizer_parameters_.map_matcher.inlier_ratio_min =
       get_parameter("map_inlier_ratio_min").as_double();
   localizer_parameters_.map_matcher.gate_translation_m =

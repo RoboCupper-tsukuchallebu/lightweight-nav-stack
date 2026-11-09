@@ -148,3 +148,21 @@ TEST(Matcher, too_few_points_is_not_converged) {
   EXPECT_FALSE(result.converged);
   EXPECT_FALSE(result.is_accepted);
 }
+
+TEST(Matcher, vgicp_recovers_shifted_predictions) {
+  const Scenario scenario;
+  MatcherParameters parameters = make_parameters();
+  parameters.method = "vgicp";
+  parameters.vgicp_voxel_m = 0.3;
+  parameters.max_correspondence_distance_m = 1.0;
+  parameters.max_iterations = 60;
+  parameters.gate_translation_m = 2.0;
+  const PreparedTarget target(scenario.world.sample_map(kMapSpacingM), parameters);
+  const auto truth = pose_at(kScanDurationSec);
+  for (const double offset : {0.1, 0.5}) {
+    const auto result = match_scan(target, corrected_scan(scenario, true),
+                                   offset_pose(truth, offset, -offset, 0.02), parameters);
+    EXPECT_TRUE(result.converged) << offset;
+    EXPECT_LT((result.target_to_source.translation() - truth.translation()).norm(), 0.15) << offset;
+  }
+}
