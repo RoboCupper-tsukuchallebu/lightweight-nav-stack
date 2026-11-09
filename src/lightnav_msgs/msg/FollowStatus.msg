@@ -17,4 +17,5 @@ uint32 closest_index
 float32 remaining_distance_m     # 最近傍点から経路末端までの弧長
 float32 path_deviation_m         # 車体の経路からの距離
 float32 commanded_linear_mps     # 調停後の v（不動検知用）
+float32 commanded_angular_rps    # 調停後の w（v=0、w≠0 はその場旋回）
 bool is_stuck

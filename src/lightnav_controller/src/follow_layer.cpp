@@ -43,6 +43,7 @@ bool FollowLayer::tryAcceptPath(std::uint32_t session_id, std::uint32_t path_id,
         cumulative_length_m_[index - 1] + distanceBetween(path_points_[index - 1], path_points_[index]);
   }
   closest_index_ = 0;
+  is_aligning_ = false;
   return true;
 }
 
@@ -77,10 +78,6 @@ FollowResult FollowLayer::compute(const Pose2D& pose, const FollowInputs& inputs
     result.output.reason = StopReason::kObstacleStale;
     return result;
   }
-  if (inputs.is_stop_zone_occupied) {
-    result.output.reason = StopReason::kBlocked;
-    return result;
-  }
   if (result.remaining_distance_m < parameters_.goal_tolerance_m) {
     result.output.reason = StopReason::kAtPathEnd;
     return result;
@@ -104,10 +101,22 @@ FollowResult FollowLayer::compute(const Pose2D& pose, const FollowInputs& inputs
   result.output.is_asserted = true;
   result.output.reason = StopReason::kOk;
 
-  if (std::fabs(heading_error_rad) > parameters_.rotate_in_place_heading_rad ||
-      squared_distance_m2 < kMinimumCurvature * kMinimumCurvature) {
+  if (is_aligning_ ? std::fabs(heading_error_rad) > parameters_.rotate_in_place_heading_rad * 0.8
+                   : std::fabs(heading_error_rad) > parameters_.rotate_in_place_heading_rad) {
+    is_aligning_ = true;
     const double turn_sign = lateral_m >= 0.0 ? 1.0 : -1.0;
     result.output.twist = Twist2D{0.0, turn_sign * parameters_.w_rotate_rps};
+    return result;
+  }
+  is_aligning_ = false;
+  if (inputs.is_stop_zone_occupied) {
+    result.output.is_asserted = false;
+    result.output.reason = StopReason::kBlocked;
+    return result;
+  }
+  if (squared_distance_m2 < kMinimumCurvature * kMinimumCurvature) {
+    result.output.is_asserted = false;
+    result.output.reason = StopReason::kAtPathEnd;
     return result;
   }
 

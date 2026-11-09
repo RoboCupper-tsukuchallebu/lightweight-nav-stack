@@ -40,6 +40,8 @@ struct AvoidParameters {
   double rejoin_distance_m{0.5};
   double avoid_release_hold_s{1.0};
   double stuck_timeout_s{10.0};
+  double stuck_rotate_after_s{2.0};
+  double w_rotate_rps{0.3};
   double goal_tolerance_m{0.3};
   double k_end_per_s{0.5};
 };
@@ -113,6 +115,7 @@ class ArcAvoidLayer final : public AvoidLayer {
   std::optional<double> release_since_s_;
   std::optional<double> waiting_since_s_;
   double previous_curvature_per_m_{0.0};
+  double rotation_sign_{-1.0};
 };
 
 }  // namespace lightnav_controller
