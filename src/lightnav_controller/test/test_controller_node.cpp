@@ -293,8 +293,8 @@ TEST_F(ControllerNodeLifecycle, EverySafetyParameterEnforcesStartupBaseline) {
 
 TEST_F(ControllerNodeLifecycle, ReadOnlyAndInvalidValuesAreRejected) {
   for (int state = 0; state < 3; ++state) {
-    if (state == 1) ASSERT_EQ(node_->configure().label(), "inactive");
-    if (state == 2) ASSERT_EQ(node_->activate().label(), "active");
+    if (state == 1) { ASSERT_EQ(node_->configure().label(), "inactive"); }
+    if (state == 2) { ASSERT_EQ(node_->activate().label(), "active"); }
     const auto result = node_->set_parameter(rclcpp::Parameter("use_sim_time", true));
     EXPECT_FALSE(result.successful);
     EXPECT_FALSE(result.reason.empty());
