@@ -120,6 +120,7 @@ class ClosedLoopTest(unittest.TestCase):
                 self.fail(f"{name} did not become active; last state: {state}")
             self.node.destroy_client(client)
             self.node.destroy_client(change_client)
+        self.assertFalse(self.lifecycle_recoveries, f"lifecycle recovery required: {self.lifecycle_recoveries}")
         planner = self.node.create_client(PlanPath, "/lightnav/planner/plan_path")
         self.assertTrue(planner.wait_for_service(timeout_sec=60.0))
         self.node.destroy_client(planner)

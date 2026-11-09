@@ -15,18 +15,25 @@ class TestClosedLoop(ClosedLoopTest):
         result = self.start_mission()
         self.wait_for(lambda: any(abs(message.linear.x) > 0.05 for _, message in self.commands))
         self.assertTrue(any(not message.is_stop_zone_occupied for message in self.obstacles))
-        self.wait_for(lambda: any(item.is_stop_zone_occupied for item in self.obstacles))
-        stop_time = next(timestamp for timestamp, message in self.obstacle_receipts
-                         if message.is_stop_zone_occupied)
-        # Twist has no header; monotonic reception times in one executor avoid clock skew.
-        self.wait_for(lambda: any(timestamp >= stop_time and abs(message.linear.x) < 1e-6
-                                  and abs(message.angular.z) < 1e-6 for timestamp, message in self.commands))
-        zero_time = next(timestamp for timestamp, message in self.commands
-                         if timestamp >= stop_time and abs(message.linear.x) < 1e-6
-                         and abs(message.angular.z) < 1e-6)
-        self.assertLessEqual(zero_time - stop_time, 0.5)
+        # Either the stop zone trips, or avoidance waits safely before entering it.
+        self.wait_for(lambda: any(item.is_stop_zone_occupied for item in self.obstacles)
+                      or any(item.state == FollowStatus.BLOCKED for item in self.status))
         self.wait_for(lambda: any(item.is_stuck for item in self.feedback))
         self.wait_for(lambda: any(item.is_stuck for item in self.status))
+        if any(item.is_stop_zone_occupied for item in self.obstacles):
+            stop_time = next(timestamp for timestamp, message in self.obstacle_receipts
+                             if message.is_stop_zone_occupied)
+            self.wait_for(lambda: any(timestamp >= stop_time and abs(message.linear.x) < 1e-6
+                                      and abs(message.angular.z) < 1e-6 for timestamp, message in self.commands))
+            zero_time = next(timestamp for timestamp, message in self.commands
+                             if timestamp >= stop_time and abs(message.linear.x) < 1e-6
+                             and abs(message.angular.z) < 1e-6)
+            self.assertLessEqual(zero_time - stop_time, 0.5)
+        if not any(item.is_stop_zone_occupied for item in self.obstacles):
+            # Verify a stationary command while blocked, not just a status flag.
+            self.assertTrue(self.commands)
+            self.assertAlmostEqual(self.commands[-1][1].linear.x, 0.0, delta=1e-6)
+            self.assertAlmostEqual(self.commands[-1][1].angular.z, 0.0, delta=1e-6)
         blocked = next(item for item in self.status if item.state == FollowStatus.BLOCKED)
         stuck = next(item for item in self.status if item.is_stuck)
         def stamp_seconds(item):

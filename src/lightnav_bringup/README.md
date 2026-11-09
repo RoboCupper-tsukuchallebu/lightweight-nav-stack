@@ -25,4 +25,4 @@ ros2 launch lightnav_bringup robot.launch.py [safety_gate:=true|false] [robot_co
 
 閉ループ試験用の `sim_closed_loop.launch.py` は sim とスタックを起動し、円障害物の回避と壁による停止・再開を検証する。回避試験は `base_link` と `base_footprint` の両方で実行する。実機には使用しない。実時間の launch_testing は負荷によって変動するため（#32、#40）、回避試験は条件を待ち、タイムアウトを長めに設定している。シナリオ A の 60 秒制限は判定しない。
 
-H と footprint は中心 (4.0, 0.45)、半径 0.3 m の円障害物を使う。Issue #1 の配置（経路中心から 0.3 m、半径 0.5 m）は本番パラメータで棄却されるため異なる。B は停止域に入るよう、試験専用 launch で controller の `v_max` を 1.0 m/s に上書きする（Issue は 0.6 m/s、safety_gate の上限は 0.8 m/s）。どちらもユーザーの決定待ち（PR #64）であり、これらの試験では本番パラメータでの挙動を検証していない。
+H と footprint は中心 (4.0, 0.3)、半径 0.5 m の円障害物を使う。B は壁の前で停止域に入る場合、0.5 秒以内に停止することを確認する。停止域の手前で回避層が待機する場合も、停止と stuck の報告、障害物除去後の再開を確認する。いずれも `robot.yaml` の速度と膨張半径 0.3 m を使う。起動時に lifecycle の再要求が必要だった場合は試験を失敗させる。
