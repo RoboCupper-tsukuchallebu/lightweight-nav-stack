@@ -20,8 +20,11 @@ struct PoseGraphParameters {
   double window_s = 30.0;
   double huber_k = 1.0;
   double wheel_sigma_translation_per_m = 0.02;
+  double wheel_yaw_slip_threshold_rad = 0.0;
   double wheel_sigma_yaw_per_rad = 0.1;
   double wheel_sigma_yaw_per_m = 0.01;
+  std::string wheel_robust_kernel = "huber";
+  double wheel_robust_k = 8.0;
   double planar_sigma_z_per_m = 0.05;
   double planar_sigma_tilt_rad = 0.05;
   double sigma_floor_m = 0.01;  // keeps a stationary wheel factor from becoming a hard constraint
@@ -30,6 +33,9 @@ struct PoseGraphParameters {
   // Off by default: localization keeps the fixed-lag window only.
   bool record_history = false;
 };
+
+double wheel_yaw_sigma(const PoseGraphParameters& parameters, const Eigen::Isometry3d& wheel_relative,
+                       double yaw_disagreement_rad);
 
 struct BatchPose {
   int index = 0;
@@ -57,7 +63,7 @@ class PoseGraph {
                      double sigma_yaw_rad);
   // Wheel odometry: relative motion (2D lifted to 3D) from the previous node to the new one.
   int add_node_with_wheel_factor(double stamp_sec, const Eigen::Isometry3d& guess,
-                                 const Eigen::Isometry3d& wheel_relative);
+                                 const Eigen::Isometry3d& wheel_relative, double yaw_disagreement_rad = 0.0);
   // `information` is 6x6 in GTSAM Pose3 order (rotation xyz, then translation xyz).
   void add_lidar_odometry_factor(int from_index, int to_index, const Eigen::Isometry3d& relative,
                                  const Eigen::Matrix<double, 6, 6>& information);

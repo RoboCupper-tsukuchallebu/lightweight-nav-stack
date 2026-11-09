@@ -45,7 +45,7 @@ void LidarOdometry::rebuild_submap() {
 }
 
 MatchResult LidarOdometry::match(const PointList& scan_in_base, const Eigen::Isometry3d& prediction,
-                                 double moved_since_keyframe_m) const {
+                                 double moved_since_keyframe_m, double wheel_yaw_rate_rad_s) const {
   MatcherParameters matcher;
   matcher.max_correspondence_distance_m = parameters_.max_correspondence_distance_m;
   matcher.max_iterations = parameters_.max_iterations;
@@ -56,7 +56,9 @@ MatchResult LidarOdometry::match(const PointList& scan_in_base, const Eigen::Iso
   MatchResult result = match_scan(submap_, scan_in_base, prediction, matcher);
   const Eigen::Matrix3d difference = prediction.rotation().transpose() * result.target_to_source.rotation();
   const double yaw_difference = std::abs(std::atan2(difference(1, 0), difference(0, 0)));
-  result.is_accepted = result.is_accepted && yaw_difference <= parameters_.gate_yaw_rad;
+  const double yaw_gate = std::abs(wheel_yaw_rate_rad_s) < parameters_.slip_wheel_yaw_rate_rad_s
+      ? std::max(parameters_.gate_yaw_rad, parameters_.slip_gate_yaw_rad) : parameters_.gate_yaw_rad;
+  result.is_accepted = result.is_accepted && yaw_difference <= yaw_gate;
   return result;
 }
 

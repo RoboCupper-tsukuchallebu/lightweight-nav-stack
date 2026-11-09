@@ -28,7 +28,9 @@ double rotation_angle_rad(const Eigen::Isometry3d& transform) {
 
 struct PreparedTarget::Implementation {
   explicit Implementation(const PointList& points)
-      : cloud(make_cloud_with_covariances(points)), tree(cloud) {}
+      : cloud(std::make_shared<small_gicp::PointCloud>(points)), tree(cloud) {
+    small_gicp::estimate_covariances(*cloud, tree, kCovarianceNeighborCount);
+  }
   std::shared_ptr<small_gicp::PointCloud> cloud;
   small_gicp::KdTree<small_gicp::PointCloud> tree;
 };
