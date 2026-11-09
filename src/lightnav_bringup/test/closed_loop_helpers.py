@@ -40,6 +40,7 @@ class ClosedLoopTest(unittest.TestCase):
         cls.obstacles = []
         cls.obstacle_receipts = []
         cls.commands = []
+        cls.lifecycle_recoveries = []
         cls.node.create_subscription(PoseStamped, "/lightnav/pose", cls.poses.append, 10)
         cls.node.create_subscription(FollowStatus, "/lightnav/follow_status", cls.status.append, 10)
         cls.node.create_subscription(ObstacleStatus, "/lightnav/obstacle_status", cls.record_obstacle, 10)
@@ -91,6 +92,8 @@ class ClosedLoopTest(unittest.TestCase):
                 if time.monotonic() >= recovery_after and state.id in (
                     State.PRIMARY_STATE_UNCONFIGURED, State.PRIMARY_STATE_INACTIVE
                 ):
+                    # robot.launch.py bring-up can stall (open bug). Recovery only keeps
+                    # the test running; every warning must be investigated.
                     self.assertTrue(change_client.wait_for_service(timeout_sec=10.0))
                     request = ChangeState.Request()
                     request.transition.id = (
@@ -98,11 +101,22 @@ class ClosedLoopTest(unittest.TestCase):
                         if state.id == State.PRIMARY_STATE_UNCONFIGURED
                         else Transition.TRANSITION_ACTIVATE
                     )
+                    transition_label = (
+                        "CONFIGURE" if state.id == State.PRIMARY_STATE_UNCONFIGURED else "ACTIVATE"
+                    )
+                    self.lifecycle_recoveries.append((name, state.label, transition_label))
+                    print(
+                        f"WARNING: lifecycle recovery: node={name}, state={state.label}, "
+                        f"transition={transition_label}",
+                        flush=True,
+                    )
                     transition = change_client.call_async(request)
                     self.wait_for(transition.done, 10.0)
                     recovery_after = time.monotonic() + 5.0
                 time.sleep(0.2)
             else:
+                self.node.destroy_client(client)
+                self.node.destroy_client(change_client)
                 self.fail(f"{name} did not become active; last state: {state}")
             self.node.destroy_client(client)
             self.node.destroy_client(change_client)
