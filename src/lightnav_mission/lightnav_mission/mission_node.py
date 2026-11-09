@@ -9,6 +9,7 @@ from dataclasses import dataclass
 import rclpy
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Path
+from rcl_interfaces.msg import ParameterDescriptor, SetParametersResult
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
@@ -50,6 +51,7 @@ PARAMETER_DEFAULTS = {
     "no_motion_timeout_s": 5.0,
     "no_motion_distance_m": 0.1,
 }
+READ_ONLY_PARAMETERS = {"pose_topic", "localization_status_topic", "tick_hz"}
 NON_NEGATIVE_PARAMETERS = ("pass_index_margin", "v_progress_min")
 POSITIVE_PARAMETERS = (
     "default_arrival_radius_m", "final_arrival_radius_m", "tick_hz",
@@ -87,19 +89,70 @@ class MissionNode(LifecycleNode):
         self._follow_status_time_s = 0.0
         self._was_large_correction = False
         for name, default in PARAMETER_DEFAULTS.items():
-            self.declare_parameter(name, default)
+            descriptor = ParameterDescriptor(read_only=name in READ_ONLY_PARAMETERS)
+            self.declare_parameter(name, default, descriptor)
+        self._mission_parameters = {name: self.get_parameter(name).value for name in PARAMETER_DEFAULTS}
+        self._pose_timeout_baseline = self._mission_parameters["pose_timeout_s"]
+        self.add_on_set_parameters_callback(self._validate_parameter_changes)
+        self.add_post_set_parameters_callback(self._apply_parameter_changes)
         self._last_path_message: PathWithId | None = None
+
+    def _parameter_error(self, values):
+        for name in POSITIVE_PARAMETERS + NON_NEGATIVE_PARAMETERS:
+            value = values[name]
+            if not math.isfinite(value):
+                return f"{name}: value must be finite"
+            if value < 0 or (name in POSITIVE_PARAMETERS and value == 0):
+                return f"{name}: value is outside the allowed range"
+        if not values["pose_topic"]:
+            return "pose_topic: must not be empty"
+        return ""
+
+    def _validate_parameter_changes(self, parameters):
+        values = dict(self._mission_parameters)
+        reason = ""
+        for parameter in parameters:
+            name, value = parameter.name, parameter.value
+            if name == "use_sim_time" or name in READ_ONLY_PARAMETERS:
+                reason = f"{name}: runtime changes are read-only"
+            elif name in PARAMETER_DEFAULTS:
+                if type(value) is not type(PARAMETER_DEFAULTS[name]):
+                    reason = f"{name}: incorrect type"
+                elif name == "pose_timeout_s" and not (
+                    math.isfinite(self._pose_timeout_baseline)
+                    and math.isfinite(value) and value <= self._pose_timeout_baseline
+                ):
+                    reason = f"{name}: must be finite and no greater than the startup value"
+                else:
+                    values[name] = value
+            if reason:
+                break
+        if not reason:
+            reason = self._parameter_error(values)
+        if reason:
+            self.get_logger().warn(f"parameter change rejected: {reason}")
+        return SetParametersResult(successful=not bool(reason), reason=reason)
+
+    def _apply_parameter_changes(self, parameters):
+        old_values = self._mission_parameters
+        values = dict(old_values)
+        for parameter in parameters:
+            if parameter.name in PARAMETER_DEFAULTS:
+                values[parameter.name] = parameter.value
+        self._mission_parameters = values
+        for parameter in parameters:
+            if parameter.name in old_values and old_values[parameter.name] != parameter.value:
+                self.get_logger().info(
+                    f"parameter changed: {parameter.name} "
+                    f"{old_values[parameter.name]} -> {parameter.value}")
 
     # ---- lifecycle ----
 
     def on_configure(self, previous_state) -> TransitionCallbackReturn:
         self._mission_parameters = {name: self.get_parameter(name).value for name in PARAMETER_DEFAULTS}
-        if (
-            any(self._mission_parameters[name] <= 0 for name in POSITIVE_PARAMETERS)
-            or any(self._mission_parameters[name] < 0 for name in NON_NEGATIVE_PARAMETERS)
-            or not self._mission_parameters["pose_topic"]
-        ):
-            self.get_logger().error("パラメータ不正")
+        reason = self._parameter_error(self._mission_parameters)
+        if reason:
+            self.get_logger().error(f"パラメータ不正: {reason}")
             return TransitionCallbackReturn.FAILURE
 
         group = ReentrantCallbackGroup()
@@ -277,28 +330,29 @@ class MissionNode(LifecycleNode):
             feedback.is_stuck = status.is_stuck
         return feedback
 
-    def _is_pose_fresh(self) -> bool:
+    def _is_pose_fresh(self, parameters) -> bool:
         return (
             self._latest_pose is not None
-            and self._now_s() - self._latest_pose_time_s <= self._mission_parameters["pose_timeout_s"]
+            and self._now_s() - self._latest_pose_time_s <= parameters["pose_timeout_s"]
         )
 
-    def _begin_plan(self, waypoints, index) -> "PendingPlan":
+    def _begin_plan(self, waypoints, index, parameters) -> "PendingPlan":
         """計画要求を作る。応答待ちは tick ごとに _poll_plan で行い、スレッドをブロックしない。"""
         return PendingPlan(
             waypoints=waypoints, index=index,
-            deadline_s=self._now_s() + self._mission_parameters["plan_timeout_s"])
+            deadline_s=self._now_s() + parameters["plan_timeout_s"],
+            timeout_s=parameters["plan_timeout_s"])
 
-    def _poll_plan(self, pending: "PendingPlan"):
+    def _poll_plan(self, pending: "PendingPlan", parameters):
         """戻り値: ("waiting"|"failed"|"done", 理由, 経路, 経路 index 列)。"""
         if pending.future is None:
-            if not self._is_pose_fresh():
+            if not self._is_pose_fresh(parameters):
                 # 姿勢途絶中は計画を保留する（abort しない）。復帰後に改めて期限を数える
-                pending.deadline_s = self._now_s() + self._mission_parameters["plan_timeout_s"]
+                pending.deadline_s = self._now_s() + pending.timeout_s
                 return "waiting", "", None, None
             if self._now_s() > pending.deadline_s:
                 return "failed", "姿勢またはPlanPathサービスが得られずタイムアウト", None, None
-            if not (self._is_pose_fresh() and self._plan_client.service_is_ready()):
+            if not (self._is_pose_fresh(parameters) and self._plan_client.service_is_ready()):
                 return "waiting", "", None, None
             request = PlanPath.Request()
             request.frame_id = GLOBAL_FRAME_ID
@@ -343,13 +397,14 @@ class MissionNode(LifecycleNode):
                 self._state = next_state(self._state, MissionEvent.GOAL_ACCEPTED)
         if is_superseded:
             return self._finish(goal_handle, generation, False, "開始前に打ち切られた", index)
-        pending = self._begin_plan(waypoints, index)
+        pending = self._begin_plan(waypoints, index, parameters)
         path_indices, plan_offset = None, index
         tracker = NoMotionTracker()
         plan_sent_s, has_resent = self._now_s(), False
         period_s = 1.0 / parameters["tick_hz"]
         while rclpy.ok():
             time.sleep(period_s)
+            parameters = self._mission_parameters
             if not self._is_current(generation):
                 return self._finish(
                     goal_handle, generation, False, "preempt または deactivate で打ち切られた", index)
@@ -360,7 +415,7 @@ class MissionNode(LifecycleNode):
                 if not self._is_pause_requested:
                     self._transition_if_current(generation, MissionEvent.RESUME)
                     self._is_large_correction_pending = False
-                    pending = self._begin_plan(waypoints, index)
+                    pending = self._begin_plan(waypoints, index, parameters)
                 goal_handle.publish_feedback(self._build_feedback(index, 0.0, False))
                 if self._state is MissionState.PAUSED:
                     continue
@@ -375,11 +430,11 @@ class MissionNode(LifecycleNode):
                     self._state, self._is_large_correction_pending,
                     parameters["replan_on_large_correction"])
             ):
-                pending = self._begin_plan(waypoints, index)
+                pending = self._begin_plan(waypoints, index, parameters)
                 self._is_large_correction_pending = False
 
             if pending is not None:
-                outcome, reason, path, indices = self._poll_plan(pending)
+                outcome, reason, path, indices = self._poll_plan(pending, parameters)
                 if outcome == "failed":
                     self._transition_if_current(generation, MissionEvent.PLAN_FAILED)
                     return self._finish(goal_handle, generation, False, reason, index)
@@ -410,7 +465,7 @@ class MissionNode(LifecycleNode):
                         self._path_publisher.publish(self._last_path_message)
                 plan_sent_s, has_resent = self._now_s(), True
 
-            if not self._is_pose_fresh():
+            if not self._is_pose_fresh(parameters):
                 goal_handle.publish_feedback(self._build_feedback(index, 0.0, False))
                 continue  # 到達判定は保留（abort しない）
             pose = self._latest_pose
@@ -447,6 +502,7 @@ class PendingPlan:
     waypoints: list
     index: int
     deadline_s: float
+    timeout_s: float
     future: object = None
 
 
