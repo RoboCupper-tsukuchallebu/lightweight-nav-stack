@@ -131,7 +131,6 @@ ObstacleMonitorNode::CallbackReturn ObstacleMonitorNode::on_configure(const rclc
   geometry_ = GridGeometry::fromParameters(parameters_);
   memory_.emplace(geometry_, blindRadiusMeters_, memoryMaxAgeSeconds_, jumpDistanceMeters_, jumpAngleRadians_, memoryMaxRangeMeters_);
   worldFromBase_.reset();
-  memoryTfStale_ = true;
   poseUpdate_.reset();
   memoryReset_.reset();
   stopHysteresis_.emplace(
@@ -229,17 +228,26 @@ std::optional<Eigen::Isometry3d> ObstacleMonitorNode::lookupBaseFromSensor(
 }
 
 bool ObstacleMonitorNode::updateMemory(const ObstacleGrid & grid,
-  const Eigen::Isometry3d & baseFromSensor, SensorState & state,
-  const builtin_interfaces::msg::Time & stamp)
+  const Eigen::Isometry3d & baseFromSensor, const builtin_interfaces::msg::Time & stamp,
+  bool & memoryTfStale)
 {
-  (void)state;
   try {
     const rclcpp::Time frameTime(stamp, get_clock()->get_clock_type());
     if (frameTime.nanoseconds() == 0 || std::abs((get_clock()->now() - frameTime).seconds()) > tfMaxAgeSeconds_) {
       throw tf2::TransformException("sensor timestamp is stale");
     }
-    const auto transform = tfBuffer_->lookupTransform(memoryFrame_, baseFrame_, frameTime,
-      rclcpp::Duration::from_seconds(tfTimeoutSeconds_));
+    geometry_msgs::msg::TransformStamped transform;
+    try {
+      transform = tfBuffer_->lookupTransform(memoryFrame_, baseFrame_, frameTime);
+    } catch (const tf2::ExtrapolationException &) {
+      transform = tfBuffer_->lookupTransform(memoryFrame_, baseFrame_, tf2::TimePointZero);
+      const rclcpp::Time latestTime(transform.header.stamp, get_clock()->get_clock_type());
+      // Only accept a slightly older pose; never substitute a future pose.
+      if (latestTime.nanoseconds() == 0 || latestTime > frameTime ||
+        (frameTime - latestTime).seconds() > tfMaxAgeSeconds_) {
+        throw tf2::TransformException("latest memory transform is outside the allowed age");
+      }
+    }
     const rclcpp::Time transformTime(transform.header.stamp, get_clock()->get_clock_type());
     if (transformTime.nanoseconds() != 0 &&
       std::abs((get_clock()->now() - transformTime).seconds()) > tfMaxAgeSeconds_) {
@@ -247,9 +255,9 @@ bool ObstacleMonitorNode::updateMemory(const ObstacleGrid & grid,
     }
     worldFromBase_ = tf2::transformToEigen(transform);
     poseUpdate_ = SteadyClock::now();
-    memoryTfStale_ = false;
+    memoryTfStale = false;
   } catch (const tf2::TransformException & exception) {
-    memoryTfStale_ = true;
+    memoryTfStale = true;
     RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "memory TF unavailable: %s", exception.what());
     return false;
   }
@@ -280,7 +288,7 @@ void ObstacleMonitorNode::handlePointCloud(const sensor_msgs::msg::PointCloud2::
     publishResult(frameStart, false);
     return;
   }
-  if (!updateMemory(grid, *baseFromSensor, pointsState_, cloud->header.stamp)) {
+  if (!updateMemory(grid, *baseFromSensor, cloud->header.stamp, pointsState_.memoryTfStale)) {
     publishResult(frameStart, false);
     return;
   }
@@ -298,7 +306,7 @@ void ObstacleMonitorNode::handleLaserScan(const sensor_msgs::msg::LaserScan::Sha
   }
   ObstacleGrid grid(geometry_, parameters_);
   projectLaserScan(*scan, *baseFromSensor, parameters_.scanMaxUseRangeMeters, grid);
-  if (!updateMemory(grid, *baseFromSensor, scanState_, scan->header.stamp)) {
+  if (!updateMemory(grid, *baseFromSensor, scan->header.stamp, scanState_.memoryTfStale)) {
     publishResult(frameStart, false);
     return;
   }
@@ -349,7 +357,8 @@ void ObstacleMonitorNode::publishResult(
     };
   collect("points", pointsTopic_, pointsState_, pointsTimeoutSeconds_);
   collect("scan", scanTopic_, scanState_, scanTimeoutSeconds_);
-  if (memoryTfStale_ || !poseUpdate_ || secondsSince(*poseUpdate_, now) > tfMaxAgeSeconds_) {
+  if ((!pointsTopic_.empty() && pointsState_.memoryTfStale) ||
+    (!scanTopic_.empty() && scanState_.memoryTfStale) || !poseUpdate_ || secondsSince(*poseUpdate_, now) > tfMaxAgeSeconds_) {
     status.stale_sources.push_back("tf:" + memoryFrame_);
   }
   if (memoryReset_ && secondsSince(*memoryReset_, now) < memoryResetReportSeconds_) {

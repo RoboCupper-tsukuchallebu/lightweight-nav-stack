@@ -44,6 +44,7 @@ private:
     std::vector<std::uint8_t> occupiedCells;
     std::optional<SteadyClock::time_point> lastUpdate;
     bool hasLastTransformFailed = false;
+    bool memoryTfStale = true;
     std::string sensorFrame;
   };
 
@@ -53,7 +54,7 @@ private:
   std::optional<Eigen::Isometry3d> lookupBaseFromSensor(
     const std::string & sensorFrame, SensorState & state);
   bool updateMemory(const ObstacleGrid & grid, const Eigen::Isometry3d & baseFromSensor,
-    SensorState & state, const builtin_interfaces::msg::Time & stamp);
+    const builtin_interfaces::msg::Time & stamp, bool & memoryTfStale);
   void publishResult(SteadyClock::time_point frameStart, bool shouldUpdateHysteresis);
   void releaseActiveResources();
 
@@ -64,7 +65,6 @@ private:
   double blindRadiusMeters_, memoryMaxAgeSeconds_, jumpDistanceMeters_, jumpAngleRadians_, memoryMaxRangeMeters_, tfMaxAgeSeconds_, memoryResetReportSeconds_;
   std::optional<ObstacleMemory> memory_;
   std::optional<Eigen::Isometry3d> worldFromBase_;
-  bool memoryTfStale_ = true;
   std::optional<SteadyClock::time_point> poseUpdate_, memoryReset_;
   std::string pointsTopic_;
   std::string scanTopic_;
