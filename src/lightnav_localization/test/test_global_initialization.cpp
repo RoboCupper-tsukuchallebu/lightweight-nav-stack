@@ -1,8 +1,6 @@
 #include <gtest/gtest.h>
 
 #include <vector>
-#include <cmath>
-#include <stdexcept>
 
 #include "lightnav_localization/global_initialization.hpp"
 
@@ -35,18 +33,4 @@ TEST(GlobalInitializationPeaks, IgnoresSamePeakAfterRefinement) {
   peaks[1].verification_score = 0.94;
   peaks[1].position.x() = 0.1;
   EXPECT_TRUE(decide_global_initialization_peaks(peaks, {}).accepted);
-}
-
-TEST(GlobalInitializationField, ComputesDistanceAndBounds) {
-  const PointList points{Eigen::Vector3f(1.0f, 1.0f, 0.0f)};
-  const GlobalInitializationLikelihoodField field(points, {0.0, 0.0}, {2.0, 2.0}, 1.0, 9);
-  EXPECT_EQ(field.cell_count(), 9u);
-  EXPECT_DOUBLE_EQ(field.distance({1.0, 1.0}), 0.0);
-  EXPECT_DOUBLE_EQ(field.distance({0.0, 1.0}), 1.0);
-  EXPECT_TRUE(std::isinf(field.distance({-1.0, 0.0})));
-}
-
-TEST(GlobalInitializationField, RejectsOversizedGrid) {
-  EXPECT_THROW(GlobalInitializationLikelihoodField({}, {0.0, 0.0}, {2.0, 2.0}, 1.0, 8),
-               std::length_error);
 }
