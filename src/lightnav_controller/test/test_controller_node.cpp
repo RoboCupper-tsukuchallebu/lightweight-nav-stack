@@ -1,6 +1,11 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <chrono>
+#include <cstdarg>
+#include <cstdio>
+#include <vector>
+#include "rcutils/logging.h"
 #include <limits>
 #include <memory>
 #include <optional>
@@ -346,4 +351,44 @@ TEST_F(ControllerNodeAvoidWiring, ParameterServiceValidatesEachValueInOrder) {
   EXPECT_FALSE(results[2].reason.empty());
   EXPECT_DOUBLE_EQ(node_->get_parameter("v_max").as_double(), 0.9);
   EXPECT_DOUBLE_EQ(node_->get_parameter("v_slow").as_double(), 0.8);
+}
+
+namespace {
+std::vector<std::string> captured_logs;
+void captureLog(const rcutils_log_location_t*, int, const char*, rcutils_time_point_value_t,
+                const char* format, va_list* arguments) {
+  char buffer[1024];
+  std::vsnprintf(buffer, sizeof(buffer), format, *arguments);
+  captured_logs.emplace_back(buffer);
+}
+}
+
+TEST_F(ControllerNodeLifecycle, ParameterChangesAndRejectionsAreLogged) {
+  configureAndActivate();
+  captured_logs.clear();
+  const auto previous_handler = rcutils_logging_get_output_handler();
+  rcutils_logging_set_output_handler(captureLog);
+  const auto accepted = node_->set_parameter(rclcpp::Parameter("v_max", 0.5));
+  const auto rejected = node_->set_parameter(rclcpp::Parameter("v_max", -1.0));
+  rcutils_logging_set_output_handler(previous_handler);
+  EXPECT_TRUE(accepted.successful);
+  EXPECT_FALSE(rejected.successful);
+  EXPECT_TRUE(std::any_of(captured_logs.begin(), captured_logs.end(), [](const auto& line) {
+    return line.find("parameter changed: v_max") != std::string::npos;
+  }));
+  EXPECT_TRUE(std::any_of(captured_logs.begin(), captured_logs.end(), [](const auto& line) {
+    return line.find("parameter rejected:") != std::string::npos;
+  }));
+}
+
+TEST_F(ControllerNodeAvoidWiring, RuntimeSpeedLimitChangesNextPublishedCommand) {
+  spinFor(std::chrono::milliseconds(400), false);
+  ASSERT_TRUE(last_status_.has_value());
+  ASSERT_GT(last_status_->commanded_linear_mps, 0.3);
+  const auto result = node_->set_parameters_atomically({rclcpp::Parameter("v_max", 0.3),
+                                                         rclcpp::Parameter("v_slow", 0.2)});
+  ASSERT_TRUE(result.successful);
+  spinFor(std::chrono::milliseconds(150), false);
+  ASSERT_TRUE(last_status_.has_value());
+  EXPECT_NEAR(last_status_->commanded_linear_mps, 0.3, 1e-5);
 }
