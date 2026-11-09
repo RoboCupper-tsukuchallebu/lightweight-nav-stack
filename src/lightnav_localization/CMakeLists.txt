@@ -40,6 +40,7 @@ add_library(lightnav_localization_core
   src/lidar_odometry.cpp
   src/initial_alignment.cpp
   src/point_cloud_extraction.cpp
+  src/visualization.cpp
   src/localizer.cpp)
 target_include_directories(lightnav_localization_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -97,7 +98,8 @@ if(BUILD_TESTING)
   find_package(GTest REQUIRED)
   foreach(test_name pcd_io map_metadata pose_buffer deskew matcher performance pose_graph gps_input
                     corrector state_machine lidar_odometry localizer match_information
-                    performance_large initial_alignment point_cloud_extraction mapping)
+                    performance_large initial_alignment point_cloud_extraction mapping
+                    visualization)
     add_executable(test_${test_name} test/test_${test_name}.cpp)
     target_link_libraries(test_${test_name} lightnav_localization_core GTest::gtest GTest::gtest_main)
     target_compile_options(test_${test_name} PRIVATE -Wall -Wextra -Werror)

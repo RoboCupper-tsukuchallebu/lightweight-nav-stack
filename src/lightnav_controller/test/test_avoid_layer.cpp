@@ -435,3 +435,22 @@ TEST(ArcAvoidLayer, CycleWithFifteenArcsOnEightyByEightyGridIsFast) {
   std::cout << "avoid cycle mean_ms=" << mean_ms << " sink=" << sink << std::endl;
   EXPECT_LT(mean_ms, 10.0);
 }
+
+TEST(ArcAvoidLayer, ConservativeUpdatePreservesAvoidanceAndReleaseTimer) {
+  auto parameters = makeAvoidParameters();
+  ArcAvoidLayer layer{parameters};
+  const auto path = makeStraightPath();
+  LocalGrid blocked = makeEmptyGrid();
+  fillRectangle(blocked, 1.0, 1.4, -0.3, 0.3);
+  const auto clear = makeEmptyGrid();
+  ASSERT_TRUE(layer.compute(makeContext(path, &blocked, 0.0)).is_asserted);
+  ASSERT_TRUE(layer.compute(makeContext(path, &clear, 1.0)).is_asserted);
+  parameters.avoid_trigger_m = 2.6;
+  parameters.avoid_release_m = 3.1;
+  parameters.avoid_release_hold_s = 1.5;
+  layer.updateParameters(parameters);
+  EXPECT_TRUE(layer.isAvoiding());
+  EXPECT_TRUE(layer.compute(makeContext(path, &clear, 2.4)).is_asserted);
+  EXPECT_FALSE(layer.compute(makeContext(path, &clear, 2.5)).is_asserted);
+  EXPECT_FALSE(layer.isAvoiding());
+}

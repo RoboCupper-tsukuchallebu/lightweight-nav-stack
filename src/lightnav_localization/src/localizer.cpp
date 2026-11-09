@@ -139,8 +139,28 @@ struct Localizer::Implementation {
   std::vector<PendingGps> pending_gps;
   std::function<void(MatchResult&)> map_match_hook;
   std::string last_error;
+  std::string state_error;
+  std::string event_error;
+  double clock_now_sec = 0.0;
+  double last_event_sec = 0.0;
+  std::size_t error_events_total = 0;
+  void update_error() {
+    last_error = state_error;
+    if (!event_error.empty()) {
+      if (!last_error.empty()) last_error += "; ";
+      last_error += event_error;
+    }
+  }
+  void record_event(const std::string& error) {
+    event_error = error;
+    last_event_sec = clock_now_sec;
+    ++error_events_total;
+    update_error();
+  }
   int rebuild_failure_mode = 0;  // test seam: 1 = worker throws, 2 = launch throws
   double scan_time_ms = 0.0;
+  ScanTimeStatistics scan_time_statistics;
+  MapMatchStatistics map_match_statistics;
   double match_time_ms = 0.0;
   double submap_rebuild_time_ms = 0.0;
   double last_inlier_ratio = 0.0;
@@ -157,7 +177,8 @@ struct Localizer::Implementation {
     if (const auto pose = graph->pose(index)) return pose_cache[index] = *pose;
     const auto cached = pose_cache.find(index);
     if (cached != pose_cache.end()) return cached->second;
-    last_error = kUnknownNodeError + std::to_string(index);
+    state_error = kUnknownNodeError + std::to_string(index);
+    update_error();
     return std::nullopt;
   }
 
@@ -167,7 +188,7 @@ struct Localizer::Implementation {
   bool refresh_after_optimize(bool preserve_target_tilt = false) {
     bool was_restarted = false;
     if (!graph->optimize()) {
-      last_error = "pose graph optimization failed, window restarted: " + graph->last_error();
+      record_event("pose graph optimization failed, window restarted: " + graph->last_error());
       const Eigen::Isometry3d current = pose_cache.at(nodes.back().index);
       const NodeRecord latest_node = nodes.back();
       gps_factors_per_keyframe.clear();
@@ -183,7 +204,7 @@ struct Localizer::Implementation {
         lidar_nodes.clear();
         pose_cache.clear();
         pose_cache[restarted_index] = current;
-        if (!graph->optimize()) last_error += " (restart also failed)";
+        if (!graph->optimize()) { event_error += " (restart also failed)"; update_error(); }
       } else {
         graph = std::make_unique<PoseGraph>(parameters.graph);
         graph->add_first_node(latest_node.stamp, current, parameters.initial_sigma_xy_m,
@@ -194,7 +215,7 @@ struct Localizer::Implementation {
         lidar_nodes.clear();
         pose_cache.clear();
         pose_cache[0] = current;
-        if (!graph->optimize()) last_error += " (restart also failed)";
+        if (!graph->optimize()) { event_error += " (restart also failed)"; update_error(); }
       }
       was_restarted = true;
     }
@@ -235,7 +256,8 @@ struct Localizer::Implementation {
       poses.push_back(*pose);
     }
     // Every pose is known again, so the unknown-node error no longer describes the state.
-    if (last_error.rfind(kUnknownNodeError, 0) == 0) last_error.clear();
+    state_error.clear();
+    update_error();
     lidar.update_keyframe_poses(poses);
     lidar.rebuild_submap();
     submap_rebuild_time_ms = elapsed_ms(start);
@@ -259,7 +281,7 @@ struct Localizer::Implementation {
       try {
         built = pending_map_target.get();
       } catch (const std::exception& exception) {
-        last_error = std::string("prior-map rebuild failed, keeping the old target: ") + exception.what();
+        record_event(std::string("prior-map rebuild failed, keeping the old target: ") + exception.what());
         built.target = PreparedTarget();
       }
       if (built.target.is_valid()) {
@@ -287,7 +309,7 @@ struct Localizer::Implementation {
       });
     } catch (const std::system_error& error) {
       // Thread could not be started: keep matching against the old target.
-      last_error = std::string("prior-map rebuild could not start, keeping the old target: ") + error.what();
+      record_event(std::string("prior-map rebuild could not start, keeping the old target: ") + error.what());
     }
     rebuild_failure_mode = 0;
   }
@@ -306,8 +328,9 @@ struct Localizer::Implementation {
     const auto start = Clock::now();
     MatchResult result = match_scan(map_target, cloud, estimate, parameters.map_matcher);
     match_time_ms = elapsed_ms(start);
-    last_inlier_ratio = result.inlier_ratio;
     if (map_match_hook) map_match_hook(result);
+    last_inlier_ratio = result.inlier_ratio;
+    ++map_match_statistics.attempted_total;
     match_eigenvalue_ratio.reset();
     match_weakest_axis.reset();
     const Eigen::Matrix3d translation_hessian = result.information.block<3, 3>(3, 3);
@@ -322,11 +345,19 @@ struct Localizer::Implementation {
     // Without a map match or GPS the estimate is less certain, so the gate widens with it.
     const bool is_tracking = stamp - last_map_sec <= parameters.state.tracking_window_s;
     const double gate_scale = is_tracking ? 1.0 : std::max(1.0, 3.0 * position_std_m);
+    map_match_statistics.last_gate_scale = gate_scale;
     const Eigen::Isometry3d difference = invert_isometry(estimate) * result.target_to_source;
     const bool is_accepted = result.converged && result.inlier_ratio >= parameters.map_matcher.inlier_ratio_min &&
                              difference.translation().norm() <= parameters.map_matcher.gate_translation_m * gate_scale &&
                              rotation_angle_rad(difference) <= parameters.map_matcher.gate_rotation_rad * gate_scale;
-    if (!is_accepted) return;
+    if (!is_accepted) {
+      if (!result.converged) ++map_match_statistics.rejected_not_converged_total;
+      else if (result.inlier_ratio < parameters.map_matcher.inlier_ratio_min) ++map_match_statistics.rejected_inlier_total;
+      else if (difference.translation().norm() > parameters.map_matcher.gate_translation_m * gate_scale) ++map_match_statistics.rejected_translation_gate_total;
+      else ++map_match_statistics.rejected_rotation_gate_total;
+      return;
+    }
+    ++map_match_statistics.accepted_total;
     graph->add_map_factor(node_index, result.target_to_source,
                           information_from_hessian(result.information, parameters.map_information));
     last_map_sec = stamp;
@@ -337,6 +368,18 @@ struct Localizer::Implementation {
 
   void process_scan(const PendingScan& pending) {
     const auto start = Clock::now();
+    struct ScanTimer {
+      Implementation& implementation;
+      Clock::time_point start;
+      ~ScanTimer() {
+        const double duration_ms = elapsed_ms(start);
+        implementation.scan_time_ms = duration_ms;
+        auto& statistics = implementation.scan_time_statistics;
+        ++statistics.count;
+        statistics.total_ms += duration_ms;
+        statistics.maximum_ms = std::max(statistics.maximum_ms, duration_ms);
+      }
+    } timer{*this, start};
     const auto deskewed = deskew_scan(pending.scan, pending.stamp, buffer, parameters.lidar_to_base);
     const auto odom_now = buffer.interpolate(pending.stamp);
     if (!deskewed || !odom_now) return;
@@ -363,7 +406,6 @@ struct Localizer::Implementation {
         mapping_keyframes.push_back(
             {0, pending.stamp, downsample_voxel(*deskewed, parameters.keyframe_cloud_voxel_m)});
       }
-      scan_time_ms = elapsed_ms(start);
       return;
     }
 
@@ -422,7 +464,6 @@ struct Localizer::Implementation {
                                      downsample_voxel(*deskewed, parameters.keyframe_cloud_voxel_m)});
       }
     }
-    scan_time_ms = elapsed_ms(start);
   }
 
   void process_gps(const PendingGps& pending) {
@@ -530,6 +571,11 @@ void Localizer::set_map_match_hook(std::function<void(MatchResult&)> hook) {
 
 LocalizationState Localizer::poll_state(double now_sec) {
   Implementation& self = *implementation_;
+  self.clock_now_sec = now_sec;
+  if (!self.event_error.empty() && now_sec - self.last_event_sec >= self.parameters.last_error_hold_s) {
+    self.event_error.clear();
+    self.update_error();
+  }
   if (!self.is_started) return LocalizationState::kInitializing;
   return self.machine.update(self.make_state_inputs(now_sec));
 }
@@ -537,6 +583,7 @@ LocalizationState Localizer::poll_state(double now_sec) {
 std::size_t Localizer::pending_scan_count() const { return implementation_->pending_scans.size(); }
 
 const std::string& Localizer::last_error() const { return implementation_->last_error; }
+std::size_t Localizer::error_events_total() const { return implementation_->error_events_total; }
 
 void Localizer::inject_map_rebuild_failure_for_test(int mode) { implementation_->rebuild_failure_mode = mode; }
 
@@ -547,8 +594,14 @@ std::vector<Eigen::Isometry3d> Localizer::lidar_keyframe_poses_for_test() const 
 void Localizer::inject_optimization_failure_for_test() { implementation_->graph->inject_failure_once(); }
 
 double Localizer::last_scan_time_ms() const { return implementation_->scan_time_ms; }
+ScanTimeStatistics Localizer::take_scan_time_statistics() {
+  const ScanTimeStatistics statistics = implementation_->scan_time_statistics;
+  implementation_->scan_time_statistics = {};
+  return statistics;
+}
 double Localizer::last_match_time_ms() const { return implementation_->match_time_ms; }
 double Localizer::last_submap_rebuild_time_ms() const { return implementation_->submap_rebuild_time_ms; }
+MapMatchStatistics Localizer::map_match_statistics() const { return implementation_->map_match_statistics; }
 double Localizer::last_inlier_ratio() const { return implementation_->last_inlier_ratio; }
 double Localizer::last_lidar_odom_inlier_ratio() const {
   return implementation_->last_lidar_odom_inlier_ratio;
@@ -643,7 +696,7 @@ std::optional<LocalizerOutput> Localizer::on_wheel_odom(double stamp_sec,
     self.buffer = PoseBuffer();
     self.pending_scans.clear();
     self.pending_gps.clear();
-    self.last_error = "wheel odometry time went backwards: buffers cleared";
+    self.record_event("wheel odometry time went backwards: buffers cleared");
     self.last_wheel_sec = stamp_sec;
     self.last_wheel_pose = odom_to_base;
   }

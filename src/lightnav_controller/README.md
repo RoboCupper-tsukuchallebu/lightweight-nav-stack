@@ -27,3 +27,14 @@ obstacle in the path center. No difference between 1.0 m and 2.0 m arc lengths
 has been confirmed in this test scenario.
 The closed-loop tests use a 0.5 m radius obstacle with 0.5 m inflation, a 2.0 m arc,
 and a 2.5 m deviation limit; a centered obstacle with a 1.5 m limit must stop safely.
+
+Runtime parameters are applied between control cycles without resetting the held path or avoidance state. Changes are not saved to YAML and are lost on restart. Configure now rejects configurations violating `v_min <= v_slow <= v_max` or `avoid_trigger_m < avoid_release_m`.
+
+| Class | Parameters |
+|---|---|
+| Tuning (both directions) | `lookahead_m`, `search_window_m`, `v_max`, `v_slow`, `w_max`, `w_rotate`, `v_avoid`, `k_end`, `goal_tolerance_m`, `rotate_in_place_heading_rad`, `w_path`, `w_heading`, `w_smooth`, `arc_candidate_count`, `stuck_timeout_s` |
+| Safety (at most startup value) | `v_min`, `max_path_deviation_m`, `pose_timeout_s`, `obstacle_status_timeout_s`, `grid_timeout_s`, `arc_step_m`, `rejoin_distance_m` |
+| Safety (at least startup value) | `avoid_trigger_m`, `avoid_release_m`, `arc_length_m`, `avoid_release_hold_s` |
+| Read-only after construction | `grid_frame`, `control_hz`, `use_sim_time` |
+
+All numeric values must be finite and positive; `arc_candidate_count` must be a positive integer. Safety values require a finite startup baseline and may return to that baseline. Set related parameters in an order that preserves the constraints: the `set_parameters` service validates each value separately.
