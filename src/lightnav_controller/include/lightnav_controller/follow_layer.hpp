@@ -38,6 +38,7 @@ struct FollowResult {
 class FollowLayer {
  public:
   explicit FollowLayer(const FollowParameters& parameters);
+  void updateParameters(const FollowParameters& parameters) { parameters_ = parameters; }
 
   // Acceptance rule: a different session_id always replaces the held path;
   // within the same session only path_id >= held path_id is accepted.
