@@ -18,6 +18,9 @@ struct LidarOdometryParameters {
   double gate_translation_m = 0.3;
   double gate_translation_ratio = 0.2;
   double gate_yaw_rad = 0.1;
+  double slip_gate_yaw_rad = 0.0;
+  double slip_wheel_yaw_rate_rad_s = 0.05;
+  double slip_wheel_rate_window_s = 0.05;
 };
 
 // Scan-to-submap odometry. Keyframe clouds are stored in the base frame with their graph pose, so
@@ -38,7 +41,7 @@ class LidarOdometry {
   // Matches `scan_in_base` against the sub-map from `prediction` (map_to_base). The gate allows
   // gate_translation_m + gate_translation_ratio * moved_since_keyframe_m.
   MatchResult match(const PointList& scan_in_base, const Eigen::Isometry3d& prediction,
-                    double moved_since_keyframe_m) const;
+                    double moved_since_keyframe_m, double wheel_yaw_rate_rad_s = 1.0) const;
 
   bool has_submap() const { return submap_.is_valid(); }
   std::size_t keyframe_count() const { return keyframes_.size(); }

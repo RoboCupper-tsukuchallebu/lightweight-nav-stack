@@ -100,6 +100,15 @@ class SyntheticWorld {
     }
   }
 
+  void add_box(const Eigen::Vector2d& minimum, const Eigen::Vector2d& maximum) {
+    const Eigen::Vector2d lower_right(maximum.x(), minimum.y());
+    const Eigen::Vector2d upper_left(minimum.x(), maximum.y());
+    walls_.push_back({minimum, lower_right});
+    walls_.push_back({lower_right, maximum});
+    walls_.push_back({maximum, upper_left});
+    walls_.push_back({upper_left, minimum});
+  }
+
   // Floor rises at `angle_rad` from x = begin_x over `horizontal_length_m`, then stays level.
   void set_max_range(double range_m) { max_range_m_ = range_m; }
   void set_ramp(double begin_x, double horizontal_length_m, double angle_rad) {

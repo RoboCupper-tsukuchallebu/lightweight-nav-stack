@@ -23,6 +23,7 @@ namespace {
 using gtsam::noiseModel::Diagonal;
 using gtsam::noiseModel::Robust;
 using gtsam::noiseModel::mEstimator::Huber;
+using gtsam::noiseModel::mEstimator::Cauchy;
 
 // GPS supplies horizontal position only; altitude must not flatten lidar-derived terrain.
 class HorizontalGpsFactor final : public gtsam::NoiseModelFactor1<gtsam::Pose3> {
@@ -77,7 +78,13 @@ gtsam::SharedNoiseModel robust(const gtsam::SharedNoiseModel& base, double huber
 struct PoseGraph::Implementation {
   explicit Implementation(const PoseGraphParameters& parameters_in)
       : parameters(parameters_in),
-        smoother(std::make_unique<gtsam::IncrementalFixedLagSmoother>(parameters_in.window_s)) {}
+        smoother(std::make_unique<gtsam::IncrementalFixedLagSmoother>(parameters_in.window_s)) {
+    if ((parameters.wheel_robust_kernel != "huber" && parameters.wheel_robust_kernel != "cauchy") ||
+        !std::isfinite(parameters.wheel_robust_k) || parameters.wheel_robust_k <= 0.0 ||
+        !std::isfinite(parameters.wheel_yaw_slip_threshold_rad) || parameters.wheel_yaw_slip_threshold_rad < 0.0) {
+      throw std::invalid_argument("invalid wheel noise parameters");
+    }
+  }
   PoseGraphParameters parameters;
   std::unique_ptr<gtsam::IncrementalFixedLagSmoother> smoother;
   gtsam::NonlinearFactorGraph pending_factors;
@@ -168,19 +175,29 @@ int PoseGraph::restart_window(double stamp_sec, const Eigen::Isometry3d& pose,
   return index;
 }
 
+double wheel_yaw_sigma(const PoseGraphParameters& parameters, const Eigen::Isometry3d& wheel_relative,
+                       double yaw_disagreement_rad) {
+  const double distance = wheel_relative.translation().head<2>().norm();
+  const double yaw = std::abs(Eigen::AngleAxisd(wheel_relative.rotation()).angle());
+  double sigma = std::max(parameters.sigma_floor_rad,
+      parameters.wheel_sigma_yaw_per_rad * yaw + parameters.wheel_sigma_yaw_per_m * distance);
+  if (parameters.wheel_yaw_slip_threshold_rad > 0.0 &&
+      yaw_disagreement_rad > parameters.wheel_yaw_slip_threshold_rad) {
+    sigma = std::max(sigma, yaw_disagreement_rad);
+  }
+  return sigma;
+}
+
 int PoseGraph::add_node_with_wheel_factor(double stamp_sec, const Eigen::Isometry3d& guess,
-                                          const Eigen::Isometry3d& wheel_relative) {
+                                          const Eigen::Isometry3d& wheel_relative, double yaw_disagreement_rad) {
   Implementation& graph = *implementation_;
   const PoseGraphParameters& parameters = graph.parameters;
   const int previous = latest_index_;
   const int index = ++latest_index_;
   const double distance = wheel_relative.translation().head<2>().norm();
-  const double yaw = std::abs(Eigen::AngleAxisd(wheel_relative.rotation()).angle());
   const double sigma_translation =
       std::max(parameters.sigma_floor_m, parameters.wheel_sigma_translation_per_m * distance);
-  const double sigma_yaw = std::max(
-      parameters.sigma_floor_rad,
-      parameters.wheel_sigma_yaw_per_rad * yaw + parameters.wheel_sigma_yaw_per_m * distance);
+  const double sigma_yaw = wheel_yaw_sigma(parameters, wheel_relative, yaw_disagreement_rad);
   const double sigma_z = std::max(parameters.sigma_floor_m, parameters.planar_sigma_z_per_m * distance);
   // Weak planar constraint: dz = droll = dpitch = 0 with the looser planar sigmas.
   Eigen::Isometry3d planar = wheel_relative;
@@ -188,10 +205,15 @@ int PoseGraph::add_node_with_wheel_factor(double stamp_sec, const Eigen::Isometr
   const gtsam::Vector3 rotation_sigma(parameters.planar_sigma_tilt_rad,
                                       parameters.planar_sigma_tilt_rad, sigma_yaw);
   const gtsam::Vector3 translation_sigma(sigma_translation, sigma_translation, sigma_z);
+  gtsam::SharedNoiseModel wheel_noise = pose_noise(rotation_sigma, translation_sigma);
+  if (parameters.wheel_yaw_slip_threshold_rad > 0.0 &&
+      yaw_disagreement_rad > parameters.wheel_yaw_slip_threshold_rad) {
+    wheel_noise = Robust::Create(parameters.wheel_robust_kernel == "cauchy"
+        ? gtsam::noiseModel::mEstimator::Base::shared_ptr(Cauchy::Create(parameters.wheel_robust_k))
+        : gtsam::noiseModel::mEstimator::Base::shared_ptr(Huber::Create(parameters.wheel_robust_k)), wheel_noise);
+  }
   boost::shared_ptr<gtsam::BetweenFactor<gtsam::Pose3>> factor(
-      new gtsam::BetweenFactor<gtsam::Pose3>(
-          key_of(previous), key_of(index), to_gtsam(planar),
-          pose_noise(rotation_sigma, translation_sigma)));
+      new gtsam::BetweenFactor<gtsam::Pose3>(key_of(previous), key_of(index), to_gtsam(planar), wheel_noise));
   graph.pending_factors.push_back(factor);
   graph.pending_values.insert(key_of(index), to_gtsam(guess));
   graph.pending_stamps[key_of(index)] = stamp_sec;

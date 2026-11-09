@@ -102,6 +102,8 @@ params ファイル `docker/config/localization_indoor.yaml` で切り替える
 
 ## パラメータ
 
+W-1 は既定で無効。スリップ判定の根拠は LiDAR の照合だけなので、誤照合とスリップを区別できない。有効化には独立したスリップの根拠と検証用の bag が必要。
+
 既定値は `config/localization.yaml`。主なもの:
 
 | パラメータ | 既定 | 意味 |
@@ -114,6 +116,10 @@ params ファイル `docker/config/localization_indoor.yaml` で切り替える
 | `init_gps_max_std_m` / `init_scan_count` / `init_yaw_step_deg` | 3.0 / 3 / 15 | 初期位置合わせ |
 | `init_coarse_corr_m` / `init_fine_corr_m` / `init_inlier_ratio_min` | 2.0 / 0.5 / 0.6 | 初期 yaw 照合 |
 | `publish_tf` / `status_rate_hz` | true / 2.0 | |
+| `wheel_yaw_slip_threshold_rad` / `wheel_sigma_yaw_per_rad` / `wheel_sigma_yaw_per_m` | 0.0 / 0.1 / 0.01 | 既定では無効。閾値を正の値にすると、受理された LiDAR 照合と車輪のキーフレーム間の相対 yaw の差が閾値を超えた場合に限り、車輪 yaw の標準偏差をその差以上に広げる。それ以外は従来の式を使う |
+| `wheel_robust_kernel` / `wheel_robust_k` | huber / 8.0 | スリップと判定した車輪因子の白色化残差に適用する Huber または cauchy。地図・GPS の `huber_k` とは独立。σ を不一致の大きさまで広げるため白色化残差はおよそ 1σ 以下になり、カーネルは追加の保険で、現状ほぼ効かない。8.0 は暫定値 |
+| `lidar_odom_slip_gate_yaw_rad` | 0.0 | 既定では拡張ゲートは無効。既存ゲートより大きい値を設定すると有効になる。直進中・停止中とスリップを区別する独立の根拠がないため。有効にすると直進中に最大この値まで yaw の誤照合を通す。車輪 yaw レートが閾値未満の場合に既存ゲートとこの値の大きい方を使い、収束・inlier・並進ゲートも必要 |
+| `lidar_odom_slip_wheel_yaw_rate_rad_s` / `lidar_odom_slip_wheel_rate_window_s` | 0.05 / 0.05 | 拡張ゲートの車輪 yaw レート閾値（rad/s）と、その計測窓（秒、有限かつ正） |
 | `visualization_enabled` | true | `map_cloud` と `path` を出す。false で両方とも作らない |
 | `visualization_rate_hz` / `visualization_voxel_m` / `visualization_max_points` | 0.5 / 0.2 / 1000000 | プレビューの出力周期（ノードの時計）、点の間引き、点数の上限（超えた分は積まない） |
 | `path_min_step_m` / `path_max_poses` | 0.1 / 20000 | 軌跡に足す最小の移動量、最大の個数（超えたら古い方から捨てる） |
