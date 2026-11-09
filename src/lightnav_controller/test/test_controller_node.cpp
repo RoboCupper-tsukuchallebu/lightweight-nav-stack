@@ -426,3 +426,23 @@ TEST(RawGridMatching, BufferMatchesEitherDeliveryOrderAndEvictsOldFrames) {
   inflated.stamp.sec = 5;
   EXPECT_EQ(buffer.match(inflated, rclcpp::Time(3000000000LL), 1.0), nullptr);
 }
+
+TEST(RawGridMatching, DiagnosticExplainsFallback) {
+  lightnav_controller::RawGridBuffer buffer;
+  lightnav_controller::ReceivedGrid inflated;
+  inflated.received_at = rclcpp::Time(1000000000LL);
+  inflated.stamp.sec = 1;
+  auto raw = inflated;
+  EXPECT_STREQ(buffer.reason(inflated, inflated.received_at, 1.0), "missing");
+  raw.stamp.sec = 2;
+  buffer.push(raw);
+  EXPECT_STREQ(buffer.reason(inflated, inflated.received_at, 1.0), "stamp_mismatch");
+  raw.stamp.sec = 1;
+  raw.grid.origin_x_m = 1.0;
+  buffer.push(raw);
+  EXPECT_STREQ(buffer.reason(inflated, inflated.received_at, 1.0), "shape_mismatch");
+  raw.grid.origin_x_m = 0.0;
+  buffer.push(raw);
+  EXPECT_STREQ(buffer.reason(inflated, inflated.received_at, 1.0), "match");
+  EXPECT_STREQ(buffer.reason(inflated, rclcpp::Time(3000000000LL), 1.0), "expired");
+}

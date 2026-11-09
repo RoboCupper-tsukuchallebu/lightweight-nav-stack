@@ -513,3 +513,17 @@ TEST(ArcAvoidLayer, ConservativeUpdatePreservesAvoidanceAndReleaseTimer) {
   EXPECT_FALSE(layer.compute(makeContext(path, &clear, 2.5)).is_asserted);
   EXPECT_FALSE(layer.isAvoiding());
 }
+
+// A feasible arc resets the waiting timer even if repeated poses make no progress.
+// This characterizes the limitation; it does not establish the cause of a real trajectory.
+TEST(ArcAvoidLayer, FeasibleArcDoesNotDetectLackOfProgress) {
+  ArcAvoidLayer layer{makeAvoidParameters()};
+  const auto path = makeStraightPath();
+  LocalGrid grid = makeEmptyGrid();
+  fillRectangle(grid, 1.0, 1.4, -0.3, 0.3);
+  for (double now : {0.0, 10.0, 180.0}) {
+    const auto result = layer.compute(makeContext(path, &grid, now));
+    EXPECT_EQ(result.reason, StopReason::kOk);
+    EXPECT_DOUBLE_EQ(result.twist.linear_mps, 0.25);
+  }
+}

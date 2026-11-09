@@ -27,4 +27,6 @@ ros2 launch lightnav_bringup robot.launch.py [safety_gate:=true|false] [robot_co
 
 H と footprint は中心 (4.0, 0.3)、半径 0.5 m の円障害物を使う。B は壁の前で停止域に入る場合、0.5 秒以内に停止することを確認する。停止域の占有または BLOCKED を確認し、障害物除去後の再開を検証する。いずれも `robot.yaml` の速度と膨張半径 0.3 m を使う。起動時に lifecycle の再要求が必要だった場合は試験を失敗させる。
 
-2026-11-10 のビルド機での増分試験: obstacle monitor 58/58、controller 101/101、sim 34/34、bringup 6/7。H と footprint は成功したが、B は走行前に planner が inactive のままになり、lifecycle の再要求が必要だったため失敗した（#82）。planner は単調時計 327627.658 秒で inactive、再要求後の 327632.777 秒に activating へ遷移した。起動停滞の根本原因は未確定。今回の変更後の単独 6 回反復は未実施で、B の 180 秒タイムアウトと footprint の走行中 BLOCKED の原因も未確定。試験ログには各状態受信時の位置、状態、選択円弧、停止域、速度指令、最新の各格子の stamp と占有数を記録する。試験側で観測した最新 stamp の一致は、コントローラの実際の格子選択やフォールバックを示すものではない。
+2026-11-10 のビルド機での増分試験は obstacle monitor 58/58、controller 103/103、sim 34/34、bringup 6/7。bringup の失敗は footprint の起動停滞（#82）。単独反復は、H 5/6、footprint 3/6、B 5/6。失敗した各回は走行前に lifecycle の再要求が必要だった（#82）。B の走行中タイムアウトは走行した 5 回では再現しなかったが、以前の失敗の原因は未確定。別の増分試験では footprint が位置 (2.707, -0.243) m で BLOCKED となった。直前の raw 格子は一致していたが、その周期の原因は確定していない。
+
+試験は状態、位置、停止域、速度、各格子の stamp と占有数に加え、コントローラが使った格子と選択円弧の診断を記録する。診断の受信時刻と状態の受信時刻は別であり、記録された直近値は同一周期とは限らない。起動要求・遷移時刻も記録する。起動停滞時は configure の後に inactive となり、launch の activate 要求が記録されなかった。通知の欠落機序は未確定。

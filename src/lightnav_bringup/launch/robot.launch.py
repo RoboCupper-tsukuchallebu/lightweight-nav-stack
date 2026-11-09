@@ -7,6 +7,8 @@ Launch arguments:
                 following waypoints.
 """
 
+import time
+
 import yaml
 
 from launch import LaunchDescription
@@ -35,6 +37,14 @@ NAV_NODES = (
 SAFETY_GATE_NODE = ("lightnav_safety_gate", "safety_gate_node", "safety_gate_node")
 
 
+def lifecycle_request(node, node_name, transition_id, label):
+    def emit(context):
+        print(f"LIFECYCLE_REQUEST {time.monotonic():.6f} {node_name} {label}", flush=True)
+        return [EmitEvent(event=ChangeState(lifecycle_node_matcher=matches_action(node),
+                                           transition_id=transition_id))]
+    return OpaqueFunction(function=emit)
+
+
 def build_lifecycle_entities(package, executable, node_name, robot_config):
     node = LifecycleNode(
         package=package,
@@ -49,20 +59,11 @@ def build_lifecycle_entities(package, executable, node_name, robot_config):
             target_lifecycle_node=node,
             goal_state="inactive",
             entities=[
-                EmitEvent(
-                    event=ChangeState(
-                        lifecycle_node_matcher=matches_action(node),
-                        transition_id=Transition.TRANSITION_ACTIVATE,
-                    )
-                )
+                lifecycle_request(node, node_name, Transition.TRANSITION_ACTIVATE, "activate")
             ],
         )
     )
-    configure = EmitEvent(
-        event=ChangeState(
-            lifecycle_node_matcher=matches_action(node), transition_id=Transition.TRANSITION_CONFIGURE
-        )
-    )
+    configure = lifecycle_request(node, node_name, Transition.TRANSITION_CONFIGURE, "configure")
     return [node, activate_after_configure, configure]
 
 

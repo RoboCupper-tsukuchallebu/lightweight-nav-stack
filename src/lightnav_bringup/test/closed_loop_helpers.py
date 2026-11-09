@@ -10,6 +10,7 @@ from geometry_msgs.msg import PoseStamped, Twist
 from nav_msgs.msg import OccupancyGrid
 from lifecycle_msgs.msg import TransitionEvent
 from visualization_msgs.msg import MarkerArray
+from std_msgs.msg import String
 from launch import LaunchDescription
 from launch.actions import IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
@@ -46,10 +47,12 @@ class ClosedLoopTest(unittest.TestCase):
         cls.lifecycle_recoveries = []
         cls.trace = []
         cls.selected_arc = None
+        cls.grid_diagnostic = None
         cls.grids = {}
         cls.lifecycle_events = []
         cls.node.create_subscription(PoseStamped, "/lightnav/pose", cls.poses.append, 10)
         cls.node.create_subscription(FollowStatus, "/lightnav/follow_status", cls.record_status, 10)
+        cls.node.create_subscription(String, "/lightnav/controller/grid_diagnostic", cls.record_diagnostic, 100)
         cls.node.create_subscription(MarkerArray, "/lightnav/controller/arc_candidates", cls.record_arcs, 10)
         cls.node.create_subscription(ObstacleStatus, "/lightnav/obstacle_status", cls.record_obstacle, 10)
         cls.node.create_subscription(Twist, "/cmd_vel", cls.record_command, 10)
@@ -74,6 +77,11 @@ class ClosedLoopTest(unittest.TestCase):
         print("LIFECYCLE", *row, flush=True)
 
     @classmethod
+    def record_diagnostic(cls, message):
+        cls.grid_diagnostic = (time.monotonic(), message.data)
+        print("GRID_DIAGNOSTIC", *cls.grid_diagnostic, flush=True)
+
+    @classmethod
     def record_arcs(cls, message):
         selected = [marker for marker in message.markers if marker.ns == "feasible" and marker.scale.x > 0.05]
         cls.selected_arc = selected[0].id if selected else None
@@ -91,7 +99,7 @@ class ClosedLoopTest(unittest.TestCase):
             cls.trace.append((now, pose.x, pose.y, message.state, message.active_layer, cls.selected_arc,
                               obstacle, command.linear.x if command else None,
                               command.angular.z if command else None, inflated, raw,
-                              bool(inflated and raw and inflated[0] == raw[0])))
+                              bool(inflated and raw and inflated[0] == raw[0]), cls.grid_diagnostic))
 
     @classmethod
     def record_obstacle(cls, message):
@@ -104,7 +112,11 @@ class ClosedLoopTest(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        print("TRACE monotonic_s x_m y_m state layer selected_arc_id stop_occupied linear angular inflated_stamp_count raw_stamp_count latest_stamps_match", flush=True)
+        # Drain diagnostics published in the same cycle as the last status.
+        deadline = time.monotonic() + 0.25
+        while time.monotonic() < deadline:
+            rclpy.spin_once(cls.node, timeout_sec=0.05)
+        print("TRACE monotonic_s x_m y_m state layer selected_arc_id stop_occupied linear angular inflated_stamp_count raw_stamp_count latest_stamps_match diagnostic", flush=True)
         for row in cls.trace:
             print("TRACE", *row, flush=True)
         cls.action.destroy()

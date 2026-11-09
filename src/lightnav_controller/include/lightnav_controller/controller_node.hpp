@@ -9,6 +9,8 @@
 #include <climits>
 #include <optional>
 #include <string>
+#include <sstream>
+#include "std_msgs/msg/string.hpp"
 #include <vector>
 
 #include "geometry_msgs/msg/pose_stamped.hpp"
@@ -53,6 +55,17 @@ class RawGridBuffer {
   void push(ReceivedGrid grid) {
     grids_.push_back(std::move(grid));
     if (grids_.size() > 4) grids_.pop_front();
+  }
+  const char* reason(const ReceivedGrid& inflated, const rclcpp::Time& now, double timeout) const {
+    if (grids_.empty()) return "missing";
+    if (match(inflated, now, timeout)) return "match";
+    for (auto it = grids_.rbegin(); it != grids_.rend(); ++it) {
+      if (it->stamp != inflated.stamp) continue;
+      double age = (now - it->received_at).seconds();
+      if (age < 0.0 || age > timeout) return "expired";
+      return rawGridMatches(inflated.grid, it->grid, true, age, timeout) ? "match" : "shape_mismatch";
+    }
+    return "stamp_mismatch";
   }
   const LocalGrid* match(const ReceivedGrid& inflated, const rclcpp::Time& now, double timeout) const {
     for (auto it = grids_.rbegin(); it != grids_.rend(); ++it) {
@@ -205,6 +218,7 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
     last_pose_.reset();
     last_obstacle_status_.reset();
 
+    diagnostic_publisher_ = create_publisher<std_msgs::msg::String>("/lightnav/controller/grid_diagnostic", rclcpp::QoS(10));
     marker_publisher_ = create_publisher<visualization_msgs::msg::MarkerArray>(
         "/lightnav/controller/arc_candidates", rclcpp::QoS(1).reliable());
     command_publisher_ = create_publisher<lightnav_msgs::msg::VelocityCommand>(
@@ -383,6 +397,7 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
     obstacle_subscription_.reset();
     grid_subscription_.reset();
     raw_grid_subscription_.reset();
+    diagnostic_publisher_.reset();
     marker_publisher_.reset();
     command_publisher_.reset();
     status_publisher_.reset();
@@ -472,6 +487,8 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
     arbitration_input.is_pose_fresh = is_pose_fresh;
     arbitration_input.is_grid_fresh = is_grid_fresh;
     FollowResult follow_result;
+    const char* grid_reason = "inflated_missing_or_expired";
+    bool used_raw = false;
     if (is_pose_fresh) {
       const auto& pose_message = last_pose_->message.pose;
       const Pose2D pose{pose_message.position.x, pose_message.position.y,
@@ -487,6 +504,8 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
       const LocalGrid* raw_grid = nullptr;
       if (is_grid_fresh) {
         raw_grid = raw_grids_.match(*last_grid_, current_time, timeouts_.grid_timeout_s);
+        grid_reason = raw_grids_.reason(*last_grid_, current_time, timeouts_.grid_timeout_s);
+        used_raw = raw_grid != nullptr;
       }
       arbitration_input.avoid = avoid_layer_->compute(AvoidContext{
           pose, follow_layer_->pathPoints(), follow_result.closest_index,
@@ -494,6 +513,16 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
           current_time.seconds(),
           follow_result.remaining_distance_m, follow_inputs.is_stop_zone_occupied,
           follow_inputs.is_obstacle_status_fresh, raw_grid});
+    }
+    if (diagnostic_publisher_ && diagnostic_publisher_->get_subscription_count() > 0) {
+      std_msgs::msg::String diagnostic;
+      std::ostringstream out;
+      out << "grid=" << (used_raw ? "raw" : "inflated_fallback") << " reason=" << grid_reason;
+      const auto& selected = avoid_layer_->selectedCandidate();
+      if (selected && is_pose_fresh) out << " curvature=" << selected->curvature_per_m;
+      else out << " curvature=none";
+      diagnostic.data = out.str();
+      diagnostic_publisher_->publish(diagnostic);
     }
     const bool marker_active = arcMarkersActive(is_pose_fresh, arbitration_input.avoid.is_asserted);
     const auto marker_time = std::chrono::steady_clock::now().time_since_epoch();
@@ -561,6 +590,7 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
   std::optional<ReceivedObstacleStatus> last_obstacle_status_;
   double arc_markers_rate_hz_{0.0};
   ArcMarkerRate marker_rate_;
+  rclcpp_lifecycle::LifecyclePublisher<std_msgs::msg::String>::SharedPtr diagnostic_publisher_;
   rclcpp_lifecycle::LifecyclePublisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_publisher_;
   rclcpp::TimerBase::SharedPtr timer_;
   rclcpp::Subscription<lightnav_msgs::msg::PathWithId>::SharedPtr path_subscription_;
