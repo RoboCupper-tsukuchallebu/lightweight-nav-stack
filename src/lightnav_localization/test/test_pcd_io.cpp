@@ -5,6 +5,8 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
+#include <system_error>
 #include <fstream>
 #include <stdexcept>
 #include <string>
@@ -24,6 +26,12 @@ const std::string& temporary_directory() {
     if (mkdtemp(pattern.data()) == nullptr) {
       throw std::runtime_error("cannot create a temporary directory from " + pattern);
     }
+    // Removed when the test process exits, so repeated runs do not leave directories behind.
+    static const std::filesystem::path created{pattern};
+    std::atexit([] {
+      std::error_code ignored;
+      std::filesystem::remove_all(created, ignored);
+    });
     return pattern + "/";
   }();
   return directory;
