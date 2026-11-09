@@ -1,6 +1,10 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <cstdarg>
+#include <cstdio>
+#include <vector>
+#include <rcutils/logging.h>
 #include <functional>
 #include <limits>
 #include <memory>
@@ -25,6 +29,37 @@ using std::chrono::milliseconds;
 using ObstacleStatus = lightnav_msgs::msg::ObstacleStatus;
 constexpr auto kWaitLimit = std::chrono::seconds(10);
 const char kSensorFrame[] = "test_sensor";
+
+class LogCapture
+{
+public:
+  struct Entry {int severity; std::string message;};
+  LogCapture() : previous_(rcutils_logging_get_output_handler())
+  {
+    current_ = this;
+    rcutils_logging_set_output_handler(&capture);
+  }
+  ~LogCapture() {rcutils_logging_set_output_handler(previous_); current_ = nullptr;}
+  bool contains(int severity, const std::string & message) const
+  {
+    for (const auto & entry : entries_) {
+      if (entry.severity == severity && entry.message.find(message) != std::string::npos) {return true;}
+    }
+    return false;
+  }
+private:
+  static void capture(const rcutils_log_location_t *, int severity, const char *,
+    rcutils_time_point_value_t, const char * format, va_list * arguments)
+  {
+    char message[2048];
+    vsnprintf(message, sizeof(message), format, *arguments);
+    if (current_) {current_->entries_.push_back({severity, message});}
+  }
+  static LogCapture * current_;
+  rcutils_logging_output_handler_t previous_;
+  std::vector<Entry> entries_;
+};
+LogCapture * LogCapture::current_ = nullptr;
 
 // Runs the node under test and a helper node in one executor.
 class ObstacleMonitorNodeTest : public ::testing::Test
@@ -159,6 +194,54 @@ TEST_F(ObstacleMonitorNodeTest, StructuralParametersAreReadOnly)
   EXPECT_FALSE(monitor_->set_parameter(rclcpp::Parameter("use_sim_time", true)).successful);
 }
 
+TEST_F(ObstacleMonitorNodeTest, InvalidStepNeighborOverridesFailConfigure)
+{
+  for (double value : {-0.1, std::numeric_limits<double>::quiet_NaN()}) {
+    // Arrange
+    rclcpp::NodeOptions options;
+    options.parameter_overrides({{"step_neighbor_radius_m", value}});
+    auto node = std::make_shared<ObstacleMonitorNode>(options);
+    // Act
+    const auto state = node->configure().id();
+    // Assert
+    EXPECT_EQ(state, lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED);
+  }
+}
+
+TEST_F(ObstacleMonitorNodeTest, LogsAcceptedAndRejectedChanges)
+{
+  // Arrange
+  bringUp();
+  LogCapture logs;
+  // Act
+  const auto accepted = monitor_->set_parameter(rclcpp::Parameter("stop_zone_x_m", 1.2));
+  const auto reversed = monitor_->set_parameter(rclcpp::Parameter("stop_zone_x_m", 0.9));
+  const auto nan = monitor_->set_parameter(rclcpp::Parameter(
+    "clear_hold_s", std::numeric_limits<double>::quiet_NaN()));
+  const auto readOnly = monitor_->set_parameter(rclcpp::Parameter("use_sim_time", true));
+  // Assert
+  EXPECT_TRUE(accepted.successful);
+  EXPECT_FALSE(reversed.successful);
+  EXPECT_FALSE(nan.successful);
+  EXPECT_FALSE(readOnly.successful);
+  EXPECT_NE(reversed.reason.find("baseline="), std::string::npos);
+  EXPECT_NE(reversed.reason.find("requested="), std::string::npos);
+  EXPECT_TRUE(logs.contains(RCUTILS_LOG_SEVERITY_INFO, "parameter changed: stop_zone_x_m"));
+  EXPECT_TRUE(logs.contains(RCUTILS_LOG_SEVERITY_WARN, reversed.reason));
+  EXPECT_TRUE(logs.contains(RCUTILS_LOG_SEVERITY_WARN, nan.reason));
+  EXPECT_TRUE(logs.contains(RCUTILS_LOG_SEVERITY_WARN, readOnly.reason));
+}
+
+TEST_F(ObstacleMonitorNodeTest, UseSimTimeIsRejectedInEveryLifecycleState)
+{
+  // Arrange and act / assert in each state
+  EXPECT_FALSE(monitor_->set_parameter(rclcpp::Parameter("use_sim_time", true)).successful);
+  ASSERT_EQ(monitor_->configure().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE);
+  EXPECT_FALSE(monitor_->set_parameter(rclcpp::Parameter("use_sim_time", true)).successful);
+  ASSERT_EQ(monitor_->activate().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE);
+  EXPECT_FALSE(monitor_->set_parameter(rclcpp::Parameter("use_sim_time", true)).successful);
+}
+
 TEST_F(ObstacleMonitorNodeTest, SafetyValuesRespectStartupAndConstraints)
 {
   bringUp();
@@ -245,8 +328,10 @@ TEST_F(ObstacleMonitorNodeTest, UpdatingThresholdPreservesOccupiedState)
   bringUp();
   publishIdentityTransform();
   ASSERT_TRUE(waitUntil([this] {return lastStatus_.is_stop_zone_occupied;}, true));
+  const int previousCount = statusCount_;
   ASSERT_TRUE(monitor_->set_parameter(rclcpp::Parameter("clear_hold_s", 1.0)).successful);
-  ASSERT_TRUE(waitUntil([this] {return !lastStatus_.is_input_stale;}, true));
+  EXPECT_DOUBLE_EQ(monitor_->get_parameter("clear_hold_s").as_double(), 1.0);
+  ASSERT_TRUE(waitUntil([this, previousCount] {return statusCount_ > previousCount;}, false));
   EXPECT_TRUE(lastStatus_.is_stop_zone_occupied);
 }
 

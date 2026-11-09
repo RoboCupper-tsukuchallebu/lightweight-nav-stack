@@ -104,7 +104,8 @@ rcl_interfaces::msg::SetParametersResult ObstacleMonitorNode::validateParameters
     if (!(std::isfinite(requested) && std::isfinite(initial)) ||
       (runtime && !((increasing.count(name) && requested >= initial) ||
       (decreasing.count(name) && requested <= initial)))) {
-      return reject(name + ": must be finite and on the conservative side of startup value");
+      return reject(name + ": must be finite and on the conservative side of startup value (baseline=" +
+        baseline.value_to_string() + ", requested=" + parameter.value_to_string() + ")");
     }
     values.insert_or_assign(name, parameter);
   }
