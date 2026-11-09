@@ -151,19 +151,103 @@ protected:
 };
 }  // namespace
 
-TEST_F(ObstacleMonitorNodeTest, NegativeStepNeighborRadiusIsRejected)
+TEST_F(ObstacleMonitorNodeTest, StructuralParametersAreReadOnly)
 {
-  ASSERT_TRUE(monitor_->set_parameter(rclcpp::Parameter("step_neighbor_radius_m", -0.1)).successful);
-  EXPECT_EQ(
-    monitor_->configure().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED);
+  const auto result = monitor_->set_parameter(rclcpp::Parameter("step_neighbor_radius_m", 0.1));
+  EXPECT_FALSE(result.successful);
+  EXPECT_FALSE(result.reason.empty());
+  EXPECT_FALSE(monitor_->set_parameter(rclcpp::Parameter("use_sim_time", true)).successful);
 }
 
-TEST_F(ObstacleMonitorNodeTest, NaNStepNeighborRadiusIsRejected)
+TEST_F(ObstacleMonitorNodeTest, SafetyValuesRespectStartupAndConstraints)
 {
-  ASSERT_TRUE(monitor_->set_parameter(rclcpp::Parameter(
-    "step_neighbor_radius_m", std::numeric_limits<double>::quiet_NaN())).successful);
-  EXPECT_EQ(
-    monitor_->configure().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED);
+  bringUp();
+  EXPECT_TRUE(monitor_->set_parameter(rclcpp::Parameter("stop_zone_x_m", 1.2)).successful);
+  EXPECT_TRUE(monitor_->set_parameter(rclcpp::Parameter("stop_zone_x_m", 1.0)).successful);
+  EXPECT_FALSE(monitor_->set_parameter(rclcpp::Parameter("stop_zone_x_m", 0.9)).successful);
+  EXPECT_FALSE(monitor_->set_parameter(rclcpp::Parameter("stop_zone_x_m", 3.0)).successful);
+  EXPECT_TRUE(monitor_->set_parameter(rclcpp::Parameter("min_cell_count", 1)).successful);
+  EXPECT_FALSE(monitor_->set_parameter(rclcpp::Parameter("min_cell_count", 3)).successful);
+  for (double value : {std::numeric_limits<double>::quiet_NaN(),
+      std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity()}) {
+    const auto result = monitor_->set_parameter(rclcpp::Parameter("clear_hold_s", value));
+    EXPECT_FALSE(result.successful);
+    EXPECT_FALSE(result.reason.empty());
+  }
+  EXPECT_EQ(monitor_->get_parameter("stop_zone_x_m").as_double(), 1.0);
+  monitor_->deactivate();
+  monitor_->cleanup();
+  EXPECT_FALSE(monitor_->set_parameter(rclcpp::Parameter("stop_zone_x_m", 0.9)).successful);
+  EXPECT_EQ(monitor_->configure().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE);
+}
+
+TEST_F(ObstacleMonitorNodeTest, NonFiniteStartupAndWrongTypesAreRejected)
+{
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({{"clear_hold_s", std::numeric_limits<double>::quiet_NaN()}});
+  auto node = std::make_shared<ObstacleMonitorNode>(options);
+  const auto invalidBaseline = node->set_parameter(rclcpp::Parameter("clear_hold_s", 1.0));
+  EXPECT_FALSE(invalidBaseline.successful);
+  EXPECT_FALSE(invalidBaseline.reason.empty());
+  EXPECT_EQ(node->configure().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED);
+
+  const auto wrongType = monitor_->set_parameter(rclcpp::Parameter("min_cell_count", "invalid"));
+  EXPECT_FALSE(wrongType.successful);
+  EXPECT_FALSE(wrongType.reason.empty());
+}
+
+TEST_F(ObstacleMonitorNodeTest, AtomicChangesApplyTogetherAndRejectTogether)
+{
+  bringUp();
+  const auto accepted = monitor_->set_parameters_atomically({
+    rclcpp::Parameter("stop_zone_x_m", 1.2), rclcpp::Parameter("slow_zone_x_m", 2.6)});
+  EXPECT_TRUE(accepted.successful);
+  EXPECT_DOUBLE_EQ(monitor_->get_parameter("stop_zone_x_m").as_double(), 1.2);
+  EXPECT_DOUBLE_EQ(monitor_->get_parameter("slow_zone_x_m").as_double(), 2.6);
+
+  const auto rejected = monitor_->set_parameters_atomically({
+    rclcpp::Parameter("stop_zone_x_m", 1.3), rclcpp::Parameter("slow_zone_x_m", 2.0)});
+  EXPECT_FALSE(rejected.successful);
+  EXPECT_FALSE(rejected.reason.empty());
+  EXPECT_DOUBLE_EQ(monitor_->get_parameter("stop_zone_x_m").as_double(), 1.2);
+  EXPECT_DOUBLE_EQ(monitor_->get_parameter("slow_zone_x_m").as_double(), 2.6);
+}
+
+TEST_F(ObstacleMonitorNodeTest, ParameterServiceValidatesEachValueSeparately)
+{
+  bringUp();
+  auto client = std::make_shared<rclcpp::AsyncParametersClient>(helper_, "obstacle_monitor");
+  ASSERT_TRUE(waitUntil([&client] {return client->service_is_ready();}, false));
+  auto future = client->set_parameters({
+    rclcpp::Parameter("stop_zone_x_m", 1.2), rclcpp::Parameter("slow_zone_x_m", 2.0)});
+  ASSERT_TRUE(waitUntil([&future] {
+    return future.wait_for(milliseconds(0)) == std::future_status::ready;
+  }, false));
+  const auto results = future.get();
+  ASSERT_EQ(results.size(), 2u);
+  EXPECT_TRUE(results[0].successful);
+  EXPECT_FALSE(results[1].successful);
+  EXPECT_FALSE(results[1].reason.empty());
+  EXPECT_DOUBLE_EQ(monitor_->get_parameter("stop_zone_x_m").as_double(), 1.2);
+  EXPECT_DOUBLE_EQ(monitor_->get_parameter("slow_zone_x_m").as_double(), 2.5);
+}
+
+TEST_F(ObstacleMonitorNodeTest, InvalidStartupZoneFailsConfigure)
+{
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({{"stop_zone_x_m", 4.0}});
+  auto node = std::make_shared<ObstacleMonitorNode>(options);
+  EXPECT_EQ(node->configure().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED);
+}
+
+TEST_F(ObstacleMonitorNodeTest, UpdatingThresholdPreservesOccupiedState)
+{
+  bringUp();
+  publishIdentityTransform();
+  ASSERT_TRUE(waitUntil([this] {return lastStatus_.is_stop_zone_occupied;}, true));
+  ASSERT_TRUE(monitor_->set_parameter(rclcpp::Parameter("clear_hold_s", 1.0)).successful);
+  ASSERT_TRUE(waitUntil([this] {return !lastStatus_.is_input_stale;}, true));
+  EXPECT_TRUE(lastStatus_.is_stop_zone_occupied);
 }
 
 TEST_F(ObstacleMonitorNodeTest, DefaultPointsQoSReliabilityAcceptsReliablePublisher)
@@ -177,11 +261,10 @@ TEST_F(ObstacleMonitorNodeTest, DefaultPointsQoSReliabilityAcceptsReliablePublis
 
 TEST_F(ObstacleMonitorNodeTest, InvalidPointsQoSReliabilityIsRejected)
 {
-  ASSERT_TRUE(
-    monitor_->set_parameter(
-      rclcpp::Parameter("points_qos_reliability", "unreliable")).successful);
-  EXPECT_EQ(
-    monitor_->configure().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED);
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({{"points_qos_reliability", "unreliable"}});
+  auto node = std::make_shared<ObstacleMonitorNode>(options);
+  EXPECT_EQ(node->configure().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED);
 }
 
 TEST_F(ObstacleMonitorNodeTest, WatchdogPublishesStaleStatusWithoutGridWhenNoInput)
