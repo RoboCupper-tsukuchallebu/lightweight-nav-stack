@@ -285,6 +285,11 @@ void LocalizationNode::declare_parameters() {
   declare_parameter<double>("keyframe_distance_m", 1.0);
   declare_parameter<double>("keyframe_time_s", 1.0);
   declare_parameter<double>("match_rate_hz", 2.0);
+  declare_parameter<std::string>("map_match_method", "gicp");
+  declare_parameter<double>("map_vgicp_voxel_m", 0.5);
+  declare_parameter<bool>("map_vgicp_two_stage", false);
+  declare_parameter<double>("map_vgicp_coarse_voxel_m", 2.0);
+  declare_parameter<double>("map_vgicp_coarse_correspondence_m", 2.0);
   declare_parameter<double>("map_max_correspondence_distance_m", 1.0);
   declare_parameter<int>("map_max_iterations", 30);
   declare_parameter<double>("map_inlier_ratio_min", 0.5);
@@ -484,6 +489,19 @@ bool LocalizationNode::read_parameters(std::string& error) {
   localizer_parameters_.gps_keyframe_max_gap_s =
       get_parameter("gps_keyframe_max_gap_s").as_double();
 
+  localizer_parameters_.map_matcher.method = get_parameter("map_match_method").as_string();
+  localizer_parameters_.map_matcher.vgicp_voxel_m = get_parameter("map_vgicp_voxel_m").as_double();
+  localizer_parameters_.map_matcher.vgicp_two_stage = get_parameter("map_vgicp_two_stage").as_bool();
+  localizer_parameters_.map_matcher.vgicp_coarse_voxel_m = get_parameter("map_vgicp_coarse_voxel_m").as_double();
+  localizer_parameters_.map_matcher.vgicp_coarse_correspondence_m = get_parameter("map_vgicp_coarse_correspondence_m").as_double();
+  const auto& matcher = localizer_parameters_.map_matcher;
+  if ((matcher.method != "gicp" && matcher.method != "vgicp") ||
+      !std::isfinite(matcher.vgicp_voxel_m) || matcher.vgicp_voxel_m <= 0.0 ||
+      !std::isfinite(matcher.vgicp_coarse_voxel_m) || matcher.vgicp_coarse_voxel_m <= 0.0 ||
+      !std::isfinite(matcher.vgicp_coarse_correspondence_m) || matcher.vgicp_coarse_correspondence_m <= 0.0) {
+    error = "invalid map matching method or VGICP parameters";
+    return false;
+  }
   localizer_parameters_.map_matcher.max_correspondence_distance_m =
       get_parameter("map_max_correspondence_distance_m").as_double();
   localizer_parameters_.map_matcher.max_iterations =
