@@ -71,6 +71,30 @@ ENTRYPOINT ["/dds_check.sh"]
 CMD ["bash", "-c", ". /ws/install/setup.bash && colcon test --merge-install --executor sequential --return-code-on-test-failure; test_status=$?; colcon test-result --verbose; exit $test_status"]
 
 
+# Bag replay tooling (tools/bag_replay, Issue #43). NOT the robot image: it adds foxglove_bridge, rosbag2 with the mcap plugin and
+# matplotlib, which the runtime image must not carry. It sits before `runtime` on purpose: `docker build` without --target
+# (deploy.sh) builds the last stage, which has to stay `runtime`. The contents of /ws/install are the same as in `runtime`.
+#   docker build -f docker/Dockerfile --target replay -t lightnav:replay .
+# The COPY lines below repeat those of `runtime`: when the files `runtime` copies change, change them here too.
+# ROS_DOMAIN_ID is 61 so that a replay never meets the robot (42), the GUI (43) or the tests (44).
+FROM base AS replay
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        python3-matplotlib \
+        ros-jazzy-foxglove-bridge \
+        ros-jazzy-rosbag2 \
+        ros-jazzy-rosbag2-storage-mcap \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /ws
+COPY --from=build /ws/install /ws/install
+COPY docker/docker-entrypoint.sh /ws/docker-entrypoint.sh
+COPY docker/config /ws/config
+COPY tools/bag_replay /ws/tools/bag_replay
+ENV ROS_DOMAIN_ID=61
+ENTRYPOINT ["/dds_check.sh", "/ws/docker-entrypoint.sh"]
+CMD ["python3", "/ws/tools/bag_replay/replay_session.py", "--help"]
+
+
 FROM base AS runtime
 WORKDIR /ws
 COPY --from=build /ws/install /ws/install

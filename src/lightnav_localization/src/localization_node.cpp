@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <ctime>
 #include <exception>
@@ -16,6 +17,7 @@
 #include <diagnostic_msgs/msg/diagnostic_status.hpp>
 #include <diagnostic_msgs/msg/key_value.hpp>
 #include <geometry_msgs/msg/pose.hpp>
+#include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <lifecycle_msgs/msg/state.hpp>
 #include <sensor_msgs/msg/point_field.hpp>
@@ -129,6 +131,31 @@ PointCloudFieldLayout make_layout(const sensor_msgs::msg::PointCloud2& cloud) {
   return layout;
 }
 
+sensor_msgs::msg::PointCloud2 make_xyz_cloud(const PointList& points, const std::string& frame_id,
+                                             const rclcpp::Time& stamp) {
+  sensor_msgs::msg::PointCloud2 cloud;
+  cloud.header.stamp = stamp;
+  cloud.header.frame_id = frame_id;
+  cloud.height = 1;
+  cloud.width = static_cast<std::uint32_t>(points.size());
+  cloud.is_dense = true;
+  cloud.is_bigendian = false;
+  cloud.point_step = 3 * static_cast<std::uint32_t>(sizeof(float));
+  cloud.row_step = cloud.point_step * cloud.width;
+  for (const char* name : {"x", "y", "z"}) {
+    sensor_msgs::msg::PointField field;
+    field.name = name;
+    field.offset = static_cast<std::uint32_t>(cloud.fields.size()) *
+                   static_cast<std::uint32_t>(sizeof(float));
+    field.datatype = sensor_msgs::msg::PointField::FLOAT32;
+    field.count = 1;
+    cloud.fields.push_back(field);
+  }
+  cloud.data.resize(static_cast<std::size_t>(cloud.row_step));
+  std::memcpy(cloud.data.data(), points.data(), cloud.data.size());
+  return cloud;
+}
+
 }  // namespace
 
 LocalizationNode::LocalizationNode(const rclcpp::NodeOptions& options)
@@ -152,6 +179,13 @@ void LocalizationNode::declare_parameters() {
   declare_parameter<bool>("publish_tf", true);
   declare_parameter<double>("status_rate_hz", 2.0);
   declare_parameter<int>("num_threads", 4);
+  // Live preview topics /lightnav/localization/map_cloud and /path (Foxglove / RViz). Set false to publish nothing.
+  declare_parameter<bool>("visualization_enabled", true);
+  declare_parameter<double>("visualization_rate_hz", 0.5);
+  declare_parameter<double>("visualization_voxel_m", 0.2);
+  declare_parameter<int>("visualization_max_points", 1000000);
+  declare_parameter<double>("path_min_step_m", 0.1);
+  declare_parameter<int>("path_max_poses", 20000);
   declare_parameter<double>("init_gps_max_std_m", 3.0);
   // GNSS input contract (Issue #43 section 4.3): drop fixes below this NavSatStatus (-1 keeps all) and
   // thin the rest to one per gps_min_interval_s (0 keeps all) before they reach the Localizer.
@@ -238,6 +272,12 @@ bool LocalizationNode::read_parameters(std::string& error) {
   publish_tf_ = get_parameter("publish_tf").as_bool();
   status_rate_hz_ = get_parameter("status_rate_hz").as_double();
   num_threads_ = static_cast<int>(get_parameter("num_threads").as_int());
+  visualization_enabled_ = get_parameter("visualization_enabled").as_bool();
+  visualization_rate_hz_ = get_parameter("visualization_rate_hz").as_double();
+  visualization_voxel_m_ = get_parameter("visualization_voxel_m").as_double();
+  visualization_max_points_ = static_cast<int>(get_parameter("visualization_max_points").as_int());
+  path_min_step_m_ = get_parameter("path_min_step_m").as_double();
+  path_max_poses_ = static_cast<int>(get_parameter("path_max_poses").as_int());
   init_gps_max_std_m_ = get_parameter("init_gps_max_std_m").as_double();
   gps_min_status_ = static_cast<int>(get_parameter("gps_min_status").as_int());
   gps_min_interval_s_ = get_parameter("gps_min_interval_s").as_double();
@@ -260,6 +300,15 @@ bool LocalizationNode::read_parameters(std::string& error) {
   }
   if (!(status_rate_hz_ > 0.0) || !std::isfinite(status_rate_hz_)) {
     error = "status_rate_hz must be positive and finite";
+    return false;
+  }
+  if (visualization_enabled_ &&
+      (!(visualization_rate_hz_ > 0.0) || !std::isfinite(visualization_rate_hz_) ||
+       !(visualization_voxel_m_ > 0.0) || !std::isfinite(visualization_voxel_m_) ||
+       visualization_max_points_ < 1 || !(path_min_step_m_ >= 0.0) ||
+       !std::isfinite(path_min_step_m_) || path_max_poses_ < 1)) {
+    error = "visualization_rate_hz, visualization_voxel_m, visualization_max_points and "
+            "path_max_poses must be positive, and path_min_step_m must not be negative";
     return false;
   }
   if (alignment_parameters_.scan_count < 1 || !(alignment_parameters_.yaw_step_deg > 0.0) ||
@@ -521,6 +570,11 @@ void LocalizationNode::reset_runtime_state() {
   has_diagnostics_publish_time_ = false;
   last_status_state_ = LocalizationState::kInitializing;
   has_status_publish_time_ = false;
+  visualization_map_.reset();
+  visualization_path_.reset();
+  published_map_version_ = 0;
+  published_path_version_ = 0;
+  has_visualization_publish_time_ = false;
   node_error_.clear();
 }
 
@@ -567,6 +621,18 @@ LocalizationNode::CallbackReturn LocalizationNode::on_configure(
   diagnostics_publisher_ = create_publisher<diagnostic_msgs::msg::DiagnosticArray>(
       "/diagnostics", rclcpp::QoS(10).reliable());
 
+  if (visualization_enabled_) {
+    // transient_local: a viewer that connects late (Foxglove) still gets the latest map and path.
+    const rclcpp::QoS latched_qos = rclcpp::QoS(1).reliable().transient_local();
+    map_cloud_publisher_ = create_publisher<sensor_msgs::msg::PointCloud2>(
+        "/lightnav/localization/map_cloud", latched_qos);
+    path_publisher_ = create_publisher<nav_msgs::msg::Path>("/lightnav/localization/path", latched_qos);
+    visualization_map_ = std::make_unique<VoxelMapAccumulator>(
+        visualization_voxel_m_, static_cast<std::size_t>(visualization_max_points_));
+    visualization_path_ = std::make_unique<PathRecorder>(
+        path_min_step_m_, static_cast<std::size_t>(path_max_poses_));
+  }
+
   wheel_subscription_ = create_subscription<nav_msgs::msg::Odometry>(
       wheel_odom_topic_, rclcpp::QoS(50).reliable(),
       [this](nav_msgs::msg::Odometry::SharedPtr message) { handle_wheel_odom(message); });
@@ -611,6 +677,8 @@ LocalizationNode::CallbackReturn LocalizationNode::on_activate(
   status_publisher_->on_activate();
   aligned_scan_publisher_->on_activate();
   diagnostics_publisher_->on_activate();
+  if (map_cloud_publisher_) map_cloud_publisher_->on_activate();
+  if (path_publisher_) path_publisher_->on_activate();
   has_status_publish_time_ = false;
   last_status_state_ = LocalizationState::kInitializing;
   mapping_activation_sec_ = get_clock()->now().seconds();
@@ -622,6 +690,7 @@ LocalizationNode::CallbackReturn LocalizationNode::on_activate(
           std::chrono::duration<double>(kDefaultWatchdogPeriodSec)),
       [this]() { handle_watchdog(); });
   publish_status();
+  publish_prior_map_cloud();
   RCLCPP_INFO(get_logger(), "localization node active in %s mode", mode_.c_str());
   return CallbackReturn::SUCCESS;
 }
@@ -636,6 +705,8 @@ LocalizationNode::CallbackReturn LocalizationNode::on_deactivate(
   if (status_publisher_) status_publisher_->on_deactivate();
   if (aligned_scan_publisher_) aligned_scan_publisher_->on_deactivate();
   if (diagnostics_publisher_) diagnostics_publisher_->on_deactivate();
+  if (map_cloud_publisher_) map_cloud_publisher_->on_deactivate();
+  if (path_publisher_) path_publisher_->on_deactivate();
   save_mapping_outputs_on_stop("deactivate");
   has_status_publish_time_ = false;
   return CallbackReturn::SUCCESS;
@@ -657,6 +728,8 @@ LocalizationNode::CallbackReturn LocalizationNode::on_cleanup(
   status_publisher_.reset();
   aligned_scan_publisher_.reset();
   diagnostics_publisher_.reset();
+  map_cloud_publisher_.reset();
+  path_publisher_.reset();
   tf_listener_.reset();
   tf_buffer_.reset();
   tf_broadcaster_.reset();
@@ -683,6 +756,8 @@ LocalizationNode::CallbackReturn LocalizationNode::on_shutdown(
   status_publisher_.reset();
   aligned_scan_publisher_.reset();
   diagnostics_publisher_.reset();
+  map_cloud_publisher_.reset();
+  path_publisher_.reset();
   wheel_subscription_.reset();
   points_subscription_.reset();
   gps_subscription_.reset();
@@ -975,6 +1050,7 @@ void LocalizationNode::handle_pending_scans() {
     if (last_output_map_to_base_) {
       publish_aligned_scan(*deskewed,
                            rclcpp::Time(scan.stamp, get_clock()->get_clock_type()));
+      accumulate_visualization_scan(*deskewed);
     }
   }
   pending_scans_ = std::move(remaining);
@@ -1276,6 +1352,8 @@ void LocalizationNode::handle_reload_map(
   last_output_map_to_base_.reset();
   response->success = true;
   response->message = "map reloaded: " + std::to_string(map_points_.size()) + " points";
+  if (visualization_path_) visualization_path_->clear();
+  publish_prior_map_cloud();
   publish_status();
 }
 
@@ -1364,6 +1442,7 @@ void LocalizationNode::handle_watchdog() {
   }
   if (should_publish) publish_status();
   publish_diagnostics(now);
+  publish_visualization(now);
 }
 
 void LocalizationNode::publish_diagnostics(const rclcpp::Time& now) {
@@ -1537,6 +1616,7 @@ void LocalizationNode::publish_output(const LocalizerOutput& output,
   last_output_map_to_base_ = output.map_to_base;
   last_output_stamp_ = stamp;
   last_output_ = output;
+  if (visualization_path_) visualization_path_->add(stamp.seconds(), output.map_to_base);
 
   if (publish_tf_ && tf_broadcaster_) {
     const Eigen::Isometry3d map_to_odom =
@@ -1586,6 +1666,73 @@ void LocalizationNode::publish_aligned_scan(const PointList& points_in_base,
     cursor += sizeof(values);
   }
   aligned_scan_publisher_->publish(cloud);
+}
+
+void LocalizationNode::accumulate_visualization_scan(const PointList& points_in_base) {
+  // Localization mode shows the prior map instead, so scans are only accumulated while mapping.
+  if (!visualization_map_ || !is_mapping() || !last_output_map_to_base_) return;
+  PointList points_in_map;
+  points_in_map.reserve(points_in_base.size());
+  for (const Eigen::Vector3f& point : points_in_base) {
+    points_in_map.push_back(
+        (last_output_map_to_base_->linear() * point.cast<double>() +
+         last_output_map_to_base_->translation())
+            .cast<float>());
+  }
+  visualization_map_->add(points_in_map);
+}
+
+void LocalizationNode::publish_prior_map_cloud() {
+  if (!map_cloud_publisher_ || !map_cloud_publisher_->is_activated() || is_mapping() ||
+      map_points_.empty()) {
+    return;
+  }
+  const PointList preview = downsample_voxel(map_points_, visualization_voxel_m_);
+  map_cloud_publisher_->publish(make_xyz_cloud(preview, map_frame_, get_clock()->now()));
+}
+
+// Publishes the accumulated map and the path at visualization_rate_hz (node clock), and only while
+// someone subscribes and the content changed: a 10^6 point cloud is not cheap to build.
+void LocalizationNode::publish_visualization(const rclcpp::Time& now) {
+  if (!visualization_map_ || !visualization_path_) return;
+  if (has_visualization_publish_time_ &&
+      (now - last_visualization_publish_time_).seconds() < 1.0 / visualization_rate_hz_) {
+    return;
+  }
+  last_visualization_publish_time_ = now;
+  has_visualization_publish_time_ = true;
+
+  if (map_cloud_publisher_ && map_cloud_publisher_->is_activated() && is_mapping() &&
+      map_cloud_publisher_->get_subscription_count() > 0 &&
+      visualization_map_->version() != published_map_version_) {
+    published_map_version_ = visualization_map_->version();
+    map_cloud_publisher_->publish(make_xyz_cloud(visualization_map_->points(), map_frame_, now));
+  }
+  if (path_publisher_ && path_publisher_->is_activated() &&
+      path_publisher_->get_subscription_count() > 0 &&
+      visualization_path_->version() != published_path_version_) {
+    published_path_version_ = visualization_path_->version();
+    nav_msgs::msg::Path path;
+    path.header.stamp = now;
+    path.header.frame_id = map_frame_;
+    for (const TimedPose& timed_pose : visualization_path_->poses()) {
+      geometry_msgs::msg::PoseStamped pose_stamped;
+      pose_stamped.header.frame_id = map_frame_;
+      pose_stamped.header.stamp = rclcpp::Time(static_cast<int64_t>(timed_pose.stamp_sec * 1e9),
+                                               get_clock()->get_clock_type());
+      const Eigen::Vector3d& position = timed_pose.map_to_base.translation();
+      pose_stamped.pose.position.x = position.x();
+      pose_stamped.pose.position.y = position.y();
+      pose_stamped.pose.position.z = position.z();
+      const Eigen::Quaterniond orientation(timed_pose.map_to_base.linear());
+      pose_stamped.pose.orientation.x = orientation.x();
+      pose_stamped.pose.orientation.y = orientation.y();
+      pose_stamped.pose.orientation.z = orientation.z();
+      pose_stamped.pose.orientation.w = orientation.w();
+      path.poses.push_back(pose_stamped);
+    }
+    path_publisher_->publish(path);
+  }
 }
 
 }  // namespace lightnav_localization

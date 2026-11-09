@@ -14,6 +14,7 @@
 #include <lightnav_msgs/msg/localization_status.hpp>
 #include <lightnav_msgs/srv/set_initial_pose.hpp>
 #include <nav_msgs/msg/odometry.hpp>
+#include <nav_msgs/msg/path.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_lifecycle/lifecycle_node.hpp>
 #include <rclcpp_lifecycle/lifecycle_publisher.hpp>
@@ -31,6 +32,7 @@
 #include "lightnav_localization/map_metadata.hpp"
 #include "lightnav_localization/pcd_io.hpp"
 #include "lightnav_localization/pose_buffer.hpp"
+#include "lightnav_localization/visualization.hpp"
 
 namespace lightnav_localization {
 
@@ -101,6 +103,11 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
   void publish_status();
   void publish_aligned_scan(const PointList& points_in_base, const rclcpp::Time& stamp);
   void publish_diagnostics(const rclcpp::Time& now);
+  // Live preview for Foxglove / RViz (visualization_enabled). Mapping: the scans placed by the online
+  // poses; localization: the prior map. Not the batch-optimized map that save_map writes.
+  void accumulate_visualization_scan(const PointList& points_in_base);
+  void publish_prior_map_cloud();
+  void publish_visualization(const rclcpp::Time& now);
   std::string composed_last_error() const;
 
   // Parameters.
@@ -122,6 +129,12 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
   std::string gps_topic_;
   bool publish_tf_ = true;
   double status_rate_hz_ = 2.0;
+  bool visualization_enabled_ = true;
+  double visualization_rate_hz_ = 0.5;
+  double visualization_voxel_m_ = 0.2;
+  int visualization_max_points_ = 1000000;
+  double path_min_step_m_ = 0.1;
+  int path_max_poses_ = 20000;
   double init_gps_max_std_m_ = 3.0;
   int gps_min_status_ = -1;  // NavSatStatus value; fixes below it never reach the Localizer
   double gps_min_interval_s_ = 0.0;
@@ -188,6 +201,14 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
   rclcpp::Time last_status_publish_time_;
   bool has_status_publish_time_ = false;
 
+  // Visualization state (null while visualization_enabled is false).
+  std::unique_ptr<VoxelMapAccumulator> visualization_map_;
+  std::unique_ptr<PathRecorder> visualization_path_;
+  std::uint64_t published_map_version_ = 0;
+  std::uint64_t published_path_version_ = 0;
+  rclcpp::Time last_visualization_publish_time_;
+  bool has_visualization_publish_time_ = false;
+
   // ROS entities.
   rclcpp_lifecycle::LifecyclePublisher<nav_msgs::msg::Odometry>::SharedPtr odom_publisher_;
   rclcpp_lifecycle::LifecyclePublisher<lightnav_msgs::msg::LocalizationStatus>::SharedPtr
@@ -196,6 +217,9 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
       aligned_scan_publisher_;
   rclcpp_lifecycle::LifecyclePublisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr
       diagnostics_publisher_;
+  rclcpp_lifecycle::LifecyclePublisher<sensor_msgs::msg::PointCloud2>::SharedPtr
+      map_cloud_publisher_;
+  rclcpp_lifecycle::LifecyclePublisher<nav_msgs::msg::Path>::SharedPtr path_publisher_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr wheel_subscription_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr points_subscription_;
   rclcpp::Subscription<sensor_msgs::msg::NavSatFix>::SharedPtr gps_subscription_;
