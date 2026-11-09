@@ -223,3 +223,13 @@ TEST(FollowLayer, HeadingAlignmentHasHysteresisAndStaleStops) {
   EXPECT_EQ(stale.output.reason, StopReason::kObstacleStale);
   EXPECT_DOUBLE_EQ(stale.output.twist.angular_rps, 0.0);
 }
+
+TEST(FollowLayer, EmptyPausePathStopsAnActiveRotation) {
+  FollowLayer layer{FollowParameters{}};
+  layer.tryAcceptPath(1, 1, straightPath(20.0));
+  ASSERT_NE(layer.compute(Pose2D{0, 0, 3.0}, freshInputs()).output.twist.angular_rps, 0.0);
+  ASSERT_TRUE(layer.tryAcceptPath(1, 2, {}));
+  const auto stopped = layer.compute(Pose2D{0, 0, 3.0}, freshInputs());
+  EXPECT_EQ(stopped.output.reason, StopReason::kNoPath);
+  EXPECT_DOUBLE_EQ(stopped.output.twist.angular_rps, 0.0);
+}
