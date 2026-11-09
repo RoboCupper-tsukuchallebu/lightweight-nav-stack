@@ -26,6 +26,10 @@ class ArcMarkerRate {
   std::optional<double> last_s_;
 };
 
+inline bool arcMarkersActive(bool is_pose_fresh, bool is_avoid_asserted) {
+  return is_pose_fresh && is_avoid_asserted;
+}
+
 inline visualization_msgs::msg::MarkerArray makeArcMarkers(
     const std::vector<ArcCandidate>& candidates, const std::optional<ArcCandidate>& selected,
     double length_m, double step_m, const std::string& frame, const rclcpp::Time& stamp,
@@ -58,15 +62,15 @@ inline visualization_msgs::msg::MarkerArray makeArcMarkers(
     marker.color.r = candidate.is_feasible ? 0.0 : 1.0;
     for (double distance = 0.0; distance < length_m; distance += step_m) {
       geometry_msgs::msg::Point point;
-      const double curvature = candidate.curvature_per_m;
-      point.x = std::fabs(curvature) < 1e-6 ? distance : std::sin(curvature * distance) / curvature;
-      point.y = std::fabs(curvature) < 1e-6 ? 0.0 : (1.0 - std::cos(curvature * distance)) / curvature;
+      const auto sample = arcPointInBody(candidate.curvature_per_m, distance);
+      point.x = sample.x_m;
+      point.y = sample.y_m;
       marker.points.push_back(point);
     }
     geometry_msgs::msg::Point end;
-    const double curvature = candidate.curvature_per_m;
-    end.x = std::fabs(curvature) < 1e-6 ? length_m : std::sin(curvature * length_m) / curvature;
-    end.y = std::fabs(curvature) < 1e-6 ? 0.0 : (1.0 - std::cos(curvature * length_m)) / curvature;
+    const auto sample = arcPointInBody(candidate.curvature_per_m, length_m);
+    end.x = sample.x_m;
+    end.y = sample.y_m;
     marker.points.push_back(end);
     array.markers.push_back(marker);
   }

@@ -6,10 +6,18 @@
 
 namespace lightnav_controller {
 
+// Position on an arc of the given curvature after travelling arc_length_m.
+Point2D arcPointInBody(double curvature_per_m, double arc_length_m) {
+  if (std::fabs(curvature_per_m) < 1e-6) {
+    return Point2D{arc_length_m, 0.0};
+  }
+  return Point2D{std::sin(curvature_per_m * arc_length_m) / curvature_per_m,
+                 (1.0 - std::cos(curvature_per_m * arc_length_m)) / curvature_per_m};
+}
+
 namespace {
 
 constexpr std::int8_t kOccupiedThreshold = 50;
-constexpr double kStraightCurvature = 1e-6;
 
 double distanceBetween(const Point2D& first, const Point2D& second) {
   return std::hypot(first.x_m - second.x_m, first.y_m - second.y_m);
@@ -28,15 +36,6 @@ Point2D toWorld(const Pose2D& pose, const Point2D& body_point) {
   return Point2D{
       pose.x_m + std::cos(pose.yaw_rad) * body_point.x_m - std::sin(pose.yaw_rad) * body_point.y_m,
       pose.y_m + std::sin(pose.yaw_rad) * body_point.x_m + std::cos(pose.yaw_rad) * body_point.y_m};
-}
-
-// Position on an arc of the given curvature after travelling arc_length_m.
-Point2D arcPointInBody(double curvature_per_m, double arc_length_m) {
-  if (std::fabs(curvature_per_m) < kStraightCurvature) {
-    return Point2D{arc_length_m, 0.0};
-  }
-  return Point2D{std::sin(curvature_per_m * arc_length_m) / curvature_per_m,
-                 (1.0 - std::cos(curvature_per_m * arc_length_m)) / curvature_per_m};
 }
 
 double distanceToSegment(const Point2D& point, const Point2D& start, const Point2D& end) {

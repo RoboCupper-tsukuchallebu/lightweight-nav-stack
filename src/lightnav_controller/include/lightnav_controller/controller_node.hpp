@@ -95,8 +95,8 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
                    "the value must be finite and positive (got %f)", max_path_deviation_m);
       return CallbackReturn::FAILURE;
     }
-    const double marker_rate = get_parameter("arc_markers_rate_hz").as_double();
-    if (!std::isfinite(marker_rate) || marker_rate < 0.0) {
+    arc_markers_rate_hz_ = get_parameter("arc_markers_rate_hz").as_double();
+    if (!std::isfinite(arc_markers_rate_hz_) || arc_markers_rate_hz_ < 0.0) {
       RCLCPP_ERROR(get_logger(), "arc_markers_rate_hz must be finite and nonnegative");
       return CallbackReturn::FAILURE;
     }
@@ -438,15 +438,15 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
           follow_result.remaining_distance_m, follow_inputs.is_stop_zone_occupied,
           follow_inputs.is_obstacle_status_fresh});
     }
-    const bool marker_active = is_pose_fresh && arbitration_input.avoid.is_asserted;
+    const bool marker_active = arcMarkersActive(is_pose_fresh, arbitration_input.avoid.is_asserted);
     const auto marker_time = std::chrono::steady_clock::now().time_since_epoch();
     if (marker_publisher_ && marker_rate_.ready(
         std::chrono::duration<double>(marker_time).count(),
-        get_parameter("arc_markers_rate_hz").as_double(), marker_publisher_->get_subscription_count() > 0)) {
+        arc_markers_rate_hz_, marker_publisher_->get_subscription_count() > 0)) {
       marker_publisher_->publish(makeArcMarkers(avoid_layer_->candidates(), avoid_layer_->selectedCandidate(),
           get_parameter("arc_length_m").as_double(), get_parameter("arc_step_m").as_double(),
           grid_frame_, current_time, marker_active, arbitration_input.avoid.reason,
-          get_parameter("arc_markers_rate_hz").as_double()));
+          arc_markers_rate_hz_));
     }
     const ArbitrationResult result = arbitrate(arbitration_input);
     publish(result, follow_result);
@@ -501,6 +501,7 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
   std::optional<ReceivedGrid> last_grid_;
   std::optional<ReceivedPose> last_pose_;
   std::optional<ReceivedObstacleStatus> last_obstacle_status_;
+  double arc_markers_rate_hz_{0.0};
   ArcMarkerRate marker_rate_;
   rclcpp_lifecycle::LifecyclePublisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_publisher_;
   rclcpp::TimerBase::SharedPtr timer_;

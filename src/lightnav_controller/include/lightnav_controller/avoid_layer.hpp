@@ -51,6 +51,9 @@ struct ArcCandidate {
   const char* rejection_reason{""};
 };
 
+// Position on an arc in the robot body frame.
+Point2D arcPointInBody(double curvature_per_m, double arc_length_m);
+
 // Pure function: scores every candidate arc. Infeasible when a sample hits an
 // occupied cell or the end point is farther than max_path_deviation_m from the
 // path. The grid is in the body frame, the path and pose in the map frame.

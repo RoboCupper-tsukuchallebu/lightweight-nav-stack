@@ -42,3 +42,5 @@ All numeric values must be finite and positive; `arc_candidate_count` must be a 
 ### Avoidance arc visualization
 
 `/lightnav/controller/arc_candidates` publishes `visualization_msgs/MarkerArray` in `grid_frame` (on the robot, `base_footprint`). Green lines are feasible candidates, red lines are rejected candidates, and the marker namespace identifies the rejection reason. The selected candidate is thicker; text shows the avoid state. Markers are cleared when avoidance is idle. Publishing requires a subscriber and is capped by the read-only `arc_markers_rate_hz` parameter (default 2.0 Hz; 0 disables it).
+
+When the stop zone is occupied or obstacle information is stale, candidates are not evaluated, so only the state text appears without arcs.
