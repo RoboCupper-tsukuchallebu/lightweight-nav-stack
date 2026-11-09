@@ -51,6 +51,8 @@ LiDAR の外部パラメータ（`base_frame→点群の frame_id`）と GPS ア
 | `/lightnav/localization/odom` | `nav_msgs/Odometry` | reliable, depth 10 | `map`→`base_footprint`、共分散あり、stamp は入力 `/wheel/odom` と同一 |
 | `/lightnav/localization/status` | `lightnav_msgs/LocalizationStatus` | reliable, transient_local, depth 1 | `status_rate_hz`（既定 2 Hz）+ 状態変化時 |
 | `/lightnav/localization/aligned_scan` | `sensor_msgs/PointCloud2` | SensorDataQoS | デバッグ（`map` 座標） |
+| `/lightnav/localization/map_cloud` | `sensor_msgs/PointCloud2` | reliable, transient_local, depth 1 | Foxglove 用のプレビュー（`map` 座標）。mapping: これまでのスキャンを `visualization_voxel_m` で間引いて積んだ点（オンライン推定の姿勢で置くので、保存される `map.pcd` とは少し違う）。localization: 事前地図。購読者がいて内容が変わったときだけ `visualization_rate_hz` で出す |
+| `/lightnav/localization/path` | `nav_msgs/Path` | reliable, transient_local, depth 1 | これまでの `map`→`base_footprint` の軌跡（`path_min_step_m` ごと、最大 `path_max_poses` 個）。`map_cloud` と同じ条件で出す |
 | `/tf` `map→odom` | TF | — | `publish_tf: false` で停止 |
 | `~/set_initial_pose` | `lightnav_msgs/SetInitialPose` | 既定 | `frame_id=map`。orientation が単位元かつ `covariance[35] < 0` なら yaw 未指定 |
 | `~/reload_map` | `std_srvs/Trigger` | 既定 | `map_file` / `map_yaml` を読み直して再初期化 |
@@ -112,6 +114,9 @@ params ファイル `docker/config/localization_indoor.yaml` で切り替える
 | `init_gps_max_std_m` / `init_scan_count` / `init_yaw_step_deg` | 3.0 / 3 / 15 | 初期位置合わせ |
 | `init_coarse_corr_m` / `init_fine_corr_m` / `init_inlier_ratio_min` | 2.0 / 0.5 / 0.6 | 初期 yaw 照合 |
 | `publish_tf` / `status_rate_hz` | true / 2.0 | |
+| `visualization_enabled` | true | `map_cloud` と `path` を出す。false で両方とも作らない |
+| `visualization_rate_hz` / `visualization_voxel_m` / `visualization_max_points` | 0.5 / 0.2 / 1000000 | プレビューの出力周期（ノードの時計）、点の間引き、点数の上限（超えた分は積まない） |
+| `path_min_step_m` / `path_max_poses` | 0.1 / 20000 | 軌跡に足す最小の移動量、最大の個数（超えたら古い方から捨てる） |
 | `window_s` / `huber_k` | 30.0 / 1.0 | 姿勢グラフ |
 | `voxel_size_m` / `keyframe_distance_m` / `keyframe_time_s` | 0.5 / 1.0 / 1.0 | LiDAR オドメトリ |
 | `map_inlier_ratio_min` / `map_gate_translation_m` / `map_gate_rotation_rad` | 0.5 / 1.0 / 0.2 | 事前地図照合 |
@@ -281,3 +286,5 @@ configure 失敗に加え、室内（GNSS 無し）の mapping（`gps_topic` を
 GNSS にならない、始点が原点・yaw 0・前進が +x・`has_gps_origin: false`）と、原点の無い地図 + `set_initial_pose`
 での `TRACKING` の維持を確認する。`test_initial_alignment` / `test_point_cloud_extraction` が
 純ロジックと非有限点の除去を単体で確認する。
+
+bag の再生で mapping するツールは [`tools/bag_replay`](../../tools/bag_replay/README.md)（`replay` Docker ターゲット）。

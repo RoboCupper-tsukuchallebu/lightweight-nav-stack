@@ -11,6 +11,7 @@
 #include <fstream>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <random>
 #include <set>
 #include <sstream>
@@ -23,6 +24,7 @@
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <lifecycle_msgs/msg/state.hpp>
 #include <nav_msgs/msg/odometry.hpp>
+#include <nav_msgs/msg/path.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/nav_sat_fix.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
@@ -217,6 +219,10 @@ class LocalizationNodeTest : public ::testing::Test {
     set_initial_pose_client_.reset();
     save_map_client_.reset();
     status_subscription_.reset();
+    map_cloud_subscription_.reset();
+    path_subscription_.reset();
+    last_map_cloud_.reset();
+    last_path_.reset();
     diagnostics_subscription_.reset();
     odom_subscription_.reset();
     gps_publisher_.reset();
@@ -625,6 +631,43 @@ class LocalizationNodeTest : public ::testing::Test {
     return options;
   }
 
+  // Latched subscriptions to the live preview topics (the same QoS Foxglove uses).
+  void subscribe_visualization() {
+    const rclcpp::QoS latched_qos = rclcpp::QoS(1).reliable().transient_local();
+    map_cloud_subscription_ = helper_->create_subscription<sensor_msgs::msg::PointCloud2>(
+        "/lightnav/localization/map_cloud", latched_qos,
+        [this](sensor_msgs::msg::PointCloud2::SharedPtr message) { last_map_cloud_ = *message; });
+    path_subscription_ = helper_->create_subscription<nav_msgs::msg::Path>(
+        "/lightnav/localization/path", latched_qos,
+        [this](nav_msgs::msg::Path::SharedPtr message) { last_path_ = *message; });
+  }
+
+  // Mapping without GPS: stand still until INITIALIZING ends, then drive 1.6 m straight along +x.
+  void drive_mapping_without_gps_along_x() {
+    Eigen::Isometry3d start_pose = Eigen::Isometry3d::Identity();
+    start_pose.translation() = Eigen::Vector3d(5.0, 3.0, kSensorHeightM);
+    const auto pose_after = [&start_pose](double distance_m) {
+      Eigen::Isometry3d pose = start_pose;
+      pose.translation().x() += distance_m;
+      return pose;
+    };
+    drive_mapping([&start_pose](double /*elapsed*/) { return start_pose; }, 1500ms);
+    drive_mapping([&pose_after](double elapsed) { return pose_after(0.8 * elapsed); }, 2000ms);
+  }
+
+  rclcpp::NodeOptions make_indoor_mapping_options(const std::filesystem::path& output_directory,
+                                                  bool is_visualization_enabled) const {
+    rclcpp::NodeOptions options = make_mapping_options(output_directory);
+    std::vector<rclcpp::Parameter> overrides = options.parameter_overrides();
+    overrides.emplace_back("gps_topic", "/lightnav/gnss_disabled");
+    overrides.emplace_back("allow_mapping_without_gps", true);
+    overrides.emplace_back("gps_timeout_s", 1.0);
+    overrides.emplace_back("visualization_enabled", is_visualization_enabled);
+    overrides.emplace_back("visualization_rate_hz", 5.0);
+    options.parameter_overrides(overrides);
+    return options;
+  }
+
   // Mapping for 2 s, moving along +x. Returns the last pose sent.
   Eigen::Isometry3d drive_mapping_forward() {
     return drive_mapping(
@@ -648,6 +691,11 @@ class LocalizationNodeTest : public ::testing::Test {
     }
     return files;
   }
+
+  rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr map_cloud_subscription_;
+  rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr path_subscription_;
+  std::optional<sensor_msgs::msg::PointCloud2> last_map_cloud_;
+  std::optional<nav_msgs::msg::Path> last_path_;
 
   std::filesystem::path temp_directory_;
   std::filesystem::path map_file_;
@@ -1335,6 +1383,51 @@ TEST_F(LocalizationNodeTest, MappingWithoutGpsStartsAtTheStartPoseAndDrivesAlong
   }
   std::printf("[ INDOOR_MAPPING ] keyframes=%zu first=(%.3f,%.3f,yaw %.3f) last=(%.3f,%.3f,z %.3f)\n",
               rows.size(), first.x, first.y, first.yaw, last.x, last.y, last.z);
+}
+
+// Live preview for Foxglove (Issue #43 replay tooling): the map cloud and the path are latched topics.
+TEST_F(LocalizationNodeTest, MappingPublishesTheLivePreviewMapCloudAndPath) {
+  constexpr double kMinDrivenDistanceM = 0.5;
+  world_ = std::make_unique<SyntheticWorld>(
+      std::vector<Eigen::Vector2d>{Eigen::Vector2d(0.0, 3.0), Eigen::Vector2d(30.0, 3.0)}, true);
+  create_node(make_indoor_mapping_options(temp_directory_ / "preview", true));
+  subscribe_visualization();
+  gps_variance_m2_ = 1.0;
+  bring_up();
+
+  drive_mapping_without_gps_along_x();
+  spin_for(500ms);
+
+  ASSERT_TRUE(last_map_cloud_.has_value());
+  EXPECT_EQ(last_map_cloud_->header.frame_id, "map");
+  EXPECT_GT(last_map_cloud_->width, 100U);
+  ASSERT_TRUE(last_path_.has_value());
+  EXPECT_EQ(last_path_->header.frame_id, "map");
+  ASSERT_GE(last_path_->poses.size(), 2U);
+  const double driven_x =
+      last_path_->poses.back().pose.position.x - last_path_->poses.front().pose.position.x;
+  EXPECT_GT(driven_x, kMinDrivenDistanceM);
+}
+
+TEST_F(LocalizationNodeTest, VisualizationEnabledFalsePublishesNeitherMapCloudNorPath) {
+  create_node(make_indoor_mapping_options(temp_directory_ / "preview_off", false));
+  bring_up();
+
+  drive_mapping_without_gps_along_x();
+
+  EXPECT_EQ(helper_->count_publishers("/lightnav/localization/map_cloud"), 0U);
+  EXPECT_EQ(helper_->count_publishers("/lightnav/localization/path"), 0U);
+}
+
+TEST_F(LocalizationNodeTest, LocalizationModePublishesThePriorMapCloudOnActivate) {
+  create_node(make_options(map_file_.string(), map_yaml_.string()));
+  subscribe_visualization();
+
+  bring_up();
+
+  ASSERT_TRUE(last_map_cloud_.has_value());
+  EXPECT_EQ(last_map_cloud_->header.frame_id, "map");
+  EXPECT_GT(last_map_cloud_->width, 100U);
 }
 
 // Acceptance (b): a map without a GPS origin plus set_initial_pose (with yaw) keeps TRACKING with only the
