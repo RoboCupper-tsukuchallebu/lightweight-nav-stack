@@ -273,8 +273,9 @@ void LocalizationNode::declare_parameters() {
   declare_parameter<double>("lidar_odom_gate_translation_m", 0.3);
   declare_parameter<double>("lidar_odom_gate_translation_ratio", 0.2);
   declare_parameter<double>("lidar_odom_gate_yaw_rad", 0.1);
-  declare_parameter<double>("lidar_odom_slip_gate_yaw_rad", 0.35);
+  declare_parameter<double>("lidar_odom_slip_gate_yaw_rad", 0.1);
   declare_parameter<double>("lidar_odom_slip_wheel_yaw_rate_rad_s", 0.05);
+  declare_parameter<double>("lidar_odom_slip_wheel_rate_window_s", 0.05);
   declare_parameter<double>("lidar_odom_covariance_scale", 1.0);
   declare_parameter<double>("lidar_odom_sigma_floor_m", 0.02);
   declare_parameter<double>("lidar_odom_sigma_floor_rad", 0.005);
@@ -451,6 +452,8 @@ bool LocalizationNode::read_parameters(std::string& error) {
       get_parameter("lidar_odom_slip_gate_yaw_rad").as_double();
   localizer_parameters_.lidar_odometry.slip_wheel_yaw_rate_rad_s =
       get_parameter("lidar_odom_slip_wheel_yaw_rate_rad_s").as_double();
+  localizer_parameters_.lidar_odometry.slip_wheel_rate_window_s =
+      get_parameter("lidar_odom_slip_wheel_rate_window_s").as_double();
   localizer_parameters_.lidar_odometry.gate_yaw_rad =
       get_parameter("lidar_odom_gate_yaw_rad").as_double();
   localizer_parameters_.lidar_odometry_information.covariance_scale =
