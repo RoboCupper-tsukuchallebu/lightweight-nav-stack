@@ -37,6 +37,17 @@
 #include "lightnav_localization/pose_graph.hpp"
 #include "synthetic_world.hpp"
 
+namespace lightnav_localization {
+class LoopClosureNodeTestAccess {
+ public:
+  static void seed(LocalizationNode& node, const std::vector<Eigen::Isometry3d>& poses,
+                   const LoopClosureTestHooks* hooks) {
+    node.seed_loop_closure_for_test(poses, hooks);
+  }
+  static void clear(LocalizationNode& node) { node.clear_loop_closure_hooks_for_test(); }
+};
+}  // namespace lightnav_localization
+
 using namespace lightnav_localization;
 using namespace lightnav_localization::testing;
 using namespace std::chrono_literals;
@@ -810,10 +821,10 @@ TEST_F(LocalizationNodeTest, SaveMapReportsPassOneExceptionAndSucceeds) {
   };
   hooks.elapsed_seconds = [] { return 0.0; };
   hooks.before_batch = [](int) { throw std::runtime_error("injected pass one failure"); };
-  node_->seed_loop_closure_for_test(poses, &hooks);
+  LoopClosureNodeTestAccess::seed(*node_, poses, &hooks);
 
   const auto response = call_save_map();
-  node_->clear_loop_closure_hooks_for_test();
+  LoopClosureNodeTestAccess::clear(*node_);
 
   ASSERT_NE(response, nullptr);
   EXPECT_TRUE(response->success) << response->message;

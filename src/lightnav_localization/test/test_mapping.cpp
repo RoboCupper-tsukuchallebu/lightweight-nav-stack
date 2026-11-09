@@ -88,6 +88,10 @@ const Course kSpecCourse{{70.0, 60.0, 70.0}, {1.0, -1.0}};
 constexpr double kSecondsToObserveAfterGap = 5.0;
 const Course kGapCourse{{50.0, 30.0}, {1.0}};
 const Course kLoopCourse{{40.0, 40.0, 40.0, 40.0}, {1.0, 1.0, 1.0, 1.0}};
+const Course kPeriodicCourse{{30.0, 0.0, 30.0}, {1.0, 1.0}};
+// Biases chosen to produce approximately one-third and one-half period of drift.
+constexpr double kPeriodicOneThirdYawBiasDegPer10m = 2.65;
+constexpr double kPeriodicHalfYawBiasDegPer10m = 3.85;
 
 GpsFix fix_at_enu(double east_m, double north_m) {
   GpsFix fix;
@@ -144,6 +148,7 @@ struct MappingRun {
   bool online_moved_after_failure = false;
   std::string last_error;
   std::string loop_statistics;
+  std::vector<std::string> loop_logs;
   std::vector<std::pair<double, Eigen::Isometry3d>> online_poses;
   // Sub-map keyframes a few seconds after the input gap (empty without a gap).
   std::vector<Eigen::Isometry3d> lidar_keyframe_poses_after_gap;
@@ -156,8 +161,14 @@ MappingRun run_mapping(const Course& course, bool has_pillars,
                        double fail_optimization_at_sec = -1.0,
                        double wheel_gap_begin_sec = -1.0, double wheel_gap_end_sec = -1.0,
                        bool loop_closure_enabled = true, double wheel_yaw_bias_deg_per_10m = 0.5,
-                       bool closed_course = false) {
-  SyntheticWorld world(course.centerline(), true, closed_course);
+                       bool closed_course = false,
+                       const LoopClosureTestHooks* hooks = nullptr,
+                       bool periodic_pillar_corridor = false) {
+  const auto centerline = periodic_pillar_corridor
+                              ? std::vector<Eigen::Vector2d>{{0, 0}, {30, 0}}
+                              : course.centerline();
+  SyntheticWorld world(centerline, !periodic_pillar_corridor, closed_course);
+  if (periodic_pillar_corridor) world.add_pillars(0.2, 0.2, 3.0, 1.5, true);
   if (has_pillars) {
     world.add_pillars(0.1, 0.5, 1.25, 1.5, true);
   }
@@ -316,6 +327,10 @@ MappingRun run_mapping(const Course& course, bool has_pillars,
   output_parameters.map_voxel_size_m = 0.2;
   output_parameters.batch_max_iterations = 100;
   output_parameters.loop_closure.enabled = loop_closure_enabled;
+  output_parameters.loop_closure_test_hooks = hooks;
+  output_parameters.loop_closure.info_logger = [&](const std::string& message) {
+    result.loop_logs.push_back(message);
+  };
   output_parameters.created = "2026-01-01T00:00:00Z";
   MapOutputResult output_result;
   std::string error;
@@ -551,6 +566,95 @@ TEST(MapBuilder, K2_ClasSigma0p1_SpecCourse) {
   EXPECT_LT(summary.maximum, 0.2);
   std::error_code dropout_error;
   std::filesystem::remove_all(dropout_directory, dropout_error);
+}
+
+// A3-4: the same periodic corridor is traversed outward and back.
+void run_periodic_mapping(double yaw_bias, bool assert_acceptance) {
+  const std::string directory = unique_directory("periodic_corridor");
+  const MappingRun mapping = run_mapping(kPeriodicCourse, false, -1.0, -1.0, false, 1.0, 1.0,
+                                         directory, -1.0, -1.0, -1.0, true, yaw_bias,
+                                         false, nullptr, true);
+  const double maximum_error =
+      summarize_trajectory_error(kPeriodicCourse, mapping.trajectory).maximum;
+  const double revisit_time = kPeriodicCourse.total_sec();
+  double revisit_error = 0.0;
+  if (!mapping.online_poses.empty()) {
+    const auto& last_online_pose = mapping.online_poses.back();
+    revisit_error = (last_online_pose.second.translation() -
+                     kPeriodicCourse.truth_at(last_online_pose.first).translation())
+                        .head<2>().norm();
+  }
+  std::printf("[ PERIODIC ] bias=%.3f revisit_time=%.3f drift=%.6f max=%.6f %s\n",
+              yaw_bias, revisit_time, revisit_error, maximum_error, mapping.loop_statistics.c_str());
+  ::testing::Test::RecordProperty("revisit_drift_m", revisit_error);
+  ::testing::Test::RecordProperty("maximum_horizontal_error_m", maximum_error);
+  for (const std::string& log : mapping.loop_logs) {
+    std::printf("[ PERIODIC_CANDIDATE ] %s\n", log.c_str());
+  }
+  if (assert_acceptance) {
+    // The specification accepts zero wrong loops or error < 0.5 m for every row.
+    // Conservatively treat every retained loop as potentially wrong.
+    EXPECT_TRUE(mapping.metadata.loop_closure_count == 0 || maximum_error < 0.5);
+  }
+  std::error_code error;
+  std::filesystem::remove_all(directory, error);
+}
+
+// Before saving, the final online pose is 1.133 m from truth in this synthetic
+// setup, approximately one-third of the 3 m period.
+TEST(MapBuilder, PeriodicCorridorOneThirdDriftHasNoWrongLoopsOrSmallError) {
+  run_periodic_mapping(kPeriodicOneThirdYawBiasDegPer10m, true);
+}
+
+// Before saving, the final online pose is 1.424 m from truth in this synthetic
+// setup, approximately one-half of the 3 m period.
+TEST(MapBuilder, PeriodicCorridorHalfPeriodDriftRecordsOutcome) {
+  run_periodic_mapping(kPeriodicHalfYawBiasDegPer10m, false);
+}
+
+// A4: inject a five-metre conflicting factor while saving the A1 closed corridor.
+TEST(MapBuilder, A4_ClosedCorridorRemovesInjectedConflictingLoop) {
+  LoopClosureTestHooks hooks;
+  bool injected = false;
+  std::size_t correct_count = 0;
+  std::size_t injected_newer_index = 0;
+  hooks.before_batch_with_graph = [&](PoseGraph& graph) -> std::optional<LoopCandidate> {
+    if (injected) return std::nullopt;
+    const auto& poses = graph.batch_poses();
+    if (poses.size() < 2) return std::nullopt;
+    correct_count = graph.loop_factor_count();
+    Eigen::Isometry3d incorrect = poses.front().map_to_base.inverse() * poses.back().map_to_base;
+    incorrect.translation().x() += 5.0;
+    const auto information = Eigen::Matrix<double, 6, 6>::Identity() * 400.0;
+    if (!graph.add_loop_factor(poses.front().index, poses.back().index, incorrect, information)) {
+      return std::nullopt;
+    }
+    injected = true;
+    injected_newer_index = poses.size() - 1;
+    return LoopCandidate{0, injected_newer_index, 0.0};
+  };
+  const std::string directory = unique_directory("a4_closed_corridor");
+  const MappingRun mapping = run_mapping(kLoopCourse, false, -1.0, -1.0, false, 1.01, 1.0,
+                                         directory, -1.0, -1.0, -1.0, true, 1.2, true, &hooks);
+  ASSERT_TRUE(injected);
+  ASSERT_GE(mapping.trajectory.size(), 2U);
+  const auto& first_keyframe = mapping.trajectory.front();
+  const auto& last_keyframe = mapping.trajectory.back();
+  const double gap = Eigen::Vector2d(last_keyframe.x - first_keyframe.x,
+                                     last_keyframe.y - first_keyframe.y).norm();
+  const auto removal = mapping.loop_statistics.find("removed chi2=");
+  const std::string injected_removal = "loop removed: older_index=0 newer_index=" +
+      std::to_string(injected_newer_index) + " ";
+  EXPECT_TRUE(std::any_of(mapping.loop_logs.begin(), mapping.loop_logs.end(),
+                          [&](const std::string& log) { return log.find(injected_removal) == 0; }));
+  std::printf("[ A4 ] gap=%.6f correct=%zu %s\n", gap, correct_count,
+              mapping.loop_statistics.c_str());
+  EXPECT_LT(gap, 0.3);
+  ASSERT_NE(removal, std::string::npos);
+  EXPECT_EQ(mapping.loop_statistics.find("removed chi2=", removal + 1), std::string::npos);
+  EXPECT_EQ(static_cast<std::size_t>(mapping.metadata.loop_closure_count), correct_count);
+  std::error_code error;
+  std::filesystem::remove_all(directory, error);
 }
 
 // 仕様 A1 からの変更: 端壁が交差して互いを遮るため、端壁の無い回廊を使う（PR #62 参照）。

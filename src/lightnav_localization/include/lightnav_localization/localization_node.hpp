@@ -43,10 +43,6 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
   explicit LocalizationNode(const rclcpp::NodeOptions& options = rclcpp::NodeOptions());
   ~LocalizationNode() override;
 
-  void seed_loop_closure_for_test(const std::vector<Eigen::Isometry3d>& poses,
-                                  const LoopClosureTestHooks* hooks);
-  void clear_loop_closure_hooks_for_test() { loop_closure_test_hooks_ = nullptr; }
-
   CallbackReturn on_configure(const rclcpp_lifecycle::State& state) override;
   CallbackReturn on_activate(const rclcpp_lifecycle::State& state) override;
   CallbackReturn on_deactivate(const rclcpp_lifecycle::State& state) override;
@@ -54,6 +50,11 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
   CallbackReturn on_shutdown(const rclcpp_lifecycle::State& state) override;
 
  private:
+  friend class LoopClosureNodeTestAccess;
+  void seed_loop_closure_for_test(const std::vector<Eigen::Isometry3d>& poses,
+                                  const LoopClosureTestHooks* hooks);
+  void clear_loop_closure_hooks_for_test() { loop_closure_test_hooks_ = nullptr; }
+
   void declare_parameters();
   bool read_parameters(std::string& error);
   bool load_map_data(std::string& error);

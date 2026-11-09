@@ -364,6 +364,14 @@ LoopClosureResult close_loops(PoseGraph& graph, const std::vector<KeyframeCloud>
       const int limit = loop_iteration_limit(remaining, iteration_seconds, batch_max_iterations);
       if (limit < 1) { failure = "time budget"; break; }
       if (hooks && hooks->before_batch) hooks->before_batch(limit);
+      if (hooks && hooks->before_batch_with_graph) {
+        const auto injected = hooks->before_batch_with_graph(graph);
+        if (injected) {
+          VerifiedLoop marker;
+          marker.candidate = *injected;
+          active_loops.push_back(marker);
+        }
+      }
       result.count = static_cast<int>(graph.loop_factor_count());
       if (!graph.batch_optimize(limit, true, false)) { failure = "optimization failed"; break; }
       const double measured_iteration_seconds =

@@ -89,6 +89,7 @@ struct LoopClosureTestHooks {
   std::function<std::optional<VerifiedLoop>(const LoopCandidate&)> verify;
   std::function<double()> elapsed_seconds;
   std::function<void(int)> before_batch;
+  std::function<std::optional<LoopCandidate>(PoseGraph&)> before_batch_with_graph;
   std::function<void()> before_add_factor;
   std::optional<double> iteration_seconds;
 };
