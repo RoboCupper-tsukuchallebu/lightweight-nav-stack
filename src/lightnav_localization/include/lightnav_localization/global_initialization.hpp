@@ -25,7 +25,8 @@ struct GlobalInitializationPeakParameters {
   double margin_min = 0.15;
 };
 
-// Input must be sorted by decreasing coarse score after non-maximum suppression.
+// Input must have finite scores sorted by decreasing coarse score after non-maximum suppression;
+// invalid input throws std::invalid_argument.
 // Only the coarse 2D score is compared; a discarded peak can still rank higher in 3D.
 bool has_too_many_global_initialization_peaks(
     const std::vector<GlobalInitializationPeak>& coarse_peaks,

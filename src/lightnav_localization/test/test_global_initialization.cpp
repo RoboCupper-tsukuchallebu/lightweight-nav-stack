@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <vector>
+#include <stdexcept>
 
 #include "lightnav_localization/global_initialization.hpp"
 
@@ -22,9 +23,18 @@ TEST(GlobalInitializationPeaks, RejectsCompetitorBelowFifthCoarseRank) {
 
 TEST(GlobalInitializationPeaks, RejectsEleventhNearbyCoarseScore) {
   std::vector<GlobalInitializationPeak> peaks(11);
-  peaks.front().coarse_score = 0.9;
-  peaks.back().coarse_score = 0.8;
+  for (auto& peak : peaks) peak.coarse_score = 0.9;
+  peaks.back().coarse_score = 0.81;
   EXPECT_TRUE(has_too_many_global_initialization_peaks(peaks, {}));
+  peaks.back().coarse_score = 0.79;
+  EXPECT_FALSE(has_too_many_global_initialization_peaks(peaks, {}));
+}
+
+TEST(GlobalInitializationPeaks, RejectsUnsortedCoarseScores) {
+  std::vector<GlobalInitializationPeak> peaks(2);
+  peaks[0].coarse_score = 0.1;
+  peaks[1].coarse_score = 0.9;
+  EXPECT_THROW(has_too_many_global_initialization_peaks(peaks, {}), std::invalid_argument);
 }
 
 TEST(GlobalInitializationPeaks, IgnoresSamePeakAfterRefinement) {

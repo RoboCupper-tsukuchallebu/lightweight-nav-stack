@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
 
 namespace lightnav_localization {
 namespace {
@@ -20,6 +21,12 @@ bool are_distinct(const GlobalInitializationPeak& left, const GlobalInitializati
 bool has_too_many_global_initialization_peaks(
     const std::vector<GlobalInitializationPeak>& coarse_peaks,
     const GlobalInitializationPeakParameters& parameters) {
+  for (std::size_t index = 0; index < coarse_peaks.size(); ++index) {
+    if (!std::isfinite(coarse_peaks[index].coarse_score) ||
+        (index > 0 && coarse_peaks[index - 1].coarse_score < coarse_peaks[index].coarse_score)) {
+      throw std::invalid_argument("coarse peaks must have finite scores in descending order");
+    }
+  }
   if (coarse_peaks.empty() || coarse_peaks.size() <= parameters.peak_count) return false;
   return coarse_peaks[parameters.peak_count].coarse_score >=
          coarse_peaks.front().coarse_score - parameters.candidate_margin;
