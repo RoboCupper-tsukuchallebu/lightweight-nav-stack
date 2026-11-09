@@ -40,6 +40,8 @@ struct AvoidParameters {
   double rejoin_distance_m{0.5};
   double avoid_release_hold_s{1.0};
   double stuck_timeout_s{10.0};
+  double stuck_rotate_after_s{2.0};
+  double w_rotate_rps{0.3};
   double goal_tolerance_m{0.3};
   double k_end_per_s{0.5};
 };
@@ -48,7 +50,11 @@ struct ArcCandidate {
   double curvature_per_m{0.0};
   bool is_feasible{false};
   double score{0.0};
+  const char* rejection_reason{""};
 };
+
+// Position on an arc in the robot body frame.
+Point2D arcPointInBody(double curvature_per_m, double arc_length_m);
 
 // Pure function: scores every candidate arc. Infeasible when a sample hits an
 // occupied cell or the end point is farther than max_path_deviation_m from the
@@ -102,17 +108,23 @@ class ArcAvoidLayer final : public AvoidLayer {
   LayerOutput compute(const AvoidContext& context) override;
 
   bool isAvoiding() const { return is_avoiding_; }
+  void resetWaiting() { waiting_since_s_.reset(); }
+  const std::vector<ArcCandidate>& candidates() const { return candidates_; }
+  const std::optional<ArcCandidate>& selectedCandidate() const { return selected_candidate_; }
 
  private:
   void reset();
   bool isPathEndOccupied(const LocalGrid& grid, const AvoidContext& context) const;
   LayerOutput makeWaiting(double now_s, StopReason reason);
 
+  std::vector<ArcCandidate> candidates_;
+  std::optional<ArcCandidate> selected_candidate_;
   AvoidParameters parameters_;
   bool is_avoiding_{false};
   std::optional<double> release_since_s_;
   std::optional<double> waiting_since_s_;
   double previous_curvature_per_m_{0.0};
+  double rotation_sign_{-1.0};
 };
 
 }  // namespace lightnav_controller

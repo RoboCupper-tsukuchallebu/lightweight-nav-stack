@@ -15,7 +15,7 @@ ArbitrationResult makeAdopted(const LayerOutput& output, Layer layer) {
   result.twist = output.twist;
   result.is_hard_stop = false;
   result.source_layer = layer;
-  result.reason = StopReason::kOk;
+  result.reason = output.reason;
   return result;
 }
 
@@ -25,8 +25,11 @@ ArbitrationResult arbitrate(const ArbitrationInput& input) {
   if (!input.is_pose_fresh) {
     return makeStop(StopReason::kPoseStale);
   }
+  if (input.follow.reason == StopReason::kObstacleStale) {
+    return makeStop(StopReason::kObstacleStale);
+  }
   if (input.avoid.is_asserted && input.is_grid_fresh) {
-    if (input.avoid.reason != StopReason::kOk) {
+    if (input.avoid.reason != StopReason::kOk && input.avoid.twist.angular_rps == 0.0) {
       // Avoid layer is waiting (no feasible arc / stuck): hold still and say why.
       ArbitrationResult waiting = makeStop(input.avoid.reason);
       waiting.source_layer = Layer::kAvoid;
