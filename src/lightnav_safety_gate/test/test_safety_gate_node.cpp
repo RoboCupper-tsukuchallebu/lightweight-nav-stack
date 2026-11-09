@@ -521,3 +521,15 @@ TEST_F(SafetyGateNodeTest, parameterServiceValidatesEachValueSeparately)
   EXPECT_DOUBLE_EQ(gate_->get_parameter("v_max").as_double(), 0.4);
   EXPECT_DOUBLE_EQ(gate_->get_parameter("w_max").as_double(), 0.6);
 }
+
+TEST_F(SafetyGateNodeTest, logsAcceptedAndRejectedChanges)
+{
+  testing::internal::CaptureStderr();
+  const auto accepted = gate_->set_parameter(rclcpp::Parameter("v_max", 0.4));
+  const auto rejected = gate_->set_parameter(rclcpp::Parameter("v_max", 2.0));
+  const auto output = testing::internal::GetCapturedStderr();
+  EXPECT_TRUE(accepted.successful);
+  EXPECT_FALSE(rejected.successful);
+  EXPECT_NE(output.find("parameter changed: v_max"), std::string::npos);
+  EXPECT_NE(output.find("parameter rejected: v_max"), std::string::npos);
+}
