@@ -267,12 +267,12 @@ struct Localizer::Implementation {
     submap_rebuild_time_ms = elapsed_ms(start);
   }
 
-  static MapTargetBuild build_map_target(const PointList& all_points, const Eigen::Vector2d& center) {
+  MapTargetBuild build_map_target(const PointList& all_points, const Eigen::Vector2d& center) {
     PointList cropped;
     for (const auto& point : all_points) {
       if ((point.head<2>().cast<double>() - center).norm() <= kMapSubmapRadiusM) cropped.push_back(point);
     }
-    return {PreparedTarget(cropped), center};
+    return {PreparedTarget(cropped, parameters.map_matcher), center};
   }
 
   // The first target is built synchronously; later rebuilds (every 50 m) run on a worker thread so

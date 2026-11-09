@@ -1217,6 +1217,20 @@ TEST_F(LocalizationNodeTest, ConfigureFailsWithInvalidGnssInputParameters) {
   EXPECT_EQ(node_->configure().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED);
 }
 
+TEST_F(LocalizationNodeTest, ConfigureRejectsInvalidMapMatcherParameters) {
+  for (const auto& parameter : {rclcpp::Parameter("map_match_method", "invalid"),
+                                rclcpp::Parameter("map_vgicp_voxel_m", 0.0),
+                                rclcpp::Parameter("map_vgicp_coarse_voxel_m", -1.0),
+                                rclcpp::Parameter("map_vgicp_coarse_correspondence_m", 0.0),
+                                rclcpp::Parameter("map_max_correspondence_distance_m", 0.0)}) {
+    auto options = make_gnss_options(-1, 0.0);
+    options.append_parameter_override(parameter.get_name(), parameter.get_parameter_value());
+    create_node(options);
+    EXPECT_EQ(node_->configure().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED);
+    close_node();
+  }
+}
+
 TEST_F(LocalizationNodeTest, WheelSlipDeclaredDefaultsAreDisabled) {
   create_node(make_options(map_file_.string(), map_yaml_.string()));
   EXPECT_DOUBLE_EQ(node_->get_parameter("lidar_odom_slip_gate_yaw_rad").as_double(), 0.0);
@@ -1240,6 +1254,7 @@ TEST_F(LocalizationNodeTest, ConfigureFailsWithInvalidWheelSlipParameters) {
   for (const auto& parameter : invalid_parameters) {
     SCOPED_TRACE(parameter.get_name());
     rclcpp::NodeOptions options = make_options(map_file_.string(), map_yaml_.string());
+
     options.append_parameter_override(parameter.get_name(), parameter.get_parameter_value());
     create_node(options);
     EXPECT_EQ(node_->configure().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED);
