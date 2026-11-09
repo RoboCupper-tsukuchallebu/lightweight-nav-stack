@@ -38,7 +38,7 @@ tools/bag_replay/run_replay.sh --build --bag ~/bags/<bag のディレクトリ> 
 | `--params-file` | `/ws/config/localization_indoor.yaml` | 室内（GNSS なし）。屋外は `/ws/config/robot.yaml` |
 | `--node-param NAME:=VALUE` | | ノードの追加パラメータ（繰り返し可） |
 | `--foxglove` / `--foxglove-port` | なし / 8765 | `foxglove_bridge` を起動しポートを公開する |
-| `--foxglove-bind` | 全インターフェース | `run_replay.sh` のみ。ポートを公開するホスト側アドレス |
+| `--foxglove-bind` | 0.0.0.0 | `run_replay.sh` のみ。ポートを公開するホスト側アドレス（`127.0.0.1` にして SSH トンネルで繋ぐこともできる） |
 | `--hold-seconds` | 0 | 再生後、保存の前にこの秒数だけノードと bridge を生かす（Foxglove で見る時間） |
 
 出力（`--out`）: `map/`、`map_topdown.png`、`summary.json`（keyframes・map_points・bbox・path_length・scan_ms の p50/p95/max・

@@ -20,7 +20,6 @@ import math
 import os
 import shutil
 import signal
-import socket
 import struct
 import subprocess
 import sys
@@ -211,7 +210,7 @@ def start_node(arguments, out_directory, log_file):
 
 def start_foxglove(arguments, log_file):
     command = ["ros2", "run", "foxglove_bridge", "foxglove_bridge", "--ros-args",
-               "-p", f"port:={arguments.foxglove_port}", "-p", f"address:={socket.inet_ntoa(bytes(4))}", "-p", "use_sim_time:=true"]
+               "-p", f"port:={arguments.foxglove_port}", "-p", "address:=0.0.0.0", "-p", "use_sim_time:=true"]
     process = subprocess.Popen(command, stdout=log_file, stderr=subprocess.STDOUT)
     time.sleep(FOXGLOVE_START_WAIT_S)
     if process.poll() is not None:

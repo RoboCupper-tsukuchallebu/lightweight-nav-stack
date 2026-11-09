@@ -4,8 +4,8 @@
 #   tools/bag_replay/run_replay.sh --bag ~/bags/drive-xxx --out ~/work/run1 [--build] [--image TAG] \
 #       [replay_session.py options: --mode --rate --start-offset --duration --foxglove --foxglove-port ...]
 #
-# --foxglove publishes the port (default 8765) on all host interfaces unless --foxglove-bind is given.
-# The bridge has no authentication.
+# --foxglove publishes the port (default 8765) of the container on --foxglove-bind (default 0.0.0.0: every interface of the
+# host; use 127.0.0.1 with an SSH tunnel). The bridge has no authentication.
 # The container has its own network namespace (no --network host) and ROS_DOMAIN_ID=61.
 set -euo pipefail
 
@@ -14,7 +14,7 @@ bag_directory=""
 out_directory=""
 should_build=false
 foxglove_port=8765
-foxglove_bind_address=
+foxglove_bind_address=0.0.0.0
 should_publish_port=false
 session_arguments=()
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -42,11 +42,7 @@ fi
 
 port_arguments=()
 if [ "$should_publish_port" = true ]; then
-  if [ -n "$foxglove_bind_address" ]; then
-    port_arguments=(-p "${foxglove_bind_address}:${foxglove_port}:${foxglove_port}")
-  else
-    port_arguments=(-p "${foxglove_port}:${foxglove_port}")
-  fi
+  port_arguments=(-p "${foxglove_bind_address}:${foxglove_port}:${foxglove_port}")
 fi
 
 # --user: the files in --out belong to the caller. MPLCONFIGDIR: matplotlib needs a writable directory.
