@@ -1,7 +1,7 @@
 # lightnav_obstacle_monitor
 
 3D LiDAR (`PointCloud2`) と任意の 2D LiDAR (`LaserScan`、`scan_topic` が空なら無効) から、
-車体周りの局所グリッド `/lightnav/local_grid` と `/lightnav/obstacle_status` を出す lifecycle ノード。
+車体周りの膨張済み格子 `/lightnav/local_grid`、未膨張格子 `/lightnav/local_grid_raw` と `/lightnav/obstacle_status` を出す lifecycle ノード。両格子は同じ周期・stamp・frame・格子形状で、占有値は 0/100。
 仕様は Issue #1 の契約節が正。
 
 - 3D: 点数が `min_points_per_cell` 以上で、セル内の z の最大 − 最小、または近傍との段差が `height_diff_threshold_m` を超えたセルを占有にする。段差は、中心間のユークリッド距離が `step_neighbor_radius_m` 以下の他セルのうち点数条件を満たすセルの最小 z を G とし、対象セルの最大 z − G で判定する。近傍がなければ段差判定では占有にしない。高い側だけを占有にする。既定値では 10 度の一様な坂や 10 cm の縁石は占有にしない。
@@ -53,4 +53,4 @@ LiDAR 高さ 0.7 m、80×80 セル、`step_neighbor_radius_m = 0.5`。ctest の�
 
 近傍の最小 z を基準にするので、点数条件を満たす近傍セルの低い外れ値 1 点で半径内のセルが占有になり得る（止まる側の誤り）。
 
-入力が途絶している間は `/lightnav/local_grid` を publish しない（controller の `grid_timeout_s` を発火させるため）。status だけを 10 Hz で出し続ける。
+入力が途絶している間は両方の格子を publish しない（controller の `grid_timeout_s` を発火させるため）。status だけを 10 Hz で出し続ける。

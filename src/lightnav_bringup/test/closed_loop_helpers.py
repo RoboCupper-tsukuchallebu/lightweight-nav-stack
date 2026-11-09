@@ -77,10 +77,9 @@ class ClosedLoopTest(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        if any(item.state == FollowStatus.BLOCKED for item in cls.status):
-            print("TRACE monotonic_s x_m y_m state layer selected_arc_id", flush=True)
-            for row in cls.trace:
-                print("TRACE", *row, flush=True)
+        print("TRACE monotonic_s x_m y_m state layer selected_arc_id", flush=True)
+        for row in cls.trace:
+            print("TRACE", *row, flush=True)
         cls.action.destroy()
         cls.node.destroy_node()
         rclpy.shutdown()

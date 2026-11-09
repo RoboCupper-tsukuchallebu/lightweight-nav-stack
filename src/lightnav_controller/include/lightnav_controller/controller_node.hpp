@@ -403,7 +403,8 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
     grid.cells = message.data;
     if (grid.resolution_m <= 0.0 || grid.width_cells == 0 || grid.height_cells == 0 ||
         grid.cells.size() != grid.width_cells * grid.height_cells ||
-        std::any_of(grid.cells.begin(), grid.cells.end(), [](auto cell) { return cell != 0 && cell != 100; })) {
+        (raw && std::any_of(grid.cells.begin(), grid.cells.end(),
+                            [](auto cell) { return cell != 0 && cell != 100; }))) {
       RCLCPP_WARN(get_logger(), "ignored malformed local_grid");
       destination.reset();
       return;
