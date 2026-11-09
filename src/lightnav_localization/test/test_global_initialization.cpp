@@ -105,3 +105,22 @@ TEST(GlobalInitializationSearch, RejectsSymmetricRoomThroughSearch) {
   EXPECT_FALSE(result.decision.accepted);
   EXPECT_EQ(result.decision.error, "ambiguous");
 }
+
+TEST(GlobalInitializationSearch, RejectsWhenCandidateBudgetExpires) {
+  PointList map;
+  PointList scan;
+  for (int index = 0; index < 30; ++index) {
+    const float x = static_cast<float>(index) * 0.1f;
+    map.emplace_back(x, 0.0f, 0.0f);
+    map.emplace_back(x, 0.0f, 1.0f);
+    scan.emplace_back(x + 0.1f, 1.0f, 1.0f);
+  }
+  GlobalInitializationSearchParameters parameters;
+  parameters.minimum = {1.0, 1.0};
+  parameters.maximum = {1.5, 1.5};
+  parameters.maximum_range_m = 3.0;
+  parameters.minimum_scan_points = 1;
+  parameters.candidate_budget = 1;
+  std::atomic<bool> abort{false};
+  EXPECT_EQ(search_global_initialization(map, scan, parameters, abort).decision.error, "time_budget");
+}
