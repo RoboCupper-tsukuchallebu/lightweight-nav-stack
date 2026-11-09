@@ -508,6 +508,31 @@ TEST_F(SafetyGateNodeTest, configureRejectsStartupLimitAboveFiniteCeiling)
   executor_.add_node(gate_->get_node_base_interface());
 }
 
+TEST_F(SafetyGateNodeTest, configureAcceptsStartupLimitsAtOrBelowFiniteCeilings)
+{
+  executor_.remove_node(gate_->get_node_base_interface());
+  gate_->shutdown();
+  for (const auto & overrides : {
+      std::vector<rclcpp::Parameter>{rclcpp::Parameter("v_max", 0.5),
+        rclcpp::Parameter("v_max_ceiling", 0.5), rclcpp::Parameter("w_max", 0.4),
+        rclcpp::Parameter("w_max_ceiling", 0.5)},
+      std::vector<rclcpp::Parameter>{rclcpp::Parameter("v_max", 0.4),
+        rclcpp::Parameter("v_max_ceiling", 0.5), rclcpp::Parameter("w_max", 0.5),
+        rclcpp::Parameter("w_max_ceiling", 0.5)}})
+  {
+    rclcpp::NodeOptions options;
+    options.parameter_overrides(overrides);
+    gate_ = std::make_shared<lightnav_safety_gate::SafetyGateNode>(options);
+
+    const auto state = gate_->configure();
+
+    EXPECT_EQ(state.id(), lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE);
+    gate_->shutdown();
+  }
+  gate_ = std::make_shared<lightnav_safety_gate::SafetyGateNode>();
+  executor_.add_node(gate_->get_node_base_interface());
+}
+
 TEST_F(SafetyGateNodeTest, cleanupDoesNotRaiseCeiling)
 {
   activate();
