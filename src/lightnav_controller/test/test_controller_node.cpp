@@ -403,3 +403,26 @@ TEST(RawGridMatching, RejectsStaleMismatchedAndInvalidGeometry) {
   raw.origin_x_m = 1.0;
   EXPECT_FALSE(lightnav_controller::rawGridMatches(grid, raw, true, 0.1, 0.5));
 }
+
+TEST(RawGridMatching, BufferMatchesEitherDeliveryOrderAndEvictsOldFrames) {
+  lightnav_controller::RawGridBuffer buffer;
+  lightnav_controller::ReceivedGrid inflated;
+  inflated.received_at = rclcpp::Time(1000000000LL);
+  inflated.stamp.sec = 1;
+  auto raw = inflated;
+  // Inflated arriving first has no matching raw until the raw frame arrives.
+  EXPECT_EQ(buffer.match(inflated, inflated.received_at, 1.0), nullptr);
+  buffer.push(raw);
+  EXPECT_NE(buffer.match(inflated, inflated.received_at, 1.0), nullptr);
+  // A newer raw frame must not hide the matching previous frame.
+  raw.stamp.sec = 2;
+  buffer.push(raw);
+  EXPECT_NE(buffer.match(inflated, inflated.received_at, 1.0), nullptr);
+  inflated.stamp.sec = 9;
+  EXPECT_EQ(buffer.match(inflated, inflated.received_at, 1.0), nullptr);
+  for (int i = 3; i <= 5; ++i) { raw.stamp.sec = i; buffer.push(raw); }
+  inflated.stamp.sec = 1;
+  EXPECT_EQ(buffer.match(inflated, inflated.received_at, 1.0), nullptr);
+  inflated.stamp.sec = 5;
+  EXPECT_EQ(buffer.match(inflated, rclcpp::Time(3000000000LL), 1.0), nullptr);
+}

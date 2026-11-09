@@ -27,4 +27,4 @@ ros2 launch lightnav_bringup robot.launch.py [safety_gate:=true|false] [robot_co
 
 H と footprint は中心 (4.0, 0.3)、半径 0.5 m の円障害物を使う。B は壁の前で停止域に入る場合、0.5 秒以内に停止することを確認する。停止域の占有または BLOCKED を確認し、障害物除去後の再開を検証する。いずれも `robot.yaml` の速度と膨張半径 0.3 m を使う。起動時に lifecycle の再要求が必要だった場合は試験を失敗させる。
 
-2026-11-10 のビルド機での検証: 4 パッケージの `dev.sh test` は controller 100/100、obstacle monitor 58/58、sim 34/34、bringup 6/7。bringup の B は起動時の lifecycle 再要求（#82）で失敗し、H と footprint は成功した。単独反復は H 2/3（1 回は #82）、footprint 3/3、B 2/3（1 回は停止条件待ちの 180 秒タイムアウト）。B のタイムアウト時は位置 (2.245, -0.253) m、経路逸脱 1.179 m、回避層の速度指令 0.25 m/s で、原因は未確定。失敗時の調査用に時刻・位置・状態・選択円弧を記録する。記録を全回出す変更後の B の追加 1 回は成功し、失敗の原因は再現できなかった。
+2026-11-10 のビルド機での増分試験: obstacle monitor 58/58、controller 101/101、sim 34/34、bringup 6/7。H と footprint は成功したが、B は走行前に planner が inactive のままになり、lifecycle の再要求が必要だったため失敗した（#82）。planner は単調時計 327627.658 秒で inactive、再要求後の 327632.777 秒に activating へ遷移した。起動停滞の根本原因は未確定。今回の変更後の単独 6 回反復は未実施で、B の 180 秒タイムアウトと footprint の走行中 BLOCKED の原因も未確定。試験ログには各状態受信時の位置、状態、選択円弧、停止域、速度指令、最新の各格子の stamp と占有数を記録する。試験側で観測した最新 stamp の一致は、コントローラの実際の格子選択やフォールバックを示すものではない。

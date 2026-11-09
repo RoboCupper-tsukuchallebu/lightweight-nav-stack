@@ -7,6 +7,8 @@ import launch_testing.actions
 import rclpy
 from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import PoseStamped, Twist
+from nav_msgs.msg import OccupancyGrid
+from lifecycle_msgs.msg import TransitionEvent
 from visualization_msgs.msg import MarkerArray
 from launch import LaunchDescription
 from launch.actions import IncludeLaunchDescription
@@ -44,13 +46,32 @@ class ClosedLoopTest(unittest.TestCase):
         cls.lifecycle_recoveries = []
         cls.trace = []
         cls.selected_arc = None
-        cls.last_trace_time = 0.0
+        cls.grids = {}
+        cls.lifecycle_events = []
         cls.node.create_subscription(PoseStamped, "/lightnav/pose", cls.poses.append, 10)
         cls.node.create_subscription(FollowStatus, "/lightnav/follow_status", cls.record_status, 10)
         cls.node.create_subscription(MarkerArray, "/lightnav/controller/arc_candidates", cls.record_arcs, 10)
         cls.node.create_subscription(ObstacleStatus, "/lightnav/obstacle_status", cls.record_obstacle, 10)
         cls.node.create_subscription(Twist, "/cmd_vel", cls.record_command, 10)
+        for topic in ("/lightnav/local_grid", "/lightnav/local_grid_raw"):
+            cls.node.create_subscription(OccupancyGrid, topic,
+                                         lambda msg, name=topic: cls.record_grid(name, msg), 10)
+        for name in ("obstacle_monitor", "pose_adapter_node", "planner_node", "lightnav_mission",
+                     "controller_node", "safety_gate_node"):
+            cls.node.create_subscription(TransitionEvent, f"/{name}/transition_event",
+                                         lambda msg, node=name: cls.record_transition(node, msg), 10)
         cls.action = ActionClient(cls.node, FollowWaypoints, "/lightnav/mission/follow_waypoints")
+
+    @classmethod
+    def record_grid(cls, name, message):
+        stamp = (message.header.stamp.sec, message.header.stamp.nanosec)
+        cls.grids[name] = (stamp, sum(value > 0 for value in message.data))
+
+    @classmethod
+    def record_transition(cls, name, message):
+        row = (time.monotonic(), name, message.start_state.label, message.goal_state.label)
+        cls.lifecycle_events.append(row)
+        print("LIFECYCLE", *row, flush=True)
 
     @classmethod
     def record_arcs(cls, message):
@@ -61,10 +82,16 @@ class ClosedLoopTest(unittest.TestCase):
     def record_status(cls, message):
         cls.status.append(message)
         now = time.monotonic()
-        if cls.poses and (now - cls.last_trace_time >= 0.5 or message.state == FollowStatus.BLOCKED):
+        if cls.poses:
             pose = cls.poses[-1].pose.position
-            cls.trace.append((now, pose.x, pose.y, message.state, message.active_layer, cls.selected_arc))
-            cls.last_trace_time = now
+            inflated = cls.grids.get("/lightnav/local_grid")
+            raw = cls.grids.get("/lightnav/local_grid_raw")
+            obstacle = cls.obstacles[-1].is_stop_zone_occupied if cls.obstacles else None
+            command = cls.commands[-1][1] if cls.commands else None
+            cls.trace.append((now, pose.x, pose.y, message.state, message.active_layer, cls.selected_arc,
+                              obstacle, command.linear.x if command else None,
+                              command.angular.z if command else None, inflated, raw,
+                              bool(inflated and raw and inflated[0] == raw[0])))
 
     @classmethod
     def record_obstacle(cls, message):
@@ -77,7 +104,7 @@ class ClosedLoopTest(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        print("TRACE monotonic_s x_m y_m state layer selected_arc_id", flush=True)
+        print("TRACE monotonic_s x_m y_m state layer selected_arc_id stop_occupied linear angular inflated_stamp_count raw_stamp_count latest_stamps_match", flush=True)
         for row in cls.trace:
             print("TRACE", *row, flush=True)
         cls.action.destroy()
@@ -109,6 +136,7 @@ class ClosedLoopTest(unittest.TestCase):
                 future = client.call_async(GetState.Request())
                 self.wait_for(future.done, 10.0)
                 state = future.result().current_state
+                print(f"LIFECYCLE_POLL {time.monotonic():.6f} {name} {state.label}", flush=True)
                 if state.id == State.PRIMARY_STATE_ACTIVE:
                     break
                 if time.monotonic() >= recovery_after and state.id in (
