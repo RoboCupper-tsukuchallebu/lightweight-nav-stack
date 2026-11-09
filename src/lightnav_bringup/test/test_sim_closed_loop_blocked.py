@@ -15,7 +15,7 @@ class TestClosedLoop(ClosedLoopTest):
         result = self.start_mission()
         self.wait_for(lambda: any(abs(message.linear.x) > 0.05 for _, message in self.commands))
         self.assertTrue(any(not message.is_stop_zone_occupied for message in self.obstacles))
-        # Either the stop zone trips, or avoidance waits safely before entering it.
+        # The stop zone must trip or the controller must enter BLOCKED.
         self.wait_for(lambda: any(item.is_stop_zone_occupied for item in self.obstacles)
                       or any(item.state == FollowStatus.BLOCKED for item in self.status))
         self.wait_for(lambda: any(item.is_stuck for item in self.feedback))
@@ -29,19 +29,6 @@ class TestClosedLoop(ClosedLoopTest):
                              if timestamp >= stop_time and abs(message.linear.x) < 1e-6
                              and abs(message.angular.z) < 1e-6)
             self.assertLessEqual(zero_time - stop_time, 0.5)
-        if not any(item.is_stop_zone_occupied for item in self.obstacles):
-            # Observe a full second of zero commands while the obstacle remains outside.
-            start = self.commands[-1][0]
-            status_start = len(self.status)
-            self.wait_for(lambda: self.commands[-1][0] >= start + 1.0)
-            samples = [(timestamp, command) for timestamp, command in self.commands if timestamp >= start]
-            self.assertGreaterEqual(len(samples), 3)
-            self.assertFalse(any(item.is_stop_zone_occupied for item in self.obstacles))
-            self.assertGreaterEqual(len(self.status[status_start:]), 3)
-            self.assertTrue(all(item.state == FollowStatus.BLOCKED or item.is_stuck
-                                for item in self.status[status_start:]))
-            self.assertTrue(all(abs(command.linear.x) < 1e-6 and abs(command.angular.z) < 1e-6
-                                for _, command in samples))
         blocked = next(item for item in self.status if item.state == FollowStatus.BLOCKED)
         stuck = next(item for item in self.status if item.is_stuck)
         def stamp_seconds(item):

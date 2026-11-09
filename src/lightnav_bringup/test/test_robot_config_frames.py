@@ -36,4 +36,6 @@ def test_controller_uses_obstacle_monitor_geometry():
     specification.loader.exec_module(robot_launch)
     assert robot_launch.controller_obstacle_parameters({}) == {}
     configured = {"stop_zone_x_m": 0.3, "stop_zone_y_half_m": 0.6, "inflation_radius_m": 0.3}
-    assert robot_launch.controller_obstacle_parameters(configured) == configured
+    assert robot_launch.controller_obstacle_parameters(configured) == {
+        "stop_zone_x_m": 0.3, "stop_zone_y_half_m": 0.6
+    }

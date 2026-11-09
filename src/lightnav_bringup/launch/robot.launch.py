@@ -69,7 +69,7 @@ def build_lifecycle_entities(package, executable, node_name, robot_config):
 def controller_obstacle_parameters(monitor_parameters):
     # Pass only explicit monitor configuration; the controller owns fallback values.
     return {name: float(monitor_parameters[name]) for name in (
-        "stop_zone_x_m", "stop_zone_y_half_m", "inflation_radius_m") if name in monitor_parameters}
+        "stop_zone_x_m", "stop_zone_y_half_m") if name in monitor_parameters}
 
 
 def launch_setup(context, *args, **kwargs):

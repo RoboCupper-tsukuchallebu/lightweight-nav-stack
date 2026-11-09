@@ -56,7 +56,6 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
     declare_parameter("control_hz", 20.0, structural);
     declare_parameter("stop_zone_x_m", 1.0, structural);
     declare_parameter("stop_zone_y_half_m", 0.4, structural);
-    declare_parameter("inflation_radius_m", 0.3, structural);
     declare_parameter("arc_markers_rate_hz", 2.0, structural);
     declare_parameter("lookahead_m", 1.0);
     declare_parameter("search_window_m", 5.0);
@@ -130,11 +129,6 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
                      name.c_str(), value);
         return CallbackReturn::FAILURE;
       }
-    }
-    const double inflation_radius_m = get_parameter("inflation_radius_m").as_double();
-    if (!std::isfinite(inflation_radius_m) || inflation_radius_m < 0.0) {
-      RCLCPP_ERROR(get_logger(), "parameter inflation_radius_m must be finite and nonnegative");
-      return CallbackReturn::FAILURE;
     }
     FollowParameters follow_parameters;
     follow_parameters.lookahead_m = get_parameter("lookahead_m").as_double();

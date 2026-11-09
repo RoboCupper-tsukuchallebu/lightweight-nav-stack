@@ -492,7 +492,7 @@ TEST(EvaluateArcCandidates, RawFootprintCycleTiming) {
   const double mean_ms = std::chrono::duration<double, std::milli>(
       std::chrono::steady_clock::now() - start).count() / 1000;
   std::cout << "raw footprint cycle mean_ms=" << mean_ms << std::endl;
-  EXPECT_LT(mean_ms, 50.0);
+  EXPECT_LT(mean_ms, 10.0);
 }
 
 TEST(ArcAvoidLayer, ConservativeUpdatePreservesAvoidanceAndReleaseTimer) {
