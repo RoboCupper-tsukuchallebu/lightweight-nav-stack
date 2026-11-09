@@ -9,7 +9,8 @@
 #   scripts/dev.sh down  <name>              remove the container and its build/install/log volumes
 #
 # The repository is bind-mounted read-write at /ws; build/, install/ and log/ are named volumes, so they survive
-# between commands and never land in the working tree. No --network host: tests run on domain 44 inside the
+# between commands (on Linux, empty root-owned build/, install/ and log/ mount points appear in the tree; they are
+# in .gitignore). No --network host: tests run on domain 44 inside the
 # container only, so several branches can be tested on one machine at the same time.
 set -euo pipefail
 
@@ -26,12 +27,22 @@ base_image="lightnav:dev-base"
 cmake_arguments=(-DCMAKE_BUILD_TYPE=Release -DCMAKE_MODULE_PATH=/usr/share/cmake/geographiclib)
 
 in_container() { docker exec "$container" bash -c ". /opt/ros/jazzy/setup.sh && cd /ws && $1"; }
+for package in "$@"; do
+  case "$package" in *[!a-z0-9_]*|'') echo "dev.sh: invalid package name: $package" >&2; exit 2;; esac
+done
 package_arguments() { [ "$#" -eq 0 ] || printf -- '--packages-up-to %s' "$*"; }
 
 case "$command_name" in
   up)
     docker build -q -f "$repository_root/docker/Dockerfile" --target base -t "$base_image" "$repository_root" >/dev/null
-    if ! docker inspect "$container" >/dev/null 2>&1; then
+    if docker inspect "$container" >/dev/null 2>&1; then
+      mounted=$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/ws"}}{{.Source}}{{end}}{{end}}' "$container")
+      if [ "$mounted" != "$repository_root" ]; then
+        echo "dev.sh: $container mounts $mounted, not $repository_root; run 'scripts/dev.sh down $name' first" >&2
+        exit 1
+      fi
+      docker start "$container" >/dev/null
+    else
       docker run -d --name "$container" --shm-size=1g \
         -v "$repository_root:/ws" \
         -v "${container}-build:/ws/build" -v "${container}-install:/ws/install" -v "${container}-log:/ws/log" \
@@ -48,7 +59,7 @@ case "$command_name" in
     [ "$#" -ge 1 ] || { echo "dev.sh: give the packages to test" >&2; exit 2; }
     in_container "colcon build --merge-install --packages-up-to $* --cmake-args ${cmake_arguments[*]} \
       && . install/setup.sh && colcon test --merge-install --executor sequential --packages-select $* \
-      --return-code-on-test-failure; status=\$?; colcon test-result --verbose --test-result-base build; exit \$status"
+      --return-code-on-test-failure; status=\$?; for package in $*; do colcon test-result --verbose --test-result-base build/\$package; done; exit \$status"
     ;;
   shell)
     docker exec -it "$container" bash
