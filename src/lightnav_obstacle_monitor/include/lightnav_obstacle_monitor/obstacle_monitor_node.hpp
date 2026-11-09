@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include <diagnostic_msgs/msg/diagnostic_array.hpp>
 #include <lightnav_msgs/msg/obstacle_status.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <rclcpp/rclcpp.hpp>
@@ -18,6 +19,7 @@
 #include <tf2_ros/transform_listener.h>
 
 #include "lightnav_obstacle_monitor/obstacle_grid.hpp"
+#include "lightnav_obstacle_monitor/obstacle_memory.hpp"
 
 namespace lightnav
 {
@@ -51,12 +53,19 @@ private:
   void handleWatchdog();
   std::optional<Eigen::Isometry3d> lookupBaseFromSensor(
     const std::string & sensorFrame, SensorState & state);
+  bool updateMemory(const ObstacleGrid & grid, const Eigen::Isometry3d & baseFromSensor,
+    SensorState & state);
   void publishResult(SteadyClock::time_point frameStart, bool shouldUpdateHysteresis);
   void releaseActiveResources();
 
   ObstacleMonitorParameters parameters_;
   GridGeometry geometry_{};
   std::string baseFrame_;
+  std::string memoryFrame_;
+  double blindRadiusMeters_, memoryMaxAgeSeconds_, jumpDistanceMeters_, jumpAngleRadians_;
+  std::optional<ObstacleMemory> memory_;
+  std::optional<Eigen::Isometry3d> worldFromBase_;
+  std::size_t jumpCount_ = 0;
   std::string pointsTopic_;
   std::string scanTopic_;
   double pointsTimeoutSeconds_ = 0.5;
@@ -77,6 +86,7 @@ private:
   rclcpp_lifecycle::LifecyclePublisher<lightnav_msgs::msg::ObstacleStatus>::SharedPtr
     statusPublisher_;
   rclcpp_lifecycle::LifecyclePublisher<nav_msgs::msg::OccupancyGrid>::SharedPtr gridPublisher_;
+  rclcpp_lifecycle::LifecyclePublisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr diagnosticPublisher_;
   rclcpp::TimerBase::SharedPtr watchdogTimer_;
 };
 

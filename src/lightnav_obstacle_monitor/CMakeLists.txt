@@ -11,6 +11,7 @@ find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(diagnostic_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
@@ -46,6 +47,7 @@ target_link_libraries(obstacle_monitor_node_lib PUBLIC
   rclcpp_lifecycle::rclcpp_lifecycle
   tf2_ros::tf2_ros
   tf2_eigen::tf2_eigen
+  diagnostic_msgs::diagnostic_msgs__rosidl_typesupport_cpp
   sensor_msgs::sensor_msgs__rosidl_typesupport_cpp
   nav_msgs::nav_msgs__rosidl_typesupport_cpp
   lightnav_msgs::lightnav_msgs__rosidl_typesupport_cpp)
@@ -59,7 +61,7 @@ if(BUILD_TESTING)
   # ament_add_gtest rebuilds the vendored gtest, which fails against the conda gtest headers
   # in the pixi environment. Link the installed GTest directly instead.
   find_package(GTest REQUIRED)
-  foreach(test_name test_obstacle_grid test_frame_processor test_freshness)
+  foreach(test_name test_obstacle_grid test_frame_processor test_freshness test_obstacle_memory)
     add_executable(${test_name} test/${test_name}.cpp)
     target_link_libraries(${test_name} obstacle_monitor_core GTest::gtest GTest::gtest_main)
     add_test(NAME ${test_name}

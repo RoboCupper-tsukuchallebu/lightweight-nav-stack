@@ -101,6 +101,9 @@ protected:
     transform.transform.rotation.w = 1.0;
     broadcaster_ = std::make_unique<tf2_ros::StaticTransformBroadcaster>(helper_);
     broadcaster_->sendTransform(transform);
+    transform.header.frame_id = "odom";
+    transform.child_frame_id = "base_link";
+    broadcaster_->sendTransform(transform);
   }
 
   // Three vertical columns 0.5 m ahead of the robot: inside the stop zone.
@@ -197,6 +200,21 @@ TEST_F(ObstacleMonitorNodeTest, MissingTransformIsReportedAsTfStale)
 {
   bringUp();
   ASSERT_TRUE(waitUntil([this] {return isStale(std::string("tf:") + kSensorFrame);}, true));
+  EXPECT_TRUE(lastStatus_.is_input_stale);
+  EXPECT_EQ(gridCount_, 0);
+}
+
+TEST_F(ObstacleMonitorNodeTest, MissingMemoryTransformIsReportedAsStale)
+{
+  bringUp();
+  geometry_msgs::msg::TransformStamped transform;
+  transform.header.stamp = helper_->now();
+  transform.header.frame_id = "base_link";
+  transform.child_frame_id = kSensorFrame;
+  transform.transform.rotation.w = 1.0;
+  broadcaster_ = std::make_unique<tf2_ros::StaticTransformBroadcaster>(helper_);
+  broadcaster_->sendTransform(transform);
+  ASSERT_TRUE(waitUntil([this] {return isStale("tf:odom");}, true));
   EXPECT_TRUE(lastStatus_.is_input_stale);
   EXPECT_EQ(gridCount_, 0);
 }
