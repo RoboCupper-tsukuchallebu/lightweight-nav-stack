@@ -267,7 +267,14 @@ LayerOutput ArcAvoidLayer::compute(const AvoidContext& context) {
     reset();  // follow layer reports AT_PATH_END
     return LayerOutput{};
   }
-  if (context.is_stop_zone_occupied || !context.is_obstacle_status_fresh || is_at_path_end) {
+  if (!context.is_obstacle_status_fresh) {
+    waiting_since_s_.reset();
+    LayerOutput output;
+    output.is_asserted = true;
+    output.reason = StopReason::kObstacleStale;
+    return output;
+  }
+  if (context.is_stop_zone_occupied || is_at_path_end) {
     return makeWaiting(context.now_s, context.is_obstacle_status_fresh
                                           ? StopReason::kBlocked
                                           : StopReason::kObstacleStale);
@@ -295,10 +302,15 @@ LayerOutput ArcAvoidLayer::compute(const AvoidContext& context) {
 LayerOutput ArcAvoidLayer::makeWaiting(double now_s, StopReason reason) {
   if (!waiting_since_s_.has_value()) {
     waiting_since_s_ = now_s;
+    rotation_sign_ = -rotation_sign_;
   }
   LayerOutput output;
   output.is_asserted = true;
-  output.reason = now_s - *waiting_since_s_ >= parameters_.stuck_timeout_s ? StopReason::kStuck : reason;
+  const double waiting_s = now_s - *waiting_since_s_;
+  output.reason = waiting_s >= parameters_.stuck_timeout_s ? StopReason::kStuck : reason;
+  if (output.reason == StopReason::kStuck && waiting_s >= parameters_.stuck_timeout_s + parameters_.stuck_rotate_after_s) {
+    output.twist.angular_rps = rotation_sign_ * parameters_.w_rotate_rps;
+  }
   return output;
 }
 

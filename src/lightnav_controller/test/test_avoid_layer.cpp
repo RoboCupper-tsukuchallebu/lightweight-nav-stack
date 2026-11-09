@@ -350,12 +350,13 @@ TEST_P(ArcAvoidClosedLoop, DetoursOffsetObstacleWithoutEnteringStopZoneAndRejoin
 
 INSTANTIATE_TEST_SUITE_P(ObstacleOffsets, ArcAvoidClosedLoop, ::testing::Values(0.0, 0.1, 0.2, 0.3));
 
-TEST(ArcAvoidLayer, NarrowCourseStopsBeforeCenteredObstacle) {
+TEST(ArcAvoidLayer, NarrowCourseReportsStuckAndDoesNotPassObstacle) {
   AvoidParameters parameters = makeAvoidParameters();
   parameters.arc_length_m = 2.0;
   parameters.max_path_deviation_m = 1.5;
   const ClosedLoopResult result = runClosedLoop(parameters, Point2D{6.0, 0.0});
-  EXPECT_FALSE(result.did_enter_stop_zone);
+  // The gate prevents movement once recovery points the stop zone at the obstacle.
+  EXPECT_TRUE(result.did_enter_stop_zone);
   EXPECT_TRUE(result.did_report_stuck);
   EXPECT_LE(result.max_deviation_m, parameters.max_path_deviation_m);
   EXPECT_LT(result.final_pose.x_m, 6.0);
@@ -526,4 +527,106 @@ TEST(ArcAvoidLayer, FeasibleArcDoesNotDetectLackOfProgress) {
     EXPECT_EQ(result.reason, StopReason::kOk);
     EXPECT_DOUBLE_EQ(result.twist.linear_mps, 0.25);
   }
+}
+
+TEST(ArcAvoidLayer, RotatesAfterStuckDelayAndResumesWhenArcIsFeasible) {
+  ArcAvoidLayer layer{makeAvoidParameters()};
+  const auto path = makeStraightPath();
+  LocalGrid wall = makeEmptyGrid();
+  fillRectangle(wall, 0.5, 0.7, -3.9, 3.9);
+  layer.compute(makeContext(path, &wall, 0.0));
+  EXPECT_DOUBLE_EQ(layer.compute(makeContext(path, &wall, 11.9)).twist.angular_rps, 0.0);
+  const auto rotating = layer.compute(makeContext(path, &wall, 12.0));
+  EXPECT_EQ(rotating.reason, StopReason::kStuck);
+  EXPECT_DOUBLE_EQ(rotating.twist.linear_mps, 0.0);
+  EXPECT_DOUBLE_EQ(std::fabs(rotating.twist.angular_rps), 0.3);
+  const auto free_grid = makeEmptyGrid();
+  const auto resumed = layer.compute(makeContext(path, &free_grid, 12.1));
+  EXPECT_EQ(resumed.reason, StopReason::kOk);
+  EXPECT_GT(resumed.twist.linear_mps, 0.0);
+  auto stale = makeContext(path, &wall, 13.0);
+  stale.is_obstacle_status_fresh = false;
+  EXPECT_EQ(layer.compute(stale).reason, StopReason::kObstacleStale);
+  EXPECT_DOUBLE_EQ(layer.compute(stale).twist.angular_rps, 0.0);
+}
+
+TEST(ArcAvoidLayer, ClosedLoopStuckRotationKeepsDirectionUntilWallClears) {
+  auto parameters = makeAvoidParameters();
+  parameters.max_path_deviation_m = 0.1;
+  FollowLayer follow{FollowParameters{}};
+  ASSERT_TRUE(follow.tryAcceptPath(1, 1, makeStraightPath()));
+  ArcAvoidLayer avoid{parameters};
+  Pose2D pose{};
+  double rotation_sign = 0.0;
+  bool exceeded_seventy_degrees = false;
+  bool resumed = false;
+  for (int step = 0; step < 800; ++step) {
+    LocalGrid grid = makeEmptyGrid();
+    if (step < 400) {
+      // A world-fixed wall spans the whole course; transform it into the body grid.
+      for (std::size_t row = 0; row < grid.height_cells; ++row) {
+        for (std::size_t column = 0; column < grid.width_cells; ++column) {
+          const double body_x = grid.origin_x_m + (column + 0.5) * grid.resolution_m;
+          const double body_y = grid.origin_y_m + (row + 0.5) * grid.resolution_m;
+          const double world_x = pose.x_m + std::cos(pose.yaw_rad) * body_x - std::sin(pose.yaw_rad) * body_y;
+          if (world_x >= 0.5 && world_x <= 0.8) grid.cells[row * grid.width_cells + column] = 100;
+        }
+      }
+    }
+    FollowInputs inputs;
+    inputs.is_obstacle_status_fresh = true;
+    const auto following = follow.compute(pose, inputs);
+    ArbitrationInput input;
+    input.is_pose_fresh = true;
+    input.is_grid_fresh = true;
+    input.follow = following.output;
+    input.avoid = avoid.compute(AvoidContext{pose, follow.pathPoints(), following.closest_index,
+        true, &grid, step * 0.05, following.remaining_distance_m, false, true});
+    const auto command = arbitrate(input);
+    if (step < 400 && command.reason == StopReason::kStuck && command.twist.angular_rps != 0.0) {
+      if (rotation_sign == 0.0) rotation_sign = command.twist.angular_rps;
+      EXPECT_GT(rotation_sign * command.twist.angular_rps, 0.0);
+      EXPECT_EQ(command.source_layer, Layer::kAvoid);
+    }
+    if (step < 400 && std::fabs(pose.yaw_rad) > 1.2217304764) exceeded_seventy_degrees = true;
+    if (step >= 400 && command.twist.linear_mps > 0.0) resumed = true;
+    pose.yaw_rad += command.twist.angular_rps * 0.05;
+    pose.x_m += std::cos(pose.yaw_rad) * command.twist.linear_mps * 0.05;
+    pose.y_m += std::sin(pose.yaw_rad) * command.twist.linear_mps * 0.05;
+  }
+  EXPECT_NE(rotation_sign, 0.0);
+  EXPECT_TRUE(exceeded_seventy_degrees);
+  EXPECT_TRUE(resumed);
+}
+
+TEST(ArcAvoidLayer, ClosedLoopAlignsToGoalBehindThenFollows) {
+  std::vector<Point2D> path;
+  for (int index = 0; index <= 80; ++index) path.push_back(Point2D{-0.25 * index, 0.0});
+  FollowLayer follow{FollowParameters{}};
+  ASSERT_TRUE(follow.tryAcceptPath(1, 1, path));
+  ArcAvoidLayer avoid{makeAvoidParameters()};
+  const LocalGrid grid = makeEmptyGrid();
+  Pose2D pose{};
+  bool rotated = false;
+  bool followed = false;
+  for (int step = 0; step < 400; ++step) {
+    FollowInputs inputs;
+    inputs.is_obstacle_status_fresh = true;
+    const auto following = follow.compute(pose, inputs);
+    ArbitrationInput input;
+    input.is_pose_fresh = true;
+    input.is_grid_fresh = true;
+    input.follow = following.output;
+    input.avoid = avoid.compute(AvoidContext{pose, follow.pathPoints(), following.closest_index,
+        true, &grid, step * 0.05, following.remaining_distance_m, false, true});
+    const auto command = arbitrate(input);
+    if (command.twist.linear_mps == 0.0 && command.twist.angular_rps != 0.0) rotated = true;
+    if (rotated && command.twist.linear_mps > 0.0) followed = true;
+    pose.yaw_rad += command.twist.angular_rps * 0.05;
+    pose.x_m += std::cos(pose.yaw_rad) * command.twist.linear_mps * 0.05;
+    pose.y_m += std::sin(pose.yaw_rad) * command.twist.linear_mps * 0.05;
+  }
+  EXPECT_TRUE(rotated);
+  EXPECT_TRUE(followed);
+  EXPECT_LT(pose.x_m, -1.0);
 }

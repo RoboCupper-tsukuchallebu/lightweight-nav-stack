@@ -212,3 +212,34 @@ TEST(FollowLayer, OneControlCycleIsFast) {
   std::printf("per cycle: %.4f ms\n", per_cycle_ms);
   EXPECT_LT(per_cycle_ms, 10.0);  // CI threshold; spec target is 2 ms incl. avoid layer (PR4)
 }
+
+TEST(FollowLayer, HeadingAlignmentHasHysteresisAndStaleStops) {
+  FollowLayer layer{FollowParameters{}};
+  layer.tryAcceptPath(1, 1, straightPath(20.0));
+  EXPECT_DOUBLE_EQ(layer.compute(Pose2D{0, 0, 1.3}, freshInputs()).output.twist.linear_mps, 0.0);
+  EXPECT_DOUBLE_EQ(layer.compute(Pose2D{0, 0, 1.1}, freshInputs()).output.twist.linear_mps, 0.0);
+  EXPECT_GT(layer.compute(Pose2D{0, 0, 0.9}, freshInputs()).output.twist.linear_mps, 0.0);
+  const auto stale = layer.compute(Pose2D{0, 0, 3.0}, FollowInputs{});
+  EXPECT_EQ(stale.output.reason, StopReason::kObstacleStale);
+  EXPECT_DOUBLE_EQ(stale.output.twist.angular_rps, 0.0);
+}
+
+TEST(FollowLayer, EmptyPausePathStopsAnActiveRotation) {
+  FollowLayer layer{FollowParameters{}};
+  layer.tryAcceptPath(1, 1, straightPath(20.0));
+  ASSERT_NE(layer.compute(Pose2D{0, 0, 3.0}, freshInputs()).output.twist.angular_rps, 0.0);
+  ASSERT_TRUE(layer.tryAcceptPath(1, 2, {}));
+  const auto stopped = layer.compute(Pose2D{0, 0, 3.0}, freshInputs());
+  EXPECT_EQ(stopped.output.reason, StopReason::kNoPath);
+  EXPECT_DOUBLE_EQ(stopped.output.twist.angular_rps, 0.0);
+}
+
+TEST(FollowLayer, CoincidentLookaheadDoesNotClaimPathEnd) {
+  FollowParameters parameters;
+  parameters.lookahead_m = 2.0;
+  FollowLayer layer{parameters};
+  ASSERT_TRUE(layer.tryAcceptPath(1, 1, {{0.0, 0.0}, {1.0, 0.0}, {0.0, 0.0}, {2.0, 0.0}}));
+  const auto result = layer.compute(Pose2D{0.0, 0.0, 0.0}, freshInputs());
+  EXPECT_GT(result.remaining_distance_m, parameters.goal_tolerance_m);
+  EXPECT_EQ(result.output.reason, StopReason::kBlocked);
+}

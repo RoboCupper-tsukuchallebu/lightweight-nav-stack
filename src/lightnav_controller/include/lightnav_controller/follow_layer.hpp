@@ -18,7 +18,7 @@ struct FollowParameters {
   double w_rotate_rps{0.3};
   double k_end_per_s{0.5};
   double goal_tolerance_m{0.3};
-  double rotate_in_place_heading_rad{1.0};
+  double rotate_in_place_heading_rad{1.2};
 };
 
 struct FollowInputs {
@@ -54,6 +54,7 @@ class FollowLayer {
 
  private:
   FollowParameters parameters_;
+  bool is_aligning_{false};
   std::uint32_t session_id_{0};
   std::uint32_t path_id_{0};
   std::vector<Point2D> path_points_;
