@@ -90,18 +90,32 @@ def find_node_executable():
     sys.exit("localization_node executable not found under AMENT_PREFIX_PATH")
 
 
+def merge_static_transforms(messages):
+    """One TFMessage with the newest transform of every (parent, child) pair; None when there are no messages."""
+    newest_by_pair = {}
+    for message in messages:
+        for transform in message.transforms:
+            newest_by_pair[(transform.header.frame_id, transform.child_frame_id)] = transform
+    if not newest_by_pair:
+        return None
+    return TFMessage(transforms=list(newest_by_pair.values()))
+
+
 def read_static_transforms(bag_directory):
-    """First /tf_static message of the bag (it is recorded once at the start), or None."""
+    """Every /tf_static message of the bag merged into one (several nodes may publish static TFs), or None.
+
+    Messages after --start-offset are played by `ros2 bag play` again; the duplicates are harmless."""
     import rosbag2_py
 
     reader = rosbag2_py.SequentialReader()
     reader.open(rosbag2_py.StorageOptions(uri=str(bag_directory), storage_id="mcap"),
                 rosbag2_py.ConverterOptions(input_serialization_format="cdr", output_serialization_format="cdr"))
     reader.set_filter(rosbag2_py.StorageFilter(topics=["/tf_static"]))
-    if not reader.has_next():
-        return None
-    _, serialized, _ = reader.read_next()
-    return deserialize_message(serialized, TFMessage)
+    messages = []
+    while reader.has_next():
+        _, serialized, _ = reader.read_next()
+        messages.append(deserialize_message(serialized, TFMessage))
+    return merge_static_transforms(messages)
 
 
 def percentile(sorted_values, fraction):
