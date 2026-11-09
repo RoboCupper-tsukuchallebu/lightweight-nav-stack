@@ -362,3 +362,46 @@ def test_large_correction_with_lost_pose_defers_instead_of_aborting(rig):
     assert mission._state.value != "IDLE"
     harness.is_pose_published = True
     assert wait_until(lambda: len(harness.planner_requests) == 2)
+
+
+def test_runtime_arrival_radius_applies_to_running_goal(rig):
+    mission, harness = rig
+    goal = harness.send_goal([1.5])
+    assert wait_until(lambda: harness.non_empty_paths())
+    result = mission.set_parameters_atomically([
+        Parameter("final_arrival_radius_m", value=2.0),
+        Parameter("v_progress_min", value=0.2),
+    ])
+    assert result.successful
+    assert harness.result_of(goal).result.success
+
+
+def test_safety_baseline_survives_cleanup(rig):
+    mission, _harness = rig
+    assert mission.set_parameters_atomically([Parameter("pose_timeout_s", value=0.2)]).successful
+    assert mission.trigger_deactivate() == TransitionCallbackReturn.SUCCESS
+    assert mission.trigger_cleanup() == TransitionCallbackReturn.SUCCESS
+    result = mission.set_parameters_atomically([Parameter("pose_timeout_s", value=0.6)])
+    assert not result.successful and result.reason
+    assert mission.trigger_configure() == TransitionCallbackReturn.SUCCESS
+    assert mission._mission_parameters["pose_timeout_s"] == 0.2
+
+
+def test_parameter_service_processes_values_individually(rig):
+    from rcl_interfaces.srv import SetParameters
+
+    mission, harness = rig
+    client = harness.create_client(SetParameters, "/lightnav_mission/set_parameters")
+    assert client.wait_for_service(timeout_sec=5.0)
+    request = SetParameters.Request()
+    request.parameters = [
+        Parameter("final_arrival_radius_m", value=2.0).to_parameter_msg(),
+        Parameter("pose_timeout_s", value=0.8).to_parameter_msg(),
+    ]
+    future = client.call_async(request)
+    assert wait_until(future.done)
+    results = future.result().results
+    assert results[0].successful
+    assert not results[1].successful and results[1].reason
+    assert mission._mission_parameters["final_arrival_radius_m"] == 2.0
+    assert mission._mission_parameters["pose_timeout_s"] == 0.5
