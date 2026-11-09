@@ -454,3 +454,24 @@ TEST(ArcAvoidLayer, ConservativeUpdatePreservesAvoidanceAndReleaseTimer) {
   EXPECT_FALSE(layer.compute(makeContext(path, &clear, 2.5)).is_asserted);
   EXPECT_FALSE(layer.isAvoiding());
 }
+
+TEST(ArcAvoidLayer, RotatesAfterStuckDelayAndResumesWhenArcIsFeasible) {
+  ArcAvoidLayer layer{makeAvoidParameters()};
+  const auto path = makeStraightPath();
+  LocalGrid wall = makeEmptyGrid();
+  fillRectangle(wall, 0.5, 0.7, -3.9, 3.9);
+  layer.compute(makeContext(path, &wall, 0.0));
+  EXPECT_DOUBLE_EQ(layer.compute(makeContext(path, &wall, 11.9)).twist.angular_rps, 0.0);
+  const auto rotating = layer.compute(makeContext(path, &wall, 12.0));
+  EXPECT_EQ(rotating.reason, StopReason::kStuck);
+  EXPECT_DOUBLE_EQ(rotating.twist.linear_mps, 0.0);
+  EXPECT_DOUBLE_EQ(std::fabs(rotating.twist.angular_rps), 0.3);
+  const auto free_grid = makeEmptyGrid();
+  const auto resumed = layer.compute(makeContext(path, &free_grid, 12.1));
+  EXPECT_EQ(resumed.reason, StopReason::kOk);
+  EXPECT_GT(resumed.twist.linear_mps, 0.0);
+  auto stale = makeContext(path, &wall, 13.0);
+  stale.is_obstacle_status_fresh = false;
+  EXPECT_EQ(layer.compute(stale).reason, StopReason::kObstacleStale);
+  EXPECT_DOUBLE_EQ(layer.compute(stale).twist.angular_rps, 0.0);
+}

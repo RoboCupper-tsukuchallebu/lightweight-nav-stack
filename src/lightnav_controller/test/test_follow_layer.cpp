@@ -212,3 +212,14 @@ TEST(FollowLayer, OneControlCycleIsFast) {
   std::printf("per cycle: %.4f ms\n", per_cycle_ms);
   EXPECT_LT(per_cycle_ms, 10.0);  // CI threshold; spec target is 2 ms incl. avoid layer (PR4)
 }
+
+TEST(FollowLayer, HeadingAlignmentHasHysteresisAndStaleStops) {
+  FollowLayer layer{FollowParameters{}};
+  layer.tryAcceptPath(1, 1, straightPath(20.0));
+  EXPECT_DOUBLE_EQ(layer.compute(Pose2D{0, 0, 1.3}, freshInputs()).output.twist.linear_mps, 0.0);
+  EXPECT_DOUBLE_EQ(layer.compute(Pose2D{0, 0, 1.1}, freshInputs()).output.twist.linear_mps, 0.0);
+  EXPECT_GT(layer.compute(Pose2D{0, 0, 0.9}, freshInputs()).output.twist.linear_mps, 0.0);
+  const auto stale = layer.compute(Pose2D{0, 0, 3.0}, FollowInputs{});
+  EXPECT_EQ(stale.output.reason, StopReason::kObstacleStale);
+  EXPECT_DOUBLE_EQ(stale.output.twist.angular_rps, 0.0);
+}

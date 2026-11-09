@@ -248,15 +248,15 @@ LayerOutput ArcAvoidLayer::compute(const AvoidContext& context) {
     output.reason = StopReason::kObstacleStale;
     return output;
   }
+  const auto best = selectBestCandidate(evaluateArcCandidates(
+      grid, context.pose, context.path_points, context.closest_index, previous_curvature_per_m_,
+      parameters_));
   if (context.is_stop_zone_occupied || is_at_path_end) {
     return makeWaiting(context.now_s, context.is_obstacle_status_fresh
                                           ? StopReason::kBlocked
                                           : StopReason::kObstacleStale);
   }
 
-  const auto best = selectBestCandidate(evaluateArcCandidates(
-      grid, context.pose, context.path_points, context.closest_index, previous_curvature_per_m_,
-      parameters_));
   LayerOutput output;
   output.is_asserted = true;
   if (best.has_value()) {

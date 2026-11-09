@@ -74,3 +74,22 @@ TEST(Arbitrate, WaitingAvoidLayerHoldsStillAndReportsItsReason) {
     EXPECT_DOUBLE_EQ(result.twist.linear_mps, 0.0);
   }
 }
+
+TEST(Arbitrate, StalePoseOrObstacleStopsRotation) {
+  ArbitrationInput input;
+  input.is_pose_fresh = true;
+  input.is_grid_fresh = true;
+  input.follow.is_asserted = true;
+  input.follow.twist = Twist2D{0.0, 0.3};
+  input.is_pose_fresh = false;
+  EXPECT_EQ(arbitrate(input).reason, StopReason::kPoseStale);
+  EXPECT_DOUBLE_EQ(arbitrate(input).twist.angular_rps, 0.0);
+  input.is_pose_fresh = true;
+  input.follow.is_asserted = false;
+  input.follow.reason = StopReason::kObstacleStale;
+  input.avoid.is_asserted = true;
+  input.avoid.reason = StopReason::kStuck;
+  input.avoid.twist = Twist2D{0.0, 0.3};
+  EXPECT_EQ(arbitrate(input).reason, StopReason::kObstacleStale);
+  EXPECT_DOUBLE_EQ(arbitrate(input).twist.angular_rps, 0.0);
+}
