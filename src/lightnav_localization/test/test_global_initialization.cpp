@@ -2,10 +2,22 @@
 
 #include <vector>
 #include <stdexcept>
+#include <cmath>
 
 #include "lightnav_localization/global_initialization.hpp"
 
 using namespace lightnav_localization;
+
+TEST(GlobalInitializationField, ComputesEuclideanGridDistance) {
+  const PointList points{Eigen::Vector3f(1.0f, 1.0f, 0.0f)};
+  const GlobalInitializationLikelihoodField field(points, {0.0, 0.0}, {3.0, 3.0}, 1.0, 16);
+  EXPECT_EQ(field.cell_count(), 16u);
+  EXPECT_DOUBLE_EQ(field.distance({1.0, 1.0}), 0.0);
+  EXPECT_DOUBLE_EQ(field.distance({3.0, 2.0}), std::sqrt(5.0));
+  EXPECT_TRUE(std::isinf(field.distance({-1.0, 0.0})));
+  EXPECT_THROW(GlobalInitializationLikelihoodField(points, {0.0, 0.0}, {3.0, 3.0}, 1.0, 15),
+               std::length_error);
+}
 
 TEST(GlobalInitializationPeaks, RejectsCompetitorBelowFifthCoarseRank) {
   std::vector<GlobalInitializationPeak> peaks(7);
