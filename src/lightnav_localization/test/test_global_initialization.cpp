@@ -124,3 +124,20 @@ TEST(GlobalInitializationSearch, RejectsWhenCandidateBudgetExpires) {
   std::atomic<bool> abort{false};
   EXPECT_EQ(search_global_initialization(map, scan, parameters, abort).decision.error, "time_budget");
 }
+
+TEST(GlobalInitializationSearch, RejectsLikelihoodFieldAboveCellLimit) {
+  PointList scan;
+  for (int index = 0; index < 36; ++index) {
+    const double angle = index * M_PI / 18.0;
+    scan.emplace_back(std::cos(angle), std::sin(angle), 1.0f);
+  }
+  GlobalInitializationSearchParameters parameters;
+  parameters.minimum = {-1.0, -1.0};
+  parameters.maximum = {1.0, 1.0};
+  parameters.maximum_range_m = 2.0;
+  parameters.maximum_grid_cells = 100;
+  std::atomic<bool> abort{false};
+  const auto result = search_global_initialization({}, scan, parameters, abort);
+  EXPECT_EQ(result.decision.error, "map_too_large");
+  EXPECT_EQ(result.evaluated_candidates, 0u);
+}
