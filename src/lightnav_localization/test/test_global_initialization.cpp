@@ -1,3 +1,5 @@
+#include <chrono>
+
 #include <gtest/gtest.h>
 
 #include <vector>
@@ -373,4 +375,32 @@ TEST(GlobalInitializationSearch, G7RejectsDisplacedGnssWindow) {
   EXPECT_FALSE(result.decision.accepted);
   EXPECT_TRUE(result.decision.error == "low_score" || result.decision.error == "outside_gnss_window")
       << result.decision.error;
+}
+
+TEST(GlobalInitializationSearch, G10MeasuresSearchOn2500SquareMetres) {
+  using lightnav_localization::testing::SyntheticWorld;
+  SyntheticWorld world({{0.0, 0.0}, {9.0, 0.0}, {9.0, 6.0}});
+  world.add_box({2.0, 0.5}, {2.8, 1.5});
+  world.add_box({5.0, -1.7}, {5.5, -0.4});
+  world.add_box({8.0, 3.4}, {8.5, 4.2});
+  const auto map = world.sample_map(0.15);
+  Eigen::Isometry3d sensor = Eigen::Isometry3d::Identity();
+  sensor.translation() = Eigen::Vector3d(1.0, 0.0, 0.5);
+  const auto timed = world.synthesize_scan([&](double) { return sensor; }, 0.0, 0.1, true, 360, 8);
+  PointList scan;
+  for (const auto& point : timed) scan.push_back(point.position + Eigen::Vector3f(0, 0, 0.5f));
+  GlobalInitializationSearchParameters parameters;
+  parameters.minimum = {-20.0, -20.0};
+  parameters.maximum = {30.0, 30.0};
+  parameters.maximum_range_m = 12.0;
+  std::atomic<bool> abort{false};
+  const auto started = std::chrono::steady_clock::now();
+  const auto result = search_global_initialization(map, scan, parameters, abort);
+  const double total = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+  std::cout << "G10 total=" << total << " field=" << result.field_seconds
+            << " cells=" << result.field_cells << " coarse=" << result.coarse_seconds
+            << " fine=" << result.fine_seconds << " verification=" << result.verification_seconds
+            << " reason=" << result.decision.error << std::endl;
+  for (double duration : result.target_seconds) std::cout << "G10 target=" << duration << std::endl;
+  for (double duration : result.matching_seconds) std::cout << "G10 matching=" << duration << std::endl;
 }

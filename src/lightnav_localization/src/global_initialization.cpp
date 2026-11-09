@@ -159,6 +159,7 @@ struct SearchContext {
   Clock::time_point started = Clock::now();
   std::size_t candidates = 0;
   std::string error;
+  GlobalInitializationSearchResult* measurements = nullptr;
   bool stopped() {
     if (abort.load()) error = "cancelled";
     else if (std::chrono::duration<double>(Clock::now() - started).count() >=
@@ -357,7 +358,9 @@ bool verify_peak(GlobalInitializationPeak& peak, const PointList& map, const Poi
   PointList local_map;
   for (const auto& point : map)
     if ((point.head<2>().cast<double>() - peak.position).norm() <= context.parameters.maximum_range_m) local_map.push_back(point);
+  const auto target_started = Clock::now();
   PreparedTarget target(local_map);
+  context.measurements->target_seconds.push_back(std::chrono::duration<double>(Clock::now() - target_started).count());
   if (context.stopped() || !target.is_valid()) return false;
   pose = Eigen::Isometry3d::Identity();
   pose.linear() = Eigen::AngleAxisd(peak.yaw_rad, Eigen::Vector3d::UnitZ()).toRotationMatrix();
@@ -374,10 +377,12 @@ bool verify_peak(GlobalInitializationPeak& peak, const PointList& map, const Poi
   pose.translation().z() = ground;
   MatcherParameters parameters;
   parameters.max_correspondence_distance_m = 2.0;
+  const auto matching_started = Clock::now();
   auto result = match_scan(target, scan, pose, parameters);
   if (context.stopped() || !result.converged) return false;
   parameters.max_correspondence_distance_m = 0.5;
   result = match_scan(target, scan, result.target_to_source, parameters);
+  context.measurements->matching_seconds.push_back(std::chrono::duration<double>(Clock::now() - matching_started).count());
   if (context.stopped() || !result.converged || !result.target_to_source.matrix().allFinite()) return false;
   Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> eigenvalues(result.information.block<3, 3>(3, 3));
   degenerate = eigenvalues.info() != Eigen::Success || eigenvalues.eigenvalues().maxCoeff() <= 0.0 ||
@@ -397,7 +402,7 @@ GlobalInitializationSearchResult search_global_initialization(
     const PointList& map, const PointList& scan, const GlobalInitializationSearchParameters& parameters,
     const std::atomic<bool>& abort) {
   GlobalInitializationSearchResult output;
-  SearchContext context{parameters, abort, Clock::now(), 0, {}};
+  SearchContext context{parameters, abort, Clock::now(), 0, {}, &output};
   if (context.stopped()) { output.decision.error = context.error; return output; }
   const Eigen::Vector2d extent = parameters.maximum - parameters.minimum;
   const std::array<double, 8> positive_values{
@@ -428,9 +433,14 @@ GlobalInitializationSearchResult search_global_initialization(
   if (band.size() < parameters.minimum_scan_points) { output.decision.error = "not_enough_scan_points"; return output; }
   try {
     const Eigen::Vector2d padding = Eigen::Vector2d::Constant(parameters.maximum_range_m);
+    auto stage_started = Clock::now();
     GlobalInitializationLikelihoodField field(map_height_band(map, parameters), parameters.minimum - padding, parameters.maximum + padding,
                                                parameters.grid_resolution_m, parameters.maximum_grid_cells);
+    output.field_cells = field.cell_count();
+    output.field_seconds = std::chrono::duration<double>(Clock::now() - stage_started).count();
+    stage_started = Clock::now();
     auto peaks = coarse_search(field, band, context);
+    output.coarse_seconds = std::chrono::duration<double>(Clock::now() - stage_started).count();
     if (context.stopped()) { output.decision.error = context.error; return output; }
     if (has_too_many_global_initialization_peaks(peaks, parameters.peaks)) {
       output.decision.error = "ambiguous"; return output;
@@ -439,13 +449,17 @@ GlobalInitializationSearchResult search_global_initialization(
     std::vector<GlobalInitializationPeak> verified;
     std::vector<Eigen::Isometry3d> poses;
     for (auto peak : peaks) {
+      stage_started = Clock::now();
       peak = refine_peak(field, band, peak, context);
+      output.fine_seconds += std::chrono::duration<double>(Clock::now() - stage_started).count();
+      stage_started = Clock::now();
       Eigen::Isometry3d pose;
       bool degenerate = false;
       if (verify_peak(peak, map, scan, band, field, context, pose, degenerate)) {
         peak.degenerate = degenerate;
         verified.push_back(peak); poses.push_back(pose);
       }
+      output.verification_seconds += std::chrono::duration<double>(Clock::now() - stage_started).count();
       if (context.stopped()) { output.decision.error = context.error; return output; }
     }
     // All converged peaks compete for b2, even if degenerate; only b1 is checked below.

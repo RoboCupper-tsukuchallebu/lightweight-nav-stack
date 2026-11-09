@@ -105,6 +105,13 @@ struct GlobalInitializationSearchResult {
   GlobalInitializationPeakDecision decision;
   Eigen::Isometry3d pose = Eigen::Isometry3d::Identity();
   std::size_t evaluated_candidates = 0;
+  std::size_t field_cells = 0;
+  double field_seconds = 0.0;
+  double coarse_seconds = 0.0;
+  double fine_seconds = 0.0;
+  double verification_seconds = 0.0;
+  std::vector<double> target_seconds;
+  std::vector<double> matching_seconds;
 };
 
 GlobalInitializationSearchResult search_global_initialization(
