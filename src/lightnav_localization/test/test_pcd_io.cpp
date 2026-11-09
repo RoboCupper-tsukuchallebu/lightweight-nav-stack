@@ -4,7 +4,10 @@
 #include <vector>
 
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
+#include <stdexcept>
+#include <string>
 
 #include "lightnav_localization/pcd_io.hpp"
 
@@ -13,7 +16,20 @@ using lightnav_localization::PointList;
 
 namespace {
 
-std::string temporary_path(const std::string& name) { return ::testing::TempDir() + name; }
+// One directory per test process: fixed names under /tmp collide when several users run the tests on one machine
+// (a self-hosted CI runner could not overwrite /tmp/ascii.pcd left by another user, 2026-11-10).
+const std::string& temporary_directory() {
+  static const std::string directory = [] {
+    std::string pattern = ::testing::TempDir() + "lightnav_pcd_io_XXXXXX";
+    if (mkdtemp(pattern.data()) == nullptr) {
+      throw std::runtime_error("cannot create a temporary directory from " + pattern);
+    }
+    return pattern + "/";
+  }();
+  return directory;
+}
+
+std::string temporary_path(const std::string& name) { return temporary_directory() + name; }
 
 PointList sample_points() { return {{1.5F, -2.25F, 3.0F}, {0.0F, 0.0F, 0.0F}, {-7.125F, 8.5F, 0.125F}}; }
 
