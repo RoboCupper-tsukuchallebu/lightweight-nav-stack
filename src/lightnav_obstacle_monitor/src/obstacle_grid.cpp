@@ -6,6 +6,10 @@
 
 namespace lightnav
 {
+namespace {
+// Ground returns within this height of the base-frame ground plane.
+constexpr double kGroundHeightToleranceMeters = 0.1;
+}
 
 GridGeometry GridGeometry::fromParameters(const ObstacleMonitorParameters & parameters)
 {
@@ -48,6 +52,7 @@ ObstacleGrid::ObstacleGrid(
   minHeights_(geometry.cellCount(), std::numeric_limits<float>::infinity()),
   maxHeights_(geometry.cellCount(), -std::numeric_limits<float>::infinity()),
   pointCounts_(geometry.cellCount(), 0),
+  groundCounts_(geometry.cellCount(), 0),
   scanHits_(geometry.cellCount(), 0)
 {
 }
@@ -60,6 +65,9 @@ void ObstacleGrid::addPoint3d(double xMeters, double yMeters, double zMeters)
   const auto index = geometry_.cellIndex(xMeters, yMeters);
   if (!index) {
     return;
+  }
+  if (std::abs(zMeters) <= kGroundHeightToleranceMeters && groundCounts_[*index] < std::numeric_limits<std::uint16_t>::max()) {
+    ++groundCounts_[*index];
   }
   const float height = static_cast<float>(zMeters);
   minHeights_[*index] = std::min(minHeights_[*index], height);
@@ -125,6 +133,15 @@ std::vector<std::uint8_t> ObstacleGrid::occupiedCells() const
     occupied[index] = (hasHeightStep || scanHits_[index] != 0) ? 1 : 0;
   }
   return occupied;
+}
+
+std::vector<std::uint8_t> ObstacleGrid::groundCells() const
+{
+  std::vector<std::uint8_t> ground(geometry_.cellCount(), 0);
+  for (std::size_t index = 0; index < ground.size(); ++index) {
+    ground[index] = groundCounts_[index] >= parameters_.minPointsPerCell;
+  }
+  return ground;
 }
 
 std::vector<std::uint8_t> inflateOccupiedCells(
