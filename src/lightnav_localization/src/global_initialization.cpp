@@ -337,6 +337,8 @@ bool verify_peak(GlobalInitializationPeak& peak, const PointList& map, const Poi
   if (eigenvalues.info() != Eigen::Success || eigenvalues.eigenvalues().maxCoeff() <= 0.0 ||
       eigenvalues.eigenvalues().minCoeff() / eigenvalues.eigenvalues().maxCoeff() < context.parameters.degeneracy_ratio) return false;
   pose = result.target_to_source;
+  if ((pose.translation().head<2>().array() < context.parameters.minimum.array()).any() ||
+      (pose.translation().head<2>().array() > context.parameters.maximum.array()).any()) return false;
   peak.position = pose.translation().head<2>();
   peak.yaw_rad = std::atan2(pose.linear()(1, 0), pose.linear()(0, 0));
   peak.verification_score = std::min(scan_to_map(scan, local_map, pose, context.parameters.correspondence_m),
@@ -354,7 +356,8 @@ GlobalInitializationSearchResult search_global_initialization(
   const PointList band = select_band(scan, parameters);
   if (band.size() < parameters.minimum_scan_points) { output.decision.error = "not_enough_scan_points"; return output; }
   const Eigen::Vector2d extent = parameters.maximum - parameters.minimum;
-  if ((extent.array() < 0.0).any() || extent.prod() > parameters.maximum_area_m2 ||
+  if (!extent.allFinite() || !parameters.minimum.allFinite() || !parameters.maximum.allFinite() ||
+      (extent.array() < 0.0).any() || extent.prod() > parameters.maximum_area_m2 ||
       parameters.coarse_translation_step_m <= 0 || parameters.coarse_yaw_step_rad <= 0 ||
       parameters.fine_translation_step_m <= 0 || parameters.fine_yaw_step_rad <= 0 ||
       parameters.likelihood_sigma_m <= 0) { output.decision.error = "map_too_large"; return output; }
