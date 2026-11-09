@@ -10,10 +10,11 @@ on:
 # and can point runs-on at the self-hosted labels. What protects the machine is the repository setting that a person
 # approves every workflow run of an outside contributor (AGENTS.md: read the .github/ diff before approving).
 # One runner per label keeps those jobs serial: the pixi tests use the fixed ROS_DOMAIN_ID 44 on the host network.
-# One self-hosted runner per job kind: a new push to a PR branch cancels the older run of that branch so the queue
-# does not fill with superseded heads (2026-11-09: 20 stale runs queued). Pushes to develop/main are never cancelled.
+# A new push to a pull request cancels the older run of that pull request, so the self-hosted queue does not fill
+# with superseded heads (2026-11-09: 20 stale runs queued). Each push run gets its own group (run_id), so pushes to
+# develop/main are never cancelled or replaced by a later push.
 concurrency:
-  group: ci-${{ github.event_name }}-${{ github.head_ref || github.ref }}
+  group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || format('ci-run-{0}', github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
