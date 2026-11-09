@@ -231,7 +231,7 @@ TEST_F(ControllerNodeLifecycle, RuntimeClassesAndStartupBaseline) {
     EXPECT_FALSE(result.successful); EXPECT_FALSE(result.reason.empty());
   }
   EXPECT_FALSE(node_->set_parameter(rclcpp::Parameter("use_sim_time", true)).successful);
-  EXPECT_THROW(node_->set_parameter(rclcpp::Parameter("grid_frame", "map")), rclcpp::exceptions::ParameterImmutableException);
+  { const auto result = node_->set_parameter(rclcpp::Parameter("grid_frame", "map")); EXPECT_FALSE(result.successful); EXPECT_FALSE(result.reason.empty()); }
   node_->deactivate(); node_->cleanup();
   EXPECT_FALSE(node_->set_parameter(rclcpp::Parameter("arc_step_m", 0.2)).successful);
   EXPECT_EQ(node_->configure().label(), "inactive");
@@ -299,8 +299,8 @@ TEST_F(ControllerNodeLifecycle, ReadOnlyAndInvalidValuesAreRejected) {
     EXPECT_FALSE(result.successful);
     EXPECT_FALSE(result.reason.empty());
   }
-  EXPECT_THROW(node_->set_parameter(rclcpp::Parameter("control_hz", 30.0)), rclcpp::exceptions::ParameterImmutableException);
-  EXPECT_THROW(node_->set_parameter(rclcpp::Parameter("grid_frame", "map")), rclcpp::exceptions::ParameterImmutableException);
+  { const auto result = node_->set_parameter(rclcpp::Parameter("control_hz", 30.0)); EXPECT_FALSE(result.successful); EXPECT_FALSE(result.reason.empty()); }
+  { const auto result = node_->set_parameter(rclcpp::Parameter("grid_frame", "map")); EXPECT_FALSE(result.successful); EXPECT_FALSE(result.reason.empty()); }
   for (double invalid : {0.0, -1.0, std::numeric_limits<double>::quiet_NaN(),
                          std::numeric_limits<double>::infinity()}) {
     const auto old = node_->get_parameter("lookahead_m").as_double();
