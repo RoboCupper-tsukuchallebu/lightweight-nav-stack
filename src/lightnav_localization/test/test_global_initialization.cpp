@@ -56,3 +56,23 @@ TEST(GlobalInitializationPeaks, IgnoresSamePeakAfterRefinement) {
   peaks[1].position.x() = 0.1;
   EXPECT_TRUE(decide_global_initialization_peaks(peaks, {}).accepted);
 }
+
+TEST(GlobalInitializationSearch, CancelsBeforeStarting) {
+  std::atomic<bool> abort{true};
+  const auto result = search_global_initialization({}, {}, {}, abort);
+  EXPECT_EQ(result.decision.error, "cancelled");
+}
+
+TEST(GlobalInitializationSearch, StopsAtTimeBudget) {
+  std::atomic<bool> abort{false};
+  GlobalInitializationSearchParameters parameters;
+  parameters.time_budget_s = 0.0;
+  const auto result = search_global_initialization({}, {}, parameters, abort);
+  EXPECT_EQ(result.decision.error, "time_budget");
+}
+
+TEST(GlobalInitializationSearch, RejectsInsufficientScan) {
+  std::atomic<bool> abort{false};
+  const auto result = search_global_initialization({}, {}, {}, abort);
+  EXPECT_EQ(result.decision.error, "not_enough_scan_points");
+}
