@@ -162,7 +162,8 @@ struct SearchContext {
   bool stopped() {
     if (abort.load()) error = "cancelled";
     else if (std::chrono::duration<double>(Clock::now() - started).count() >=
-             parameters.time_budget_s || candidates >= parameters.candidate_budget) error = "time_budget";
+             parameters.time_budget_s) error = "time_budget";
+    else if (candidates >= parameters.candidate_budget) error = "candidate_budget";
     return !error.empty();
   }
 };
@@ -384,14 +385,25 @@ GlobalInitializationSearchResult search_global_initialization(
   GlobalInitializationSearchResult output;
   SearchContext context{parameters, abort, Clock::now(), 0, {}};
   if (context.stopped()) { output.decision.error = context.error; return output; }
+  const Eigen::Vector2d extent = parameters.maximum - parameters.minimum;
+  const std::array<double, 8> positive_values{
+      parameters.grid_resolution_m, parameters.likelihood_sigma_m, parameters.maximum_range_m,
+      parameters.maximum_area_m2, parameters.coarse_translation_step_m, parameters.coarse_yaw_step_rad,
+      parameters.fine_translation_step_m, parameters.fine_yaw_step_rad};
+  if (!parameters.minimum.allFinite() || !parameters.maximum.allFinite() || !extent.allFinite() ||
+      (extent.array() < 0.0).any() ||
+      std::any_of(positive_values.begin(), positive_values.end(),
+                  [](double value) { return !std::isfinite(value) || value <= 0.0; }) ||
+      !std::isfinite(parameters.correspondence_m) || parameters.correspondence_m <= 0.0) {
+    output.decision.error = "invalid_parameters";
+    return output;
+  }
+  if (extent.prod() > parameters.maximum_area_m2) {
+    output.decision.error = "map_too_large";
+    return output;
+  }
   const PointList band = select_band(scan, parameters);
   if (band.size() < parameters.minimum_scan_points) { output.decision.error = "not_enough_scan_points"; return output; }
-  const Eigen::Vector2d extent = parameters.maximum - parameters.minimum;
-  if (!extent.allFinite() || !parameters.minimum.allFinite() || !parameters.maximum.allFinite() ||
-      (extent.array() < 0.0).any() || extent.prod() > parameters.maximum_area_m2 ||
-      parameters.coarse_translation_step_m <= 0 || parameters.coarse_yaw_step_rad <= 0 ||
-      parameters.fine_translation_step_m <= 0 || parameters.fine_yaw_step_rad <= 0 ||
-      parameters.likelihood_sigma_m <= 0 || parameters.correspondence_m <= 0) { output.decision.error = "map_too_large"; return output; }
   try {
     const Eigen::Vector2d padding = Eigen::Vector2d::Constant(parameters.maximum_range_m);
     GlobalInitializationLikelihoodField field(map_height_band(map, parameters), parameters.minimum - padding, parameters.maximum + padding,
