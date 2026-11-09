@@ -32,9 +32,22 @@ Runtime parameters are applied between control cycles without resetting the held
 
 | Class | Parameters |
 |---|---|
-| Tuning (both directions) | `lookahead_m`, `search_window_m`, `v_max`, `v_slow`, `w_max`, `w_rotate`, `v_avoid`, `k_end`, `goal_tolerance_m`, `rotate_in_place_heading_rad`, `w_path`, `w_heading`, `w_smooth`, `arc_candidate_count`, `stuck_timeout_s` |
+| Tuning (both directions) | `lookahead_m`, `search_window_m`, `v_max`, `v_slow`, `w_max`, `w_rotate`, `v_avoid`, `k_end`, `goal_tolerance_m`, `rotate_in_place_heading_threshold_rad`, `w_path`, `w_heading`, `w_smooth`, `arc_candidate_count`, `stuck_timeout_s` |
 | Safety (at most startup value) | `v_min`, `max_path_deviation_m`, `pose_timeout_s`, `obstacle_status_timeout_s`, `grid_timeout_s`, `arc_step_m`, `rejoin_distance_m` |
 | Safety (at least startup value) | `avoid_trigger_m`, `avoid_release_m`, `arc_length_m`, `avoid_release_hold_s` |
-| Read-only after construction | `grid_frame`, `control_hz`, `use_sim_time` |
+| Read-only after construction | `grid_frame`, `control_hz`, `arc_markers_rate_hz`, `use_sim_time` |
 
 All numeric values must be finite and positive; `arc_candidate_count` must be a positive integer. Safety values require a finite startup baseline and may return to that baseline. Set related parameters in an order that preserves the constraints: the `set_parameters` service validates each value separately.
+
+In-place rotation starts when heading error exceeds `rotate_in_place_heading_threshold_rad` (default 1.2 rad), and ends below 80% of that threshold. After `stuck_timeout_s` in BLOCKED, STUCK persists for `stuck_rotate_after_s` (default 2.0 s) before rotation; each cycle re-evaluates arcs. Direction alternates between recovery episodes. `w_rotate` bounds angular speed; the safety gate and drive enable remain authoritative. `FollowStatus` reports the selected layer, STUCK state and commanded linear and angular speeds.
+
+The user decision in Issue #1 (2026-11-09) permits rotation without checking the footprint, obstacles or stop zone and without an angle or attempt limit. People or objects beside or behind the robot can be struck; a person must be ready to use emergency stop. Stale pose or obstacle status still stops the controller.
+The existing safety gate still stops all commands when its forward stop zone is occupied. Its acceleration limits can leave a temporary forward output while transitioning from driving to an in-place rotation command.
+
+Avoidance takes priority over heading alignment, including during STUCK rotation. If the stop zone is occupied, the unchanged safety gate stops even an in-place rotation; recovery can therefore remain blocked until the zone clears. A change to that gate requires user confirmation.
+
+### Avoidance arc visualization
+
+`/lightnav/controller/arc_candidates` publishes `visualization_msgs/MarkerArray` in `grid_frame` (on the robot, `base_footprint`). Green lines are feasible candidates, red lines are rejected candidates, and the marker namespace identifies the rejection reason. The selected candidate is thicker; text shows the avoid state. Markers are cleared when avoidance is idle. Publishing requires a subscriber and is capped by the read-only `arc_markers_rate_hz` parameter (default 2.0 Hz; 0 disables it).
+
+When the stop zone is occupied or obstacle information is stale, candidates are not evaluated, so only the state text appears without arcs.

@@ -29,10 +29,10 @@ double rotation_angle_rad(const Eigen::Isometry3d& transform) {
 
 struct PreparedTarget::Implementation {
   explicit Implementation(const PointList& points, const MatcherParameters& parameters)
-      : cloud(make_cloud_with_covariances(points)) {
-    if (parameters.method == "gicp") {
-      tree = std::make_shared<small_gicp::KdTree<small_gicp::PointCloud>>(cloud);
-    } else if (parameters.method == "vgicp") {
+      : cloud(std::make_shared<small_gicp::PointCloud>(points)),
+        tree(std::make_shared<small_gicp::KdTree<small_gicp::PointCloud>>(cloud)) {
+    small_gicp::estimate_covariances(*cloud, *tree, kCovarianceNeighborCount);
+    if (parameters.method == "vgicp") {
       voxel = std::make_shared<small_gicp::GaussianVoxelMap>(parameters.vgicp_voxel_m);
       voxel->set_search_offsets(27);
       voxel->insert(*cloud);
@@ -41,6 +41,7 @@ struct PreparedTarget::Implementation {
         coarse->set_search_offsets(27);
         coarse->insert(*cloud);
       }
+      tree.reset();
     }
   }
   std::shared_ptr<small_gicp::PointCloud> cloud;

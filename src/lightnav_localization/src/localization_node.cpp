@@ -273,10 +273,16 @@ void LocalizationNode::declare_parameters() {
   declare_parameter<double>("lidar_odom_gate_translation_m", 0.3);
   declare_parameter<double>("lidar_odom_gate_translation_ratio", 0.2);
   declare_parameter<double>("lidar_odom_gate_yaw_rad", 0.1);
+  declare_parameter<double>("lidar_odom_slip_gate_yaw_rad", 0.0);
+  declare_parameter<double>("lidar_odom_slip_wheel_yaw_rate_rad_s", 0.05);
+  declare_parameter<double>("lidar_odom_slip_wheel_rate_window_s", 0.05);
   declare_parameter<double>("lidar_odom_covariance_scale", 1.0);
   declare_parameter<double>("lidar_odom_sigma_floor_m", 0.02);
   declare_parameter<double>("lidar_odom_sigma_floor_rad", 0.005);
   declare_parameter<double>("wheel_sigma_translation_per_m", 0.02);
+  declare_parameter<double>("wheel_yaw_slip_threshold_rad", 0.0);
+  declare_parameter<std::string>("wheel_robust_kernel", "huber");
+  declare_parameter<double>("wheel_robust_k", 8.0);
   declare_parameter<double>("wheel_sigma_yaw_per_rad", 0.1);
   declare_parameter<double>("wheel_sigma_yaw_per_m", 0.01);
   declare_parameter<double>("planar_sigma_z_per_m", 0.05);
@@ -417,12 +423,36 @@ bool LocalizationNode::read_parameters(std::string& error) {
     }
   }
 
+  const double wheel_rate_window_s = get_parameter("lidar_odom_slip_wheel_rate_window_s").as_double();
+  if (!std::isfinite(wheel_rate_window_s) || wheel_rate_window_s <= 0.0) {
+    error = "lidar_odom_slip_wheel_rate_window_s must be positive and finite";
+    return false;
+  }
+  const double wheel_yaw_slip_threshold_rad = get_parameter("wheel_yaw_slip_threshold_rad").as_double();
+  if (!std::isfinite(wheel_yaw_slip_threshold_rad) || wheel_yaw_slip_threshold_rad < 0.0) {
+    error = "wheel_yaw_slip_threshold_rad must be nonnegative and finite";
+    return false;
+  }
+  const std::string wheel_robust_kernel = get_parameter("wheel_robust_kernel").as_string();
+  if (wheel_robust_kernel != "huber" && wheel_robust_kernel != "cauchy") {
+    error = "wheel_robust_kernel must be huber or cauchy";
+    return false;
+  }
+  const double wheel_robust_k = get_parameter("wheel_robust_k").as_double();
+  if (!std::isfinite(wheel_robust_k) || wheel_robust_k <= 0.0) {
+    error = "wheel_robust_k must be positive and finite";
+    return false;
+  }
+
   localizer_parameters_ = LocalizerParameters{};
   localizer_parameters_.last_error_hold_s = last_error_hold_s;
   localizer_parameters_.graph.window_s = get_parameter("window_s").as_double();
   localizer_parameters_.graph.huber_k = get_parameter("huber_k").as_double();
   localizer_parameters_.graph.wheel_sigma_translation_per_m =
       get_parameter("wheel_sigma_translation_per_m").as_double();
+  localizer_parameters_.graph.wheel_yaw_slip_threshold_rad = wheel_yaw_slip_threshold_rad;
+  localizer_parameters_.graph.wheel_robust_kernel = wheel_robust_kernel;
+  localizer_parameters_.graph.wheel_robust_k = wheel_robust_k;
   localizer_parameters_.graph.wheel_sigma_yaw_per_rad =
       get_parameter("wheel_sigma_yaw_per_rad").as_double();
   localizer_parameters_.graph.wheel_sigma_yaw_per_m =
@@ -444,6 +474,12 @@ bool LocalizationNode::read_parameters(std::string& error) {
       get_parameter("lidar_odom_gate_translation_m").as_double();
   localizer_parameters_.lidar_odometry.gate_translation_ratio =
       get_parameter("lidar_odom_gate_translation_ratio").as_double();
+  localizer_parameters_.lidar_odometry.slip_gate_yaw_rad =
+      get_parameter("lidar_odom_slip_gate_yaw_rad").as_double();
+  localizer_parameters_.lidar_odometry.slip_wheel_yaw_rate_rad_s =
+      get_parameter("lidar_odom_slip_wheel_yaw_rate_rad_s").as_double();
+  localizer_parameters_.lidar_odometry.slip_wheel_rate_window_s =
+      wheel_rate_window_s;
   localizer_parameters_.lidar_odometry.gate_yaw_rad =
       get_parameter("lidar_odom_gate_yaw_rad").as_double();
   localizer_parameters_.lidar_odometry_information.covariance_scale =
