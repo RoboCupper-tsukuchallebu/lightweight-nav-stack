@@ -175,11 +175,26 @@ class LocalizationNodeTest : public ::testing::Test {
     diagnostics_subscription_ = helper_->create_subscription<diagnostic_msgs::msg::DiagnosticArray>(
         "/diagnostics", rclcpp::QoS(10).reliable(),
         [this](diagnostic_msgs::msg::DiagnosticArray::SharedPtr message) {
+          std::set<std::string> names;
           for (const auto& status : message->status) {
+            names.insert(status.name);
+            diagnostics_levels_[status.name] = status.level;
+            if (status.name == "localization_node: performance") {
+              std::map<std::string, std::string> sample;
+              for (const auto& entry : status.values) sample[entry.key] = entry.value;
+              if (sample.count("scans_processed") && std::stoi(sample.at("scans_processed")) > 0) {
+                saw_scan_timing_ = std::stod(sample.at("scan_time_mean_ms")) > 0.0 &&
+                    std::stod(sample.at("scan_time_max_ms")) >= std::stod(sample.at("scan_time_mean_ms"));
+              }
+            }
+            for (const auto& entry : status.values) diagnostics_values_[status.name][entry.key] = entry.value;
             if (status.name != "localization_node: GNSS") continue;
             last_gnss_diagnostics_level_ = status.level;
             for (const auto& entry : status.values) last_gnss_diagnostics_[entry.key] = entry.value;
           }
+          if (names.count("localization_node: GNSS") && names.count("localization_node: state") &&
+              names.count("localization_node: map match") && names.count("localization_node: errors") &&
+              names.count("localization_node: performance")) ++complete_diagnostics_count_;
         });
     set_initial_pose_client_ =
         helper_->create_client<SetInitialPose>("/localization_node/set_initial_pose");
@@ -663,11 +678,123 @@ class LocalizationNodeTest : public ::testing::Test {
   double gps_variance_m2_ = 0.36;
   int odom_count_ = 0;
   int status_count_ = 0;
+  int complete_diagnostics_count_ = 0;
+  bool saw_scan_timing_ = false;
+  std::map<std::string, std::map<std::string, std::string>> diagnostics_values_;
+  std::map<std::string, uint8_t> diagnostics_levels_;
   bool all_odom_stamps_matched_ = true;
   std::mt19937 gps_random_{20261106};
   std::normal_distribution<double> gps_normal_{0.0, 1.0};
   int gps_fix_count_ = 0;
 };
+
+TEST_F(LocalizationNodeTest, PublishesAllDiagnosticsTogether) {
+  create_node(make_options(map_file_.string(), map_yaml_.string()));
+  bring_up();
+  start_tracking_at_truth();
+  run_for(5000ms, kInputWheel | kInputScans);
+  EXPECT_GE(complete_diagnostics_count_, 3);
+  EXPECT_TRUE(saw_scan_timing_);
+  EXPECT_EQ(last_gnss_diagnostics_level_, diagnostic_msgs::msg::DiagnosticStatus::OK);
+  const auto& performance = diagnostics_values_.at("localization_node: performance");
+  EXPECT_GE(std::stod(performance.at("cpu_percent")), 0.0);
+#ifdef __linux__
+  EXPECT_GT(std::stod(performance.at("memory_rss_mb")), 0.0);
+#else
+  EXPECT_EQ(performance.at("memory_rss_mb"), "unavailable");
+#endif
+}
+
+TEST_F(LocalizationNodeTest, MapMatchDiagnosticsCountEachRejectionReason) {
+  create_node(make_options(map_file_.string(), map_yaml_.string()));
+  bring_up();
+  start_tracking_at_truth();
+  run_for(1200ms, kInputWheel | kInputScans);
+  const auto initial_match = diagnostics_values_.at("localization_node: map match");
+  int attempt = 0;
+  node_->set_map_match_hook_for_test([&attempt](MatchResult& result) {
+    ++attempt;
+    if (attempt > 4) {
+      result.converged = true;
+      result.inlier_ratio = 1.0;
+      result.target_to_source.translation() = kTruthPosition;
+      result.target_to_source.linear() = Eigen::AngleAxisd(kTruthYaw, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+      return;
+    }
+    if (attempt == 1) result.converged = false;
+    if (attempt == 2) { result.converged = true; result.inlier_ratio = 0.0; }
+    if (attempt == 3) { result.converged = true; result.inlier_ratio = 1.0; result.target_to_source.translation().x() += 100.0; }
+    if (attempt == 4) { result.converged = true; result.inlier_ratio = 1.0; result.target_to_source.linear() = result.target_to_source.linear() * Eigen::AngleAxisd(1.0, Eigen::Vector3d::UnitZ()).toRotationMatrix(); }
+  });
+  run_for(5000ms, kInputWheel | kInputScans);
+  ASSERT_GE(attempt, 4);
+  const auto& match = diagnostics_values_.at("localization_node: map match");
+  EXPECT_EQ(std::stoi(match.at("rejected_not_converged_total")) - std::stoi(initial_match.at("rejected_not_converged_total")), 1);
+  EXPECT_EQ(std::stoi(match.at("rejected_inlier_total")) - std::stoi(initial_match.at("rejected_inlier_total")), 1);
+  EXPECT_EQ(std::stoi(match.at("rejected_translation_gate_total")) - std::stoi(initial_match.at("rejected_translation_gate_total")), 1);
+  EXPECT_EQ(std::stoi(match.at("rejected_rotation_gate_total")) - std::stoi(initial_match.at("rejected_rotation_gate_total")), 1);
+}
+
+TEST_F(LocalizationNodeTest, StateDiagnosticsWarnOnOdomOnlyAndErrorOnLost) {
+  auto options = make_options(map_file_.string(), map_yaml_.string());
+  options.append_parameter_override("tracking_window_s", 0.5);
+  options.append_parameter_override("gps_timeout_s", 0.1);
+  options.append_parameter_override("odom_only_max_s", 3.0);
+  create_node(options);
+  bring_up();
+  start_tracking_at_truth();
+  node_->set_map_match_hook_for_test([](MatchResult& result) { result.converged = false; });
+  bool observed_odom_only = false;
+  bool observed_lost = false;
+  for (int index = 0; index < 35 && !observed_lost; ++index) {
+    run_for(200ms, kInputWheel | kInputScans);
+    const auto found = diagnostics_values_.find("localization_node: state");
+    if (found == diagnostics_values_.end()) continue;
+    if (found->second.at("state") == "ODOM_ONLY") {
+      EXPECT_EQ(diagnostics_levels_.at("localization_node: state"), diagnostic_msgs::msg::DiagnosticStatus::WARN);
+      observed_odom_only = true;
+    }
+    if (found->second.at("state") == "LOST") {
+      EXPECT_EQ(diagnostics_levels_.at("localization_node: state"), diagnostic_msgs::msg::DiagnosticStatus::ERROR);
+      observed_lost = true;
+    }
+  }
+  EXPECT_TRUE(observed_odom_only);
+  EXPECT_TRUE(observed_lost);
+}
+
+TEST_F(LocalizationNodeTest, MappingOdomOnlyStateIsOk) {
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({rclcpp::Parameter("mode", "mapping"),
+                               rclcpp::Parameter("map_output_dir", (temp_directory_ / "mapping_diagnostics").string()),
+                               rclcpp::Parameter("allow_mapping_without_gps", true),
+                               rclcpp::Parameter("gps_timeout_s", 0.5)});
+  create_node(options);
+  bring_up();
+  run_for(4000ms, kInputWheel | kInputScans);
+  ASSERT_EQ(diagnostics_values_.at("localization_node: state").at("state"), "ODOM_ONLY");
+  EXPECT_EQ(diagnostics_levels_.at("localization_node: state"), diagnostic_msgs::msg::DiagnosticStatus::OK);
+}
+
+TEST_F(LocalizationNodeTest, OptimizationFailureExpiresFromErrorDiagnostics) {
+  auto options = make_options(map_file_.string(), map_yaml_.string());
+  options.append_parameter_override("last_error_hold_s", 2.0);
+  create_node(options);
+  bring_up();
+  start_tracking_at_truth();
+  node_->inject_optimization_failure_for_test();
+  bool observed_warning = false;
+  bool observed_clear = false;
+  for (int index = 0; index < 50 && !observed_clear; ++index) {
+    run_for(200ms, kInputWheel | kInputScans);
+    const auto found = diagnostics_values_.find("localization_node: errors");
+    if (found == diagnostics_values_.end() || found->second.at("error_events_total") != "1") continue;
+    if (diagnostics_levels_.at("localization_node: errors") == diagnostic_msgs::msg::DiagnosticStatus::WARN) observed_warning = true;
+    if (observed_warning && diagnostics_levels_.at("localization_node: errors") == diagnostic_msgs::msg::DiagnosticStatus::OK && found->second.at("last_error").empty()) observed_clear = true;
+  }
+  EXPECT_TRUE(observed_warning);
+  EXPECT_TRUE(observed_clear);
+}
 
 TEST_F(LocalizationNodeTest, ConfigureFailsWithoutMapFile) {
   create_node(make_options((temp_directory_ / "missing.pcd").string(),

@@ -1,13 +1,17 @@
 #pragma once
 
+#include <chrono>
+
 #include <Eigen/Geometry>
 #include <builtin_interfaces/msg/time.hpp>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <diagnostic_msgs/msg/diagnostic_array.hpp>
@@ -42,6 +46,9 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
 
   explicit LocalizationNode(const rclcpp::NodeOptions& options = rclcpp::NodeOptions());
   ~LocalizationNode() override;
+
+  void set_map_match_hook_for_test(std::function<void(MatchResult&)> hook) { if (localizer_) localizer_->set_map_match_hook(std::move(hook)); }
+  void inject_optimization_failure_for_test() { if (localizer_) localizer_->inject_optimization_failure_for_test(); }
 
   CallbackReturn on_configure(const rclcpp_lifecycle::State& state) override;
   CallbackReturn on_activate(const rclcpp_lifecycle::State& state) override;
@@ -122,6 +129,11 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
   std::string gps_topic_;
   bool publish_tf_ = true;
   double status_rate_hz_ = 2.0;
+  double diagnostics_cpu_warn_percent_ = 200.0;
+  double diagnostics_memory_warn_mb_ = 2048.0;
+  std::chrono::steady_clock::time_point last_cpu_time_{};
+  double last_cpu_usage_sec_ = 0.0;
+  bool has_cpu_sample_ = false;
   double init_gps_max_std_m_ = 3.0;
   int gps_min_status_ = -1;  // NavSatStatus value; fixes below it never reach the Localizer
   double gps_min_interval_s_ = 0.0;

@@ -6,6 +6,8 @@
 #include <cstring>
 #include <ctime>
 #include <exception>
+#include <fstream>
+#include <sys/resource.h>
 #include <limits>
 #include <memory>
 #include <string>
@@ -34,6 +36,9 @@ constexpr double kNeverSec = -1e9;
 constexpr double kWheelBufferSec = 3.0;
 constexpr double kDefaultWatchdogPeriodSec = 0.02;
 constexpr double kDiagnosticsPeriodSec = 1.0;
+constexpr double kScanMaximumWarnMs = 100.0;
+constexpr double kScanMeanErrorMs = 150.0;
+constexpr double kKilobytesPerMegabyte = 1024.0;
 constexpr int kLowestNavSatStatus = -1;   // STATUS_NO_FIX
 constexpr int kHighestNavSatStatus = 2;   // STATUS_GBAS_FIX
 constexpr std::size_t kMaxPendingScans = 20;
@@ -151,6 +156,9 @@ void LocalizationNode::declare_parameters() {
   declare_parameter<std::string>("gps_topic", "/gps/fix");
   declare_parameter<bool>("publish_tf", true);
   declare_parameter<double>("status_rate_hz", 2.0);
+  declare_parameter<double>("diagnostics_cpu_warn_percent", 200.0);
+  declare_parameter<double>("diagnostics_memory_warn_mb", 2048.0);
+  declare_parameter<double>("last_error_hold_s", 10.0);
   declare_parameter<int>("num_threads", 4);
   declare_parameter<double>("init_gps_max_std_m", 3.0);
   // GNSS input contract (Issue #43 section 4.3): drop fixes below this NavSatStatus (-1 keeps all) and
@@ -237,6 +245,9 @@ bool LocalizationNode::read_parameters(std::string& error) {
   gps_topic_ = get_parameter("gps_topic").as_string();
   publish_tf_ = get_parameter("publish_tf").as_bool();
   status_rate_hz_ = get_parameter("status_rate_hz").as_double();
+  diagnostics_cpu_warn_percent_ = get_parameter("diagnostics_cpu_warn_percent").as_double();
+  diagnostics_memory_warn_mb_ = get_parameter("diagnostics_memory_warn_mb").as_double();
+  localizer_parameters_.last_error_hold_s = get_parameter("last_error_hold_s").as_double();
   num_threads_ = static_cast<int>(get_parameter("num_threads").as_int());
   init_gps_max_std_m_ = get_parameter("init_gps_max_std_m").as_double();
   gps_min_status_ = static_cast<int>(get_parameter("gps_min_status").as_int());
@@ -260,6 +271,12 @@ bool LocalizationNode::read_parameters(std::string& error) {
   }
   if (!(status_rate_hz_ > 0.0) || !std::isfinite(status_rate_hz_)) {
     error = "status_rate_hz must be positive and finite";
+    return false;
+  }
+  if (!std::isfinite(diagnostics_cpu_warn_percent_) || diagnostics_cpu_warn_percent_ < 0.0 ||
+      !std::isfinite(diagnostics_memory_warn_mb_) || diagnostics_memory_warn_mb_ < 0.0 ||
+      !std::isfinite(localizer_parameters_.last_error_hold_s) || localizer_parameters_.last_error_hold_s < 0.0) {
+    error = "diagnostics thresholds and last_error_hold_s must be finite and nonnegative";
     return false;
   }
   if (alignment_parameters_.scan_count < 1 || !(alignment_parameters_.yaw_step_deg > 0.0) ||
@@ -296,6 +313,7 @@ bool LocalizationNode::read_parameters(std::string& error) {
   }
 
   localizer_parameters_ = LocalizerParameters{};
+  localizer_parameters_.last_error_hold_s = get_parameter("last_error_hold_s").as_double();
   localizer_parameters_.graph.window_s = get_parameter("window_s").as_double();
   localizer_parameters_.graph.huber_k = get_parameter("huber_k").as_double();
   localizer_parameters_.graph.wheel_sigma_translation_per_m =
@@ -519,6 +537,7 @@ void LocalizationNode::reset_runtime_state() {
   received_gps_std_m_ = 0.0F;
   last_passed_gps_stamp_sec_.reset();
   has_diagnostics_publish_time_ = false;
+  has_cpu_sample_ = false;
   last_status_state_ = LocalizationState::kInitializing;
   has_status_publish_time_ = false;
   node_error_.clear();
@@ -823,6 +842,7 @@ void LocalizationNode::handle_wheel_odom(const nav_msgs::msg::Odometry::SharedPt
       has_localizer_wheel_ = true;
       first_localizer_wheel_stamp_sec_ = stamp_sec;
     }
+    localizer_->poll_state(get_clock()->now().seconds());
     const std::optional<LocalizerOutput> output =
         localizer_->on_wheel_odom(stamp_sec, odom_to_base);
     if (output) {
@@ -971,6 +991,7 @@ void LocalizationNode::handle_pending_scans() {
       // Localizer's wheel buffer starts at its first wheel sample.
       continue;
     }
+    localizer_->poll_state(get_clock()->now().seconds());
     localizer_->on_scan(scan.stamp_sec, scan.points);
     if (last_output_map_to_base_) {
       publish_aligned_scan(*deskewed,
@@ -1274,6 +1295,7 @@ void LocalizationNode::handle_reload_map(
   alignment_scans_.clear();
   last_output_.reset();
   last_output_map_to_base_.reset();
+  node_error_.clear();
   response->success = true;
   response->message = "map reloaded: " + std::to_string(map_points_.size()) + " points";
   publish_status();
@@ -1406,6 +1428,111 @@ void LocalizationNode::publish_diagnostics(const rclcpp::Time& now) {
   diagnostic_msgs::msg::DiagnosticArray array;
   array.header.stamp = now;
   array.status.push_back(std::move(status));
+  using DiagnosticStatus = diagnostic_msgs::msg::DiagnosticStatus;
+  DiagnosticStatus state_status;
+  state_status.name = "localization_node: state";
+  const LocalizationState state = has_localizer ? localizer_->poll_state(now.seconds()) : LocalizationState::kInitializing;
+  std::string state_name;
+  switch (state) {
+    case LocalizationState::kInitializing: state_name = "INITIALIZING"; break;
+    case LocalizationState::kTracking: state_name = "TRACKING"; break;
+    case LocalizationState::kGpsOnly: state_name = "GPS_ONLY"; break;
+    case LocalizationState::kOdomOnly: state_name = "ODOM_ONLY"; break;
+    case LocalizationState::kLost: state_name = "LOST"; break;
+    case LocalizationState::kInputStale: state_name = "INPUT_STALE"; break;
+  }
+  state_status.level = DiagnosticStatus::OK;
+  if (state == LocalizationState::kLost || state == LocalizationState::kInputStale) state_status.level = DiagnosticStatus::ERROR;
+  else if (state == LocalizationState::kInitializing || (!is_mapping() && (state == LocalizationState::kOdomOnly || (state == LocalizationState::kGpsOnly && !map_file_.empty())))) state_status.level = DiagnosticStatus::WARN;
+  state_status.message = state_name;
+  const double last_match = has_localizer ? localizer_->last_map_match_stamp_sec() : kNeverSec;
+  const double match_age = last_match > -1e8 ? std::max(0.0, now.seconds() - last_match) : -1.0;
+  const double odom_duration = has_localizer ? std::max(0.0, now.seconds() - localizer_->last_absolute_observation_stamp_sec()) : 0.0;
+  const auto add = [&make_entry](DiagnosticStatus& target, const std::string& key, const std::string& value) { target.values.push_back(make_entry(key, value)); };
+  add(state_status, "state", state_name);
+  add(state_status, "mode", is_mapping() ? "mapping" : "localization");
+  double position_std = last_output_ ? last_output_->position_std_m : 0.0;
+  if (has_localizer) {
+    const auto deviations = localizer_->latest_position_and_yaw_std();
+    if (deviations) position_std = std::max(position_std, std::max((*deviations)[0], (*deviations)[1]));
+  }
+  add(state_status, "position_std_m", std::to_string(position_std));
+  add(state_status, "seconds_since_last_match", std::to_string(match_age));
+  add(state_status, "odom_only_distance_m", std::to_string(has_localizer ? localizer_->odom_only_distance_m() : 0.0));
+  add(state_status, "odom_only_duration_s", std::to_string(odom_duration));
+  add(state_status, "is_large_correction", last_output_ && last_output_->is_large_correction ? "true" : "false");
+  add(state_status, "pending_correction_m", std::to_string(last_output_ ? last_output_->pending_correction_m : 0.0));
+  array.status.push_back(std::move(state_status));
+
+  DiagnosticStatus match_status;
+  match_status.name = "localization_node: map match";
+  match_status.level = DiagnosticStatus::OK;
+  match_status.message = "no prior map";
+  if (!is_mapping() && !map_points_.empty()) {
+    match_status.message = "OK";
+    const double inlier = has_localizer ? localizer_->last_inlier_ratio() : 0.0;
+    if (match_age > localizer_parameters_.state.odom_only_max_s) match_status.level = DiagnosticStatus::ERROR;
+    else if (match_age > localizer_parameters_.state.tracking_window_s || inlier < localizer_parameters_.map_matcher.inlier_ratio_min) match_status.level = DiagnosticStatus::WARN;
+    const MapMatchStatistics counts = has_localizer ? localizer_->map_match_statistics() : MapMatchStatistics{};
+    add(match_status, "last_inlier_ratio", std::to_string(inlier));
+    add(match_status, "last_lidar_odom_inlier_ratio", std::to_string(has_localizer ? localizer_->last_lidar_odom_inlier_ratio() : 0.0));
+    add(match_status, "seconds_since_last_match", std::to_string(match_age));
+    const auto eigenvalue = has_localizer ? localizer_->last_match_eigenvalue_ratio() : std::nullopt;
+    add(match_status, "last_match_eigenvalue_ratio", eigenvalue ? std::to_string(*eigenvalue) : "");
+    add(match_status, "attempted_total", std::to_string(counts.attempted_total));
+    add(match_status, "accepted_total", std::to_string(counts.accepted_total));
+    add(match_status, "last_gate_scale", std::to_string(counts.last_gate_scale));
+    add(match_status, "rejected_not_converged_total", std::to_string(counts.rejected_not_converged_total));
+    add(match_status, "rejected_inlier_total", std::to_string(counts.rejected_inlier_total));
+    add(match_status, "rejected_translation_gate_total", std::to_string(counts.rejected_translation_gate_total));
+    add(match_status, "rejected_rotation_gate_total", std::to_string(counts.rejected_rotation_gate_total));
+  }
+  array.status.push_back(std::move(match_status));
+
+  DiagnosticStatus errors_status;
+  errors_status.name = "localization_node: errors";
+  errors_status.level = (!node_error_.empty() || (localizer_ && !localizer_->last_error().empty())) ? DiagnosticStatus::WARN : DiagnosticStatus::OK;
+  errors_status.message = errors_status.level == DiagnosticStatus::OK ? "OK" : "error present";
+  add(errors_status, "last_error", composed_last_error());
+  add(errors_status, "error_events_total", std::to_string(has_localizer ? localizer_->error_events_total() : 0));
+  array.status.push_back(std::move(errors_status));
+
+  const ScanTimeStatistics scan = has_localizer ? localizer_->take_scan_time_statistics() : ScanTimeStatistics{};
+  const double mean_ms = scan.count ? scan.total_ms / static_cast<double>(scan.count) : 0.0;
+  const auto cpu_time = std::chrono::steady_clock::now();
+  struct rusage usage{};
+  double cpu_percent = 0.0;
+  if (getrusage(RUSAGE_SELF, &usage) == 0) {
+    const double usage_sec = static_cast<double>(usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) + static_cast<double>(usage.ru_utime.tv_usec + usage.ru_stime.tv_usec) / 1e6;
+    const double elapsed = std::chrono::duration<double>(cpu_time - last_cpu_time_).count();
+    if (has_cpu_sample_ && elapsed > 0.0) cpu_percent = std::max(0.0, 100.0 * (usage_sec - last_cpu_usage_sec_) / elapsed);
+    last_cpu_time_ = cpu_time;
+    last_cpu_usage_sec_ = usage_sec;
+    has_cpu_sample_ = true;
+  }
+  std::optional<double> memory_mb;
+#ifdef __linux__
+  std::ifstream proc_status("/proc/self/status");
+  std::string line;
+  while (std::getline(proc_status, line)) {
+    if (line.rfind("VmRSS:", 0) == 0) {
+      try { memory_mb = std::stod(line.substr(6)) / kKilobytesPerMegabyte; } catch (const std::exception&) {}
+      break;
+    }
+  }
+#endif
+  DiagnosticStatus performance_status;
+  performance_status.name = "localization_node: performance";
+  performance_status.level = mean_ms > kScanMeanErrorMs ? DiagnosticStatus::ERROR : ((scan.maximum_ms > kScanMaximumWarnMs || cpu_percent > diagnostics_cpu_warn_percent_ || (memory_mb && *memory_mb > diagnostics_memory_warn_mb_)) ? DiagnosticStatus::WARN : DiagnosticStatus::OK);
+  performance_status.message = performance_status.level == DiagnosticStatus::OK ? "OK" : "resource threshold exceeded";
+  add(performance_status, "scans_processed", std::to_string(scan.count));
+  add(performance_status, "scan_time_mean_ms", std::to_string(mean_ms));
+  add(performance_status, "scan_time_max_ms", std::to_string(scan.maximum_ms));
+  add(performance_status, "last_match_time_ms", std::to_string(has_localizer ? localizer_->last_match_time_ms() : 0.0));
+  add(performance_status, "last_submap_rebuild_time_ms", std::to_string(has_localizer ? localizer_->last_submap_rebuild_time_ms() : 0.0));
+  add(performance_status, "cpu_percent", std::to_string(cpu_percent));
+  add(performance_status, "memory_rss_mb", memory_mb ? std::to_string(*memory_mb) : "unavailable");
+  array.status.push_back(std::move(performance_status));
   diagnostics_publisher_->publish(array);
   last_diagnostics_publish_time_ = now;
   has_diagnostics_publish_time_ = true;
