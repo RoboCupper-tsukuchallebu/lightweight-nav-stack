@@ -55,7 +55,11 @@ struct ArcCandidate {
   double curvature_per_m{0.0};
   bool is_feasible{false};
   double score{0.0};
+  const char* rejection_reason{""};
 };
+
+// Position on an arc in the robot body frame.
+Point2D arcPointInBody(double curvature_per_m, double arc_length_m);
 
 // Pure function: scores every candidate arc. Infeasible when a sample hits an
 // occupied cell or the end point is farther than max_path_deviation_m from the
@@ -109,12 +113,16 @@ class ArcAvoidLayer final : public AvoidLayer {
   LayerOutput compute(const AvoidContext& context) override;
 
   bool isAvoiding() const { return is_avoiding_; }
+  const std::vector<ArcCandidate>& candidates() const { return candidates_; }
+  const std::optional<ArcCandidate>& selectedCandidate() const { return selected_candidate_; }
 
  private:
   void reset();
   bool isPathEndOccupied(const LocalGrid& grid, const AvoidContext& context) const;
   LayerOutput makeWaiting(double now_s, StopReason reason);
 
+  std::vector<ArcCandidate> candidates_;
+  std::optional<ArcCandidate> selected_candidate_;
   AvoidParameters parameters_;
   bool is_avoiding_{false};
   std::optional<double> release_since_s_;

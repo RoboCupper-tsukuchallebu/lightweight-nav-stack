@@ -35,6 +35,12 @@ Runtime parameters are applied between control cycles without resetting the held
 | Tuning (both directions) | `lookahead_m`, `search_window_m`, `v_max`, `v_slow`, `w_max`, `w_rotate`, `v_avoid`, `k_end`, `goal_tolerance_m`, `rotate_in_place_heading_rad`, `w_path`, `w_heading`, `w_smooth`, `arc_candidate_count`, `stuck_timeout_s` |
 | Safety (at most startup value) | `v_min`, `max_path_deviation_m`, `pose_timeout_s`, `obstacle_status_timeout_s`, `grid_timeout_s`, `arc_step_m`, `rejoin_distance_m` |
 | Safety (at least startup value) | `avoid_trigger_m`, `avoid_release_m`, `arc_length_m`, `avoid_release_hold_s` |
-| Read-only after construction | `grid_frame`, `control_hz`, `use_sim_time` |
+| Read-only after construction | `grid_frame`, `control_hz`, `arc_markers_rate_hz`, `use_sim_time` |
 
 All numeric values must be finite and positive; `arc_candidate_count` must be a positive integer. Safety values require a finite startup baseline and may return to that baseline. Set related parameters in an order that preserves the constraints: the `set_parameters` service validates each value separately.
+
+### Avoidance arc visualization
+
+`/lightnav/controller/arc_candidates` publishes `visualization_msgs/MarkerArray` in `grid_frame` (on the robot, `base_footprint`). Green lines are feasible candidates, red lines are rejected candidates, and the marker namespace identifies the rejection reason. The selected candidate is thicker; text shows the avoid state. Markers are cleared when avoidance is idle. Publishing requires a subscriber and is capped by the read-only `arc_markers_rate_hz` parameter (default 2.0 Hz; 0 disables it).
+
+When the stop zone is occupied or obstacle information is stale, candidates are not evaluated, so only the state text appears without arcs.
