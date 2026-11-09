@@ -347,6 +347,16 @@ bool verify_peak(GlobalInitializationPeak& peak, const PointList& map, const Poi
   pose = Eigen::Isometry3d::Identity();
   pose.linear() = Eigen::AngleAxisd(peak.yaw_rad, Eigen::Vector3d::UnitZ()).toRotationMatrix();
   pose.translation().head<2>() = peak.position;
+  double ground = std::numeric_limits<double>::infinity();
+  const Eigen::Vector2d cell = peak.position.array().floor();
+  for (const auto& point : local_map) {
+    if (!point.allFinite()) continue;
+    const Eigen::Vector2d offset = point.head<2>().cast<double>().array().floor().matrix() - cell;
+    if (std::abs(offset.x()) <= 1.0 && std::abs(offset.y()) <= 1.0)
+      ground = std::min(ground, static_cast<double>(point.z()));
+  }
+  if (!std::isfinite(ground)) return false;
+  pose.translation().z() = ground;
   MatcherParameters parameters;
   parameters.max_correspondence_distance_m = 2.0;
   auto result = match_scan(target, scan, pose, parameters);
