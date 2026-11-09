@@ -29,7 +29,9 @@ def launch_setup(context):
                               "body_to_base_xyz_rpy": [-0.1, 0.0, -0.7, 0.0, 0.0, 0.0]},
         "controller_node": {**production["controller_node"]["ros__parameters"], "grid_frame": frame, "max_path_deviation_m": float(LaunchConfiguration("max_path_deviation_m").perform(context))},
     }
-    scene = {"obstacles": [4.0, 0.3, 0.5]} if scenario == "avoid" else {"walls": [4.0, -1.5, 4.0, 1.5]}
+    if scenario == "blocked":
+        parameters["controller_node"]["v_max"] = 1.0
+    scene = {"obstacles": [4.0, 0.45, 0.3]} if scenario == "avoid" else {"walls": [4.0, -1.5, 4.0, 1.5]}
     entities = [Node(package="lightnav_sim", executable="kinematic_sim_node", output="screen",
                      parameters=[scene, {"publish_tf": False}])]
     if frame == "base_footprint":
