@@ -52,6 +52,9 @@ jobs:
           locked: true
           # On the self-hosted runner the package cache of rattler stays on the disk; the GitHub cache is only a download.
           cache: ${{ !(matrix.os == 'ubuntu-latest' && env.SELF_HOSTED == 'true') }}
+          # Self-hosted: keep ~/.pixi between jobs. The default post-cleanup deletes the pixi binary, and a job that
+          # starts while another one cleans up fails with "pixi: command not found" (2026-11-09).
+          post-cleanup: ${{ !(matrix.os == 'ubuntu-latest' && env.SELF_HOSTED == 'true') }}
       - run: pixi run lint
       - run: pixi run test
       # `pixi run test` stops before `colcon test-result` on failure, so print which tests failed.
