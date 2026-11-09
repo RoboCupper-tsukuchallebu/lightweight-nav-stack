@@ -151,6 +151,56 @@ TEST(GlobalInitializationSearch, RejectsLikelihoodFieldAboveCellLimit) {
   EXPECT_EQ(result.evaluated_candidates, 0u);
 }
 
+TEST(GlobalInitializationSearch, WindowBoundsFieldAndArea) {
+  PointList scan;
+  for (int index = 0; index < 36; ++index) {
+    const double angle = index * M_PI / 18.0;
+    scan.emplace_back(std::cos(angle), std::sin(angle), 1.0f);
+  }
+  GlobalInitializationSearchParameters parameters;
+  parameters.minimum = {-1000.0, -1000.0};
+  parameters.maximum = {1000.0, 1000.0};
+  parameters.maximum_range_m = 2.0;
+  GlobalInitializationGnssWindow window;
+  window.antenna_position = {0.0, 0.0};
+  window.radius_m = 1.0;
+  parameters.gnss_window = window;
+  std::atomic<bool> abort{false};
+  const auto large_box = search_global_initialization({}, scan, parameters, abort);
+  parameters.minimum = {-1.0, -1.0};
+  parameters.maximum = {1.0, 1.0};
+  const auto small_box = search_global_initialization({}, scan, parameters, abort);
+  EXPECT_GT(large_box.field_cells, 0u);
+  EXPECT_EQ(large_box.field_cells, small_box.field_cells);
+  parameters.maximum_area_m2 = 3.0;
+  EXPECT_EQ(search_global_initialization({}, scan, parameters, abort).decision.error, "map_too_large");
+}
+
+TEST(GlobalInitializationSearch, SkipsCoarsePositionsOutsideBoxAfterLeverArmCorrection) {
+  const PointList map{Eigen::Vector3f(1.0f, 0.0f, 0.0f), Eigen::Vector3f(1.0f, 0.0f, 1.0f)};
+  PointList scan;
+  for (int index = 0; index < 36; ++index) {
+    const double angle = index * M_PI / 18.0;
+    scan.emplace_back(std::cos(angle), std::sin(angle), 1.0f);
+  }
+  GlobalInitializationSearchParameters parameters;
+  parameters.minimum = {0.0, 0.0};
+  parameters.maximum = {0.1, 0.1};
+  parameters.maximum_range_m = 2.0;
+  parameters.coarse_yaw_step_rad = 2.0 * M_PI;
+  GlobalInitializationGnssWindow window;
+  window.antenna_position = {0.0, 0.0};
+  window.radius_m = 0.1;
+  window.lever_arm = {1.0, 0.0};
+  parameters.gnss_window = window;
+  std::atomic<bool> abort{false};
+  const auto corrected = search_global_initialization(map, scan, parameters, abort);
+  EXPECT_EQ(corrected.evaluated_candidates, 0u);
+  parameters.gnss_window->lever_arm.setZero();
+  const auto control = search_global_initialization(map, scan, parameters, abort);
+  EXPECT_GT(control.evaluated_candidates, 0u);
+}
+
 TEST(GlobalInitializationSearch, AcceptsFivePosesInAsymmetricRoom) {
   using lightnav_localization::testing::SyntheticWorld;
   SyntheticWorld world({{0.0, 0.0}, {9.0, 0.0}, {9.0, 6.0}});
@@ -344,18 +394,24 @@ TEST(GlobalInitializationSearch, G8CorrectsAntennaLeverArm) {
   GlobalInitializationGnssWindow window;
   window.antenna_position = {1.3, 0.2};
   window.lever_arm = {0.3, 0.2};
-  window.radius_m = 5.0;
+  window.radius_m = 0.25;
   parameters.gnss_window = window;
   std::atomic<bool> abort{false};
   const auto result = search_global_initialization(map, scan, parameters, abort);
   ASSERT_TRUE(result.decision.accepted) << result.decision.error;
   EXPECT_LE((result.pose.translation().head<2>() - Eigen::Vector2d(1.0, 0.0)).norm(), 0.1);
+  parameters.gnss_window->lever_arm.setZero();
+  EXPECT_FALSE(search_global_initialization(map, scan, parameters, abort).decision.accepted);
+  parameters.gnss_window->lever_arm = -window.lever_arm;
+  EXPECT_FALSE(search_global_initialization(map, scan, parameters, abort).decision.accepted);
 }
 
 TEST(GlobalInitializationSearch, G7RejectsDisplacedGnssWindow) {
   using lightnav_localization::testing::SyntheticWorld;
   SyntheticWorld world({{0.0, 0.0}, {9.0, 0.0}, {9.0, 6.0}});
   world.add_box({2.0, 0.5}, {2.8, 1.5});
+  world.add_box({5.0, -1.7}, {5.5, -0.4});
+  world.add_box({8.0, 3.4}, {8.5, 4.2});
   const auto map = world.sample_map(0.15);
   Eigen::Isometry3d sensor = Eigen::Isometry3d::Identity();
   sensor.translation() = Eigen::Vector3d(1.0, 0.0, 0.5);
@@ -363,14 +419,17 @@ TEST(GlobalInitializationSearch, G7RejectsDisplacedGnssWindow) {
   PointList scan;
   for (const auto& point : timed) scan.push_back(point.position + Eigen::Vector3f(0, 0, 0.5f));
   GlobalInitializationSearchParameters parameters;
-  parameters.minimum = {30.0, 30.0};
+  parameters.minimum = {0.0, -1.5};
   parameters.maximum = {32.0, 32.0};
   parameters.maximum_range_m = 12.0;
   GlobalInitializationGnssWindow window;
-  window.antenna_position = {31.0, 31.0};
-  window.radius_m = 1.0;
+  window.antenna_position = {1.0, 0.0};
+  window.radius_m = 0.5;
   parameters.gnss_window = window;
   std::atomic<bool> abort{false};
+  const auto control = search_global_initialization(map, scan, parameters, abort);
+  ASSERT_TRUE(control.decision.accepted) << control.decision.error;
+  parameters.gnss_window->antenna_position = {31.0, 31.0};
   const auto result = search_global_initialization(map, scan, parameters, abort);
   EXPECT_FALSE(result.decision.accepted);
   EXPECT_TRUE(result.decision.error == "low_score" || result.decision.error == "outside_gnss_window")

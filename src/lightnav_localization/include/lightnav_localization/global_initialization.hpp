@@ -4,8 +4,8 @@
 #include <Eigen/Geometry>
 #include <atomic>
 #include <cstddef>
-#include <string>
 #include <optional>
+#include <string>
 #include <vector>
 #include "lightnav_localization/pcd_io.hpp"
 

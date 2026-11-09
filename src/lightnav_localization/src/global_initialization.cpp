@@ -159,7 +159,7 @@ struct SearchContext {
   Clock::time_point started = Clock::now();
   std::size_t candidates = 0;
   std::string error;
-  GlobalInitializationSearchResult* measurements = nullptr;
+  GlobalInitializationSearchResult& measurements;
   bool stopped() {
     if (abort.load()) error = "cancelled";
     else if (std::chrono::duration<double>(Clock::now() - started).count() >=
@@ -242,11 +242,12 @@ std::vector<GlobalInitializationPeak> suppress_peaks(
 }
 
 std::vector<GlobalInitializationPeak> coarse_search(
-    const GlobalInitializationLikelihoodField& field, const PointList& scan, SearchContext& context) {
+    const GlobalInitializationLikelihoodField& field, const PointList& scan, SearchContext& context,
+    const Eigen::Vector2d& minimum, const Eigen::Vector2d& maximum) {
   const auto& parameters = context.parameters;
   std::vector<GlobalInitializationPeak> candidates;
-  for (double x = parameters.minimum.x(); x <= parameters.maximum.x() + 1e-9; x += parameters.coarse_translation_step_m) {
-    for (double y = parameters.minimum.y(); y <= parameters.maximum.y() + 1e-9; y += parameters.coarse_translation_step_m) {
+  for (double x = minimum.x(); x <= maximum.x() + 1e-9; x += parameters.coarse_translation_step_m) {
+    for (double y = minimum.y(); y <= maximum.y() + 1e-9; y += parameters.coarse_translation_step_m) {
       const double distance = field.distance({x, y});
       if (distance < 0.3 || distance > parameters.maximum_range_m) continue;
       for (double yaw = -M_PI; yaw < M_PI - 1e-9; yaw += parameters.coarse_yaw_step_rad) {
@@ -258,6 +259,8 @@ std::vector<GlobalInitializationPeak> coarse_search(
           if ((peak.position - window.antenna_position).norm() > window.radius_m) continue;
           peak.position -= Eigen::Rotation2Dd(yaw) * window.lever_arm;
         }
+        if ((peak.position.array() < parameters.minimum.array()).any() ||
+            (peak.position.array() > parameters.maximum.array()).any()) continue;
         peak.coarse_score = likelihood(field, scan, peak, parameters.likelihood_sigma_m);
         ++context.candidates;
         candidates.push_back(peak);
@@ -360,7 +363,7 @@ bool verify_peak(GlobalInitializationPeak& peak, const PointList& map, const Poi
     if ((point.head<2>().cast<double>() - peak.position).norm() <= context.parameters.maximum_range_m) local_map.push_back(point);
   const auto target_started = Clock::now();
   PreparedTarget target(local_map);
-  context.measurements->target_seconds.push_back(std::chrono::duration<double>(Clock::now() - target_started).count());
+  context.measurements.target_seconds.push_back(std::chrono::duration<double>(Clock::now() - target_started).count());
   if (context.stopped() || !target.is_valid()) return false;
   pose = Eigen::Isometry3d::Identity();
   pose.linear() = Eigen::AngleAxisd(peak.yaw_rad, Eigen::Vector3d::UnitZ()).toRotationMatrix();
@@ -382,7 +385,7 @@ bool verify_peak(GlobalInitializationPeak& peak, const PointList& map, const Poi
   if (context.stopped() || !result.converged) return false;
   parameters.max_correspondence_distance_m = 0.5;
   result = match_scan(target, scan, result.target_to_source, parameters);
-  context.measurements->matching_seconds.push_back(std::chrono::duration<double>(Clock::now() - matching_started).count());
+  context.measurements.matching_seconds.push_back(std::chrono::duration<double>(Clock::now() - matching_started).count());
   if (context.stopped() || !result.converged || !result.target_to_source.matrix().allFinite()) return false;
   Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> eigenvalues(result.information.block<3, 3>(3, 3));
   degenerate = eigenvalues.info() != Eigen::Success || eigenvalues.eigenvalues().maxCoeff() <= 0.0 ||
@@ -402,7 +405,7 @@ GlobalInitializationSearchResult search_global_initialization(
     const PointList& map, const PointList& scan, const GlobalInitializationSearchParameters& parameters,
     const std::atomic<bool>& abort) {
   GlobalInitializationSearchResult output;
-  SearchContext context{parameters, abort, Clock::now(), 0, {}, &output};
+  SearchContext context{parameters, abort, Clock::now(), 0, {}, output};
   if (context.stopped()) { output.decision.error = context.error; return output; }
   const Eigen::Vector2d extent = parameters.maximum - parameters.minimum;
   const std::array<double, 8> positive_values{
@@ -424,8 +427,19 @@ GlobalInitializationSearchResult search_global_initialization(
     output.decision.error = "invalid_parameters";
     return output;
   }
-  if ((parameters.gnss_window ? M_PI * std::pow(parameters.gnss_window->radius_m +
-          parameters.gnss_window->lever_arm.norm(), 2) : extent.prod()) > parameters.maximum_area_m2) {
+  Eigen::Vector2d search_minimum = parameters.minimum;
+  Eigen::Vector2d search_maximum = parameters.maximum;
+  if (parameters.gnss_window) {
+    const auto& window = *parameters.gnss_window;
+    const Eigen::Vector2d radius = Eigen::Vector2d::Constant(window.radius_m + window.lever_arm.norm());
+    search_minimum = search_minimum.cwiseMax(window.antenna_position - radius);
+    search_maximum = search_maximum.cwiseMin(window.antenna_position + radius);
+    if ((search_maximum.array() < search_minimum.array()).any()) {
+      output.decision.error = "low_score";
+      return output;
+    }
+  }
+  if ((search_maximum - search_minimum).prod() > parameters.maximum_area_m2) {
     output.decision.error = "map_too_large";
     return output;
   }
@@ -434,12 +448,12 @@ GlobalInitializationSearchResult search_global_initialization(
   try {
     const Eigen::Vector2d padding = Eigen::Vector2d::Constant(parameters.maximum_range_m);
     auto stage_started = Clock::now();
-    GlobalInitializationLikelihoodField field(map_height_band(map, parameters), parameters.minimum - padding, parameters.maximum + padding,
+    GlobalInitializationLikelihoodField field(map_height_band(map, parameters), search_minimum - padding, search_maximum + padding,
                                                parameters.grid_resolution_m, parameters.maximum_grid_cells);
     output.field_cells = field.cell_count();
     output.field_seconds = std::chrono::duration<double>(Clock::now() - stage_started).count();
     stage_started = Clock::now();
-    auto peaks = coarse_search(field, band, context);
+    auto peaks = coarse_search(field, band, context, search_minimum, search_maximum);
     output.coarse_seconds = std::chrono::duration<double>(Clock::now() - stage_started).count();
     if (context.stopped()) { output.decision.error = context.error; return output; }
     if (has_too_many_global_initialization_peaks(peaks, parameters.peaks)) {
