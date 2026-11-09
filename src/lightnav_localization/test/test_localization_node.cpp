@@ -718,21 +718,43 @@ TEST_F(LocalizationNodeTest, MapMatchDiagnosticsCountEachRejectionReason) {
       result.converged = true;
       result.inlier_ratio = 1.0;
       result.target_to_source.translation() = kTruthPosition;
-      result.target_to_source.linear() = Eigen::AngleAxisd(kTruthYaw, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+      result.target_to_source.linear() =
+          Eigen::AngleAxisd(kTruthYaw, Eigen::Vector3d::UnitZ()).toRotationMatrix();
       return;
     }
     if (attempt == 1) result.converged = false;
-    if (attempt == 2) { result.converged = true; result.inlier_ratio = 0.0; }
-    if (attempt == 3) { result.converged = true; result.inlier_ratio = 1.0; result.target_to_source.translation().x() += 100.0; }
-    if (attempt == 4) { result.converged = true; result.inlier_ratio = 1.0; result.target_to_source.linear() = result.target_to_source.linear() * Eigen::AngleAxisd(1.0, Eigen::Vector3d::UnitZ()).toRotationMatrix(); }
+    if (attempt == 2) {
+      result.converged = true;
+      result.inlier_ratio = 0.0;
+    }
+    if (attempt == 3) {
+      result.converged = true;
+      result.inlier_ratio = 1.0;
+      result.target_to_source.translation().x() += 100.0;
+    }
+    if (attempt == 4) {
+      result.converged = true;
+      result.inlier_ratio = 1.0;
+      result.target_to_source.linear() =
+          result.target_to_source.linear() *
+          Eigen::AngleAxisd(1.0, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+    }
   });
   run_for(5000ms, kInputWheel | kInputScans);
   ASSERT_GE(attempt, 4);
   const auto& match = diagnostics_values_.at("localization_node: map match");
-  EXPECT_EQ(std::stoi(match.at("rejected_not_converged_total")) - std::stoi(initial_match.at("rejected_not_converged_total")), 1);
-  EXPECT_EQ(std::stoi(match.at("rejected_inlier_total")) - std::stoi(initial_match.at("rejected_inlier_total")), 1);
-  EXPECT_EQ(std::stoi(match.at("rejected_translation_gate_total")) - std::stoi(initial_match.at("rejected_translation_gate_total")), 1);
-  EXPECT_EQ(std::stoi(match.at("rejected_rotation_gate_total")) - std::stoi(initial_match.at("rejected_rotation_gate_total")), 1);
+  EXPECT_EQ(std::stoi(match.at("rejected_not_converged_total")) -
+                std::stoi(initial_match.at("rejected_not_converged_total")),
+            1);
+  EXPECT_EQ(std::stoi(match.at("rejected_inlier_total")) -
+                std::stoi(initial_match.at("rejected_inlier_total")),
+            1);
+  EXPECT_EQ(std::stoi(match.at("rejected_translation_gate_total")) -
+                std::stoi(initial_match.at("rejected_translation_gate_total")),
+            1);
+  EXPECT_EQ(std::stoi(match.at("rejected_rotation_gate_total")) -
+                std::stoi(initial_match.at("rejected_rotation_gate_total")),
+            1);
 }
 
 TEST_F(LocalizationNodeTest, StateDiagnosticsWarnOnOdomOnlyAndErrorOnLost) {
@@ -751,11 +773,13 @@ TEST_F(LocalizationNodeTest, StateDiagnosticsWarnOnOdomOnlyAndErrorOnLost) {
     const auto found = diagnostics_values_.find("localization_node: state");
     if (found == diagnostics_values_.end()) continue;
     if (found->second.at("state") == "ODOM_ONLY") {
-      EXPECT_EQ(diagnostics_levels_.at("localization_node: state"), diagnostic_msgs::msg::DiagnosticStatus::WARN);
+      EXPECT_EQ(diagnostics_levels_.at("localization_node: state"),
+                diagnostic_msgs::msg::DiagnosticStatus::WARN);
       observed_odom_only = true;
     }
     if (found->second.at("state") == "LOST") {
-      EXPECT_EQ(diagnostics_levels_.at("localization_node: state"), diagnostic_msgs::msg::DiagnosticStatus::ERROR);
+      EXPECT_EQ(diagnostics_levels_.at("localization_node: state"),
+                diagnostic_msgs::msg::DiagnosticStatus::ERROR);
       observed_lost = true;
     }
   }
@@ -765,15 +789,17 @@ TEST_F(LocalizationNodeTest, StateDiagnosticsWarnOnOdomOnlyAndErrorOnLost) {
 
 TEST_F(LocalizationNodeTest, MappingOdomOnlyStateIsOk) {
   rclcpp::NodeOptions options;
-  options.parameter_overrides({rclcpp::Parameter("mode", "mapping"),
-                               rclcpp::Parameter("map_output_dir", (temp_directory_ / "mapping_diagnostics").string()),
-                               rclcpp::Parameter("allow_mapping_without_gps", true),
-                               rclcpp::Parameter("gps_timeout_s", 0.5)});
+  options.parameter_overrides(
+      {rclcpp::Parameter("mode", "mapping"),
+       rclcpp::Parameter("map_output_dir", (temp_directory_ / "mapping_diagnostics").string()),
+       rclcpp::Parameter("allow_mapping_without_gps", true),
+       rclcpp::Parameter("gps_timeout_s", 0.5)});
   create_node(options);
   bring_up();
   run_for(4000ms, kInputWheel | kInputScans);
   ASSERT_EQ(diagnostics_values_.at("localization_node: state").at("state"), "ODOM_ONLY");
-  EXPECT_EQ(diagnostics_levels_.at("localization_node: state"), diagnostic_msgs::msg::DiagnosticStatus::OK);
+  EXPECT_EQ(diagnostics_levels_.at("localization_node: state"),
+            diagnostic_msgs::msg::DiagnosticStatus::OK);
 }
 
 TEST_F(LocalizationNodeTest, OptimizationFailureExpiresFromErrorDiagnostics) {
@@ -788,9 +814,16 @@ TEST_F(LocalizationNodeTest, OptimizationFailureExpiresFromErrorDiagnostics) {
   for (int index = 0; index < 50 && !observed_clear; ++index) {
     run_for(200ms, kInputWheel | kInputScans);
     const auto found = diagnostics_values_.find("localization_node: errors");
-    if (found == diagnostics_values_.end() || found->second.at("error_events_total") != "1") continue;
-    if (diagnostics_levels_.at("localization_node: errors") == diagnostic_msgs::msg::DiagnosticStatus::WARN) observed_warning = true;
-    if (observed_warning && diagnostics_levels_.at("localization_node: errors") == diagnostic_msgs::msg::DiagnosticStatus::OK && found->second.at("last_error").empty()) observed_clear = true;
+    if (found == diagnostics_values_.end() || found->second.at("error_events_total") != "1")
+      continue;
+    if (diagnostics_levels_.at("localization_node: errors") ==
+        diagnostic_msgs::msg::DiagnosticStatus::WARN)
+      observed_warning = true;
+    if (observed_warning &&
+        diagnostics_levels_.at("localization_node: errors") ==
+            diagnostic_msgs::msg::DiagnosticStatus::OK &&
+        found->second.at("last_error").empty())
+      observed_clear = true;
   }
   EXPECT_TRUE(observed_warning);
   EXPECT_TRUE(observed_clear);
@@ -970,13 +1003,27 @@ TEST_F(LocalizationNodeTest, StaysInitializingWithoutGpsOrService) {
 TEST_F(LocalizationNodeTest, ReportsAMapWithoutGpsOriginInLastError) {
   create_node(make_options(map_file_.string(), no_origin_yaml_.string()));
   bring_up();
-  ASSERT_TRUE(run_until([this]() { return status_count_ > 0; }, 2000ms,
-                        kInputWheel | kInputScans));
+  ASSERT_TRUE(run_until([this]() { return status_count_ > 0; }, 2000ms, kInputWheel | kInputScans));
   EXPECT_EQ(last_status_.state, LocalizationStatus::INITIALIZING);
   EXPECT_EQ(odom_count_, 0);
   EXPECT_NE(last_status_.last_error.find("GPS origin"), std::string::npos)
       << last_status_.last_error;
   std::printf("[ NO_ORIGIN ] last_error=%s\n", last_status_.last_error.c_str());
+}
+
+TEST_F(LocalizationNodeTest, MissingGpsOriginNoteKeepsErrorsLevelOk) {
+  create_node(make_options(map_file_.string(), no_origin_yaml_.string()));
+  bring_up();
+  ASSERT_TRUE(run_until(
+      [this]() {
+        return diagnostics_values_.count("localization_node: errors") > 0;
+      },
+      3000ms, kInputWheel | kInputScans));
+  const auto &errors = diagnostics_values_.at("localization_node: errors");
+  EXPECT_EQ(errors.at("last_error"), "map has no GPS origin: GPS disabled");
+  EXPECT_EQ(errors.at("error_events_total"), "0");
+  EXPECT_EQ(diagnostics_levels_.at("localization_node: errors"),
+            diagnostic_msgs::msg::DiagnosticStatus::OK);
 }
 
 TEST_F(LocalizationNodeTest, GpsWithUnknownYawTracksAndWheelStopGoesStale) {

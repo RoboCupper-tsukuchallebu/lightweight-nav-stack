@@ -47,8 +47,12 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
   explicit LocalizationNode(const rclcpp::NodeOptions& options = rclcpp::NodeOptions());
   ~LocalizationNode() override;
 
-  void set_map_match_hook_for_test(std::function<void(MatchResult&)> hook) { if (localizer_) localizer_->set_map_match_hook(std::move(hook)); }
-  void inject_optimization_failure_for_test() { if (localizer_) localizer_->inject_optimization_failure_for_test(); }
+  void set_map_match_hook_for_test(std::function<void(MatchResult&)> hook) {
+    if (localizer_) localizer_->set_map_match_hook(std::move(hook));
+  }
+  void inject_optimization_failure_for_test() {
+    if (localizer_) localizer_->inject_optimization_failure_for_test();
+  }
 
   CallbackReturn on_configure(const rclcpp_lifecycle::State& state) override;
   CallbackReturn on_activate(const rclcpp_lifecycle::State& state) override;
@@ -107,6 +111,12 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
                       const Eigen::Isometry3d& odom_to_base);
   void publish_status();
   void publish_aligned_scan(const PointList& points_in_base, const rclcpp::Time& stamp);
+  diagnostic_msgs::msg::DiagnosticStatus build_gnss_status(bool has_localizer) const;
+  diagnostic_msgs::msg::DiagnosticStatus build_state_status(const rclcpp::Time& now, bool has_localizer);
+  diagnostic_msgs::msg::DiagnosticStatus build_map_match_status(const rclcpp::Time& now, bool has_localizer) const;
+  diagnostic_msgs::msg::DiagnosticStatus build_errors_status(bool has_localizer) const;
+  diagnostic_msgs::msg::DiagnosticStatus build_performance_status(bool has_localizer);
+  double sample_cpu_percent();
   void publish_diagnostics(const rclcpp::Time& now);
   std::string composed_last_error() const;
 
