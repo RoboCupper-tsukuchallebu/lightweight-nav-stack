@@ -4,9 +4,9 @@
 # not listed here use the code defaults, so copy any localization_node value of robot.yaml that is still needed indoors.
 localization_node:
   ros__parameters:
-    # Issue #59, user decision 2026-11-09: accept map-match yaw corrections up to 0.8 rad (code default 0.2 rad
+    # Issue #59, user decision 2026-11-09: accept map-match yaw corrections up to 2.0 rad (code default 0.2 rad
     # rejected correct corrections after wheel slip, so the yaw stayed off).
-    map_gate_rotation_rad: 0.8
+    map_gate_rotation_rad: 2.0
     # A topic nobody publishes. Do not set "" (configure rejects an empty topic) and do not leave the default.
     # allow_mapping_without_gps does not stop the GNSS subscription: if one usable fix arrives before mapping starts,
     # that fix becomes the GNSS origin of the map and the origin and yaw come from a 3 m drive again. An indoor
