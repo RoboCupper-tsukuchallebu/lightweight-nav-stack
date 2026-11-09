@@ -165,12 +165,11 @@ def test_invalid_parameter_fails_configure(make_harness):
     ("map_from_odom_xy_yaw", [1.0] * 3), ("max_position_variance_m2", 2.0),
 ])
 def test_configuration_parameters_are_read_only(make_harness, name, value):
-    from rclpy.exceptions import ParameterImmutableException
-
     node = make_harness().adapter
     original = node.get_parameter(name).value
-    with pytest.raises(ParameterImmutableException, match="read.only"):
-        node.set_parameters([Parameter(name, value=value)])
+    result = node.set_parameters([Parameter(name, value=value)])[0]
+    assert not result.successful
+    assert "read-only" in result.reason.lower()
     assert node.get_parameter(name).value == original
 
 

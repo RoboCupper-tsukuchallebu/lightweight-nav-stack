@@ -171,11 +171,10 @@ def test_processing_time_including_path_assembly(node):
     ("resolution_m", 0.4), ("global_frame", "odom"), ("max_path_points", 100),
 ])
 def test_configuration_parameters_are_read_only(node, name, value):
-    from rclpy.exceptions import ParameterImmutableException
-
     original = node.get_parameter(name).value
-    with pytest.raises(ParameterImmutableException, match="read.only"):
-        node.set_parameters([Parameter(name, value=value)])
+    result = node.set_parameters([Parameter(name, value=value)])[0]
+    assert not result.successful
+    assert "read-only" in result.reason.lower()
     assert node.get_parameter(name).value == original
 
 
