@@ -3,6 +3,7 @@
 #include <vector>
 #include <stdexcept>
 #include <cmath>
+#include <iostream>
 
 #include "lightnav_localization/global_initialization.hpp"
 #include "synthetic_world.hpp"
@@ -264,6 +265,10 @@ TEST(GlobalInitializationSearch, G13MovedFurnitureNeverAcceptsWrongPose) {
   if (result.decision.accepted) {
     EXPECT_LE((result.pose.translation().head<2>() - Eigen::Vector2d(1.0, 0.0)).norm(), 0.1);
     EXPECT_LE(std::abs(std::atan2(result.pose.linear()(1, 0), result.pose.linear()(0, 0))), M_PI / 180.0);
+  } else {
+    RecordProperty("rejection_reason", result.decision.error);
+    std::cout << "G13 rejection reason: " << result.decision.error << std::endl;
+    EXPECT_FALSE(result.decision.error.empty());
   }
 }
 
@@ -316,4 +321,56 @@ TEST(GlobalInitializationSearch, G6WindowLimitsSearchOnLargeMap) {
   const auto window = search_global_initialization(map, scan, parameters, abort);
   ASSERT_TRUE(window.decision.accepted) << window.decision.error;
   EXPECT_LE((window.pose.translation().head<2>() - Eigen::Vector2d(1, 0)).norm(), 0.1);
+}
+
+TEST(GlobalInitializationSearch, G8CorrectsAntennaLeverArm) {
+  using lightnav_localization::testing::SyntheticWorld;
+  SyntheticWorld world({{0.0, 0.0}, {9.0, 0.0}, {9.0, 6.0}});
+  world.add_box({2.0, 0.5}, {2.8, 1.5});
+  world.add_box({5.0, -1.7}, {5.5, -0.4});
+  world.add_box({8.0, 3.4}, {8.5, 4.2});
+  const auto map = world.sample_map(0.15);
+  Eigen::Isometry3d sensor = Eigen::Isometry3d::Identity();
+  sensor.translation() = Eigen::Vector3d(1.0, 0.0, 0.5);
+  const auto timed = world.synthesize_scan([&](double) { return sensor; }, 0.0, 0.1, true, 360, 8);
+  PointList scan;
+  for (const auto& point : timed) scan.push_back(point.position + Eigen::Vector3f(0, 0, 0.5f));
+  GlobalInitializationSearchParameters parameters;
+  parameters.minimum = {0.0, -1.5};
+  parameters.maximum = {10.5, 6.0};
+  parameters.maximum_range_m = 12.0;
+  GlobalInitializationGnssWindow window;
+  window.antenna_position = {1.3, 0.2};
+  window.lever_arm = {0.3, 0.2};
+  window.radius_m = 5.0;
+  parameters.gnss_window = window;
+  std::atomic<bool> abort{false};
+  const auto result = search_global_initialization(map, scan, parameters, abort);
+  ASSERT_TRUE(result.decision.accepted) << result.decision.error;
+  EXPECT_LE((result.pose.translation().head<2>() - Eigen::Vector2d(1.0, 0.0)).norm(), 0.1);
+}
+
+TEST(GlobalInitializationSearch, G7RejectsDisplacedGnssWindow) {
+  using lightnav_localization::testing::SyntheticWorld;
+  SyntheticWorld world({{0.0, 0.0}, {9.0, 0.0}, {9.0, 6.0}});
+  world.add_box({2.0, 0.5}, {2.8, 1.5});
+  const auto map = world.sample_map(0.15);
+  Eigen::Isometry3d sensor = Eigen::Isometry3d::Identity();
+  sensor.translation() = Eigen::Vector3d(1.0, 0.0, 0.5);
+  const auto timed = world.synthesize_scan([&](double) { return sensor; }, 0.0, 0.1, true, 360, 8);
+  PointList scan;
+  for (const auto& point : timed) scan.push_back(point.position + Eigen::Vector3f(0, 0, 0.5f));
+  GlobalInitializationSearchParameters parameters;
+  parameters.minimum = {30.0, 30.0};
+  parameters.maximum = {32.0, 32.0};
+  parameters.maximum_range_m = 12.0;
+  GlobalInitializationGnssWindow window;
+  window.antenna_position = {31.0, 31.0};
+  window.radius_m = 1.0;
+  parameters.gnss_window = window;
+  std::atomic<bool> abort{false};
+  const auto result = search_global_initialization(map, scan, parameters, abort);
+  EXPECT_FALSE(result.decision.accepted);
+  EXPECT_TRUE(result.decision.error == "low_score" || result.decision.error == "outside_gnss_window")
+      << result.decision.error;
 }
