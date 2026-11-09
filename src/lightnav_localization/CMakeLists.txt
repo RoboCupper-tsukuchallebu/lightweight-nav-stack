@@ -113,7 +113,10 @@ if(BUILD_TESTING)
   ament_add_test(test_localization_node
     COMMAND $<TARGET_FILE:test_localization_node>
       --gtest_output=xml:${AMENT_TEST_RESULTS_DIR}/${PROJECT_NAME}/test_localization_node.gtest.xml
-    GENERATE_RESULT_FOR_RETURN_CODE_ZERO)
+    GENERATE_RESULT_FOR_RETURN_CODE_ZERO
+    # One binary holds every node test, several of which hold 10 s of input; the sum is close to the ament default of
+    # 60 s, and ctest killed it under load with no result file. The per-test waits keep their own limits.
+    TIMEOUT 240)
 
   find_package(ament_cmake_pytest REQUIRED)
   ament_add_pytest_test(test_pose_adapter_acceptance test/test_pose_adapter_acceptance.py)
