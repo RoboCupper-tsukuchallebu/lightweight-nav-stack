@@ -1226,6 +1226,10 @@ TEST_F(LocalizationNodeTest, ConfigureFailsWithInvalidWheelSlipParameters) {
       rclcpp::Parameter("wheel_yaw_slip_threshold_rad", std::numeric_limits<double>::infinity()),
       rclcpp::Parameter("wheel_yaw_slip_threshold_rad", std::numeric_limits<double>::quiet_NaN()),
       rclcpp::Parameter("wheel_robust_kernel", "unknown"),
+      rclcpp::Parameter("wheel_robust_k", 0.0),
+      rclcpp::Parameter("wheel_robust_k", -1.0),
+      rclcpp::Parameter("wheel_robust_k", std::numeric_limits<double>::infinity()),
+      rclcpp::Parameter("wheel_robust_k", std::numeric_limits<double>::quiet_NaN()),
   };
   for (const auto& parameter : invalid_parameters) {
     SCOPED_TRACE(parameter.get_name());

@@ -433,6 +433,11 @@ bool LocalizationNode::read_parameters(std::string& error) {
     error = "wheel_robust_kernel must be huber or cauchy";
     return false;
   }
+  const double wheel_robust_k = get_parameter("wheel_robust_k").as_double();
+  if (!std::isfinite(wheel_robust_k) || wheel_robust_k <= 0.0) {
+    error = "wheel_robust_k must be positive and finite";
+    return false;
+  }
 
   localizer_parameters_ = LocalizerParameters{};
   localizer_parameters_.last_error_hold_s = last_error_hold_s;
@@ -442,7 +447,7 @@ bool LocalizationNode::read_parameters(std::string& error) {
       get_parameter("wheel_sigma_translation_per_m").as_double();
   localizer_parameters_.graph.wheel_yaw_slip_threshold_rad = wheel_yaw_slip_threshold_rad;
   localizer_parameters_.graph.wheel_robust_kernel = wheel_robust_kernel;
-  localizer_parameters_.graph.wheel_robust_k = get_parameter("wheel_robust_k").as_double();
+  localizer_parameters_.graph.wheel_robust_k = wheel_robust_k;
   localizer_parameters_.graph.wheel_sigma_yaw_per_rad =
       get_parameter("wheel_sigma_yaw_per_rad").as_double();
   localizer_parameters_.graph.wheel_sigma_yaw_per_m =
