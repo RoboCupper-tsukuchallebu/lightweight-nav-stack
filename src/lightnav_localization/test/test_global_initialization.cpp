@@ -143,6 +143,7 @@ TEST(GlobalInitializationSearch, AcceptsFivePosesInAsymmetricRoom) {
   world.add_box({5.0, -1.7}, {5.5, -0.4});
   world.add_box({8.0, 3.4}, {8.5, 4.2});
   const PointList map = world.sample_map(0.15);
+  // A 0.5 m sensor height exposes the floor and constrains vertical translation.
   const std::vector<Eigen::Vector3d> poses{{1.0, 0.0, 0.0}, {3.0, 0.0, M_PI / 2.0},
       {5.0, 0.0, M_PI}, {9.0, 3.0, -3.0 * M_PI / 4.0}, {9.0, 5.0, M_PI / 4.0}};
   GlobalInitializationSearchParameters parameters;
@@ -153,11 +154,11 @@ TEST(GlobalInitializationSearch, AcceptsFivePosesInAsymmetricRoom) {
   for (const auto& truth : poses) {
     SCOPED_TRACE(truth.transpose());
     Eigen::Isometry3d sensor_pose = Eigen::Isometry3d::Identity();
-    sensor_pose.translation() = Eigen::Vector3d(truth.x(), truth.y(), 1.0);
+    sensor_pose.translation() = Eigen::Vector3d(truth.x(), truth.y(), 0.5);
     sensor_pose.linear() = Eigen::AngleAxisd(truth.z(), Eigen::Vector3d::UnitZ()).toRotationMatrix();
     const auto timed = world.synthesize_scan([&](double) { return sensor_pose; }, 0.0, 0.1, true, 360, 8);
     PointList scan;
-    for (const auto& point : timed) scan.push_back(point.position + Eigen::Vector3f(0.0f, 0.0f, 1.0f));
+    for (const auto& point : timed) scan.push_back(point.position + Eigen::Vector3f(0.0f, 0.0f, 0.5f));
     const auto result = search_global_initialization(map, scan, parameters, abort);
     ASSERT_TRUE(result.decision.accepted) << result.decision.error << " best="
         << result.decision.best_score << " second=" << result.decision.second_score;

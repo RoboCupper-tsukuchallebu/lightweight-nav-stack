@@ -426,6 +426,7 @@ GlobalInitializationSearchResult search_global_initialization(
       }
       if (context.stopped()) { output.decision.error = context.error; return output; }
     }
+    // All converged peaks compete for b2, even if degenerate; only b1 is checked below.
     output.decision = decide_global_initialization_peaks(verified, parameters.peaks);
     if (output.decision.accepted && degeneracies[output.decision.best_index]) {
       output.decision.accepted = false;
