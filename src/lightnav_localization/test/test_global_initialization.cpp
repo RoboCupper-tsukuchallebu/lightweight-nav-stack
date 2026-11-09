@@ -288,3 +288,32 @@ TEST(GlobalInitializationSearch, G4RejectsTwoIdenticalRooms) {
   EXPECT_FALSE(result.decision.accepted);
   EXPECT_EQ(result.decision.error, "ambiguous");
 }
+
+TEST(GlobalInitializationSearch, G6WindowLimitsSearchOnLargeMap) {
+  using lightnav_localization::testing::SyntheticWorld;
+  SyntheticWorld world({{0.0, 0.0}, {9.0, 0.0}, {9.0, 6.0}});
+  world.add_box({2.0, 0.5}, {2.8, 1.5});
+  world.add_box({5.0, -1.7}, {5.5, -0.4});
+  world.add_box({8.0, 3.4}, {8.5, 4.2});
+  PointList map = world.sample_map(0.15);
+  const PointList room = map;
+  for (const auto& point : room) map.push_back(point + Eigen::Vector3f(60, 0, 0));
+  Eigen::Isometry3d sensor = Eigen::Isometry3d::Identity();
+  sensor.translation() = Eigen::Vector3d(1, 0, 0.5);
+  const auto timed = world.synthesize_scan([&](double) { return sensor; }, 0.0, 0.1, true, 360, 8);
+  PointList scan;
+  for (const auto& point : timed) scan.push_back(point.position + Eigen::Vector3f(0, 0, 0.5f));
+  GlobalInitializationSearchParameters parameters;
+  parameters.minimum = {0, -20};
+  parameters.maximum = {70, 20};
+  parameters.maximum_range_m = 12;
+  std::atomic<bool> abort{false};
+  const auto whole = search_global_initialization(map, scan, parameters, abort);
+  EXPECT_EQ(whole.decision.error, "map_too_large");
+  EXPECT_EQ(whole.evaluated_candidates, 0u);
+  parameters.minimum = {0, -1.5};
+  parameters.maximum = {10.5, 6};
+  const auto window = search_global_initialization(map, scan, parameters, abort);
+  ASSERT_TRUE(window.decision.accepted) << window.decision.error;
+  EXPECT_LE((window.pose.translation().head<2>() - Eigen::Vector2d(1, 0)).norm(), 0.1);
+}
