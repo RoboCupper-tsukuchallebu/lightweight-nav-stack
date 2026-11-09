@@ -7,6 +7,7 @@
 #include <chrono>
 #include <array>
 #include <map>
+#include <tuple>
 #include <Eigen/Eigenvalues>
 #include "lightnav_localization/matcher.hpp"
 
@@ -280,12 +281,32 @@ GlobalInitializationPeak refine_peak(const GlobalInitializationLikelihoodField& 
 }
 
 double scan_to_map(const PointList& scan, const PointList& map, const Eigen::Isometry3d& pose, double threshold) {
+  using Cell = std::tuple<int, int, int>;
+  const auto cell_of = [threshold](const Eigen::Vector3d& point) {
+    return Cell{static_cast<int>(std::floor(point.x() / threshold)),
+                static_cast<int>(std::floor(point.y() / threshold)),
+                static_cast<int>(std::floor(point.z() / threshold))};
+  };
+  std::map<Cell, PointList> cells;
+  for (const auto& point : map) if (point.allFinite()) cells[cell_of(point.cast<double>())].push_back(point);
   std::size_t inliers = 0;
   for (const auto& point : scan) {
+    if (!point.allFinite()) continue;
     const Eigen::Vector3d transformed = pose * point.cast<double>();
-    for (const auto& target : map) {
-      if ((transformed - target.cast<double>()).squaredNorm() <= threshold * threshold) { ++inliers; break; }
-    }
+    const auto [x, y, z] = cell_of(transformed);
+    bool found = false;
+    for (int dx = -1; dx <= 1 && !found; ++dx)
+      for (int dy = -1; dy <= 1 && !found; ++dy)
+        for (int dz = -1; dz <= 1 && !found; ++dz) {
+          const auto cell = cells.find({x + dx, y + dy, z + dz});
+          if (cell == cells.end()) continue;
+          for (const auto& target : cell->second) {
+            if ((transformed - target.cast<double>()).squaredNorm() <= threshold * threshold) {
+              found = true; break;
+            }
+          }
+        }
+    if (found) ++inliers;
   }
   return scan.empty() ? 0.0 : static_cast<double>(inliers) / scan.size();
 }
@@ -360,7 +381,7 @@ GlobalInitializationSearchResult search_global_initialization(
       (extent.array() < 0.0).any() || extent.prod() > parameters.maximum_area_m2 ||
       parameters.coarse_translation_step_m <= 0 || parameters.coarse_yaw_step_rad <= 0 ||
       parameters.fine_translation_step_m <= 0 || parameters.fine_yaw_step_rad <= 0 ||
-      parameters.likelihood_sigma_m <= 0) { output.decision.error = "map_too_large"; return output; }
+      parameters.likelihood_sigma_m <= 0 || parameters.correspondence_m <= 0) { output.decision.error = "map_too_large"; return output; }
   try {
     const Eigen::Vector2d padding = Eigen::Vector2d::Constant(parameters.maximum_range_m);
     GlobalInitializationLikelihoodField field(map_height_band(map, parameters), parameters.minimum - padding, parameters.maximum + padding,
