@@ -7,6 +7,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 
 import rclpy
 import yaml
@@ -28,7 +29,8 @@ SLOW_ACCEPT_DELAY_S = 1.0
 class FakeFollowWaypointsServer:
     """goal 受理を accept_delay_s だけ遅らせ、cancel が届くまで走り続ける偽サーバ。"""
 
-    def __init__(self, context, accept_delay_s, cancel_response=CancelResponse.ACCEPT):
+    def __init__(
+            self, context, action_name, accept_delay_s, cancel_response=CancelResponse.ACCEPT):
         self.node = rclpy.create_node("fake_follow_waypoints_server", context=context)
         self.accept_delay_s = accept_delay_s
         self.goal_received = threading.Event()
@@ -39,7 +41,7 @@ class FakeFollowWaypointsServer:
         self.stop_execution = threading.Event()
         self.execution_finished = threading.Event()
         ActionServer(
-            self.node, FollowWaypoints, "/lightnav/mission/follow_waypoints",
+            self.node, FollowWaypoints, action_name,
             goal_callback=self._on_goal, execute_callback=self._execute,
             cancel_callback=self._on_cancel)
         self.executor = MultiThreadedExecutor(num_threads=4, context=context)
@@ -82,7 +84,7 @@ class FakeFollowWaypointsServer:
         self.node.destroy_node()
 
 
-def _start_cli(waypoints_file):
+def _start_cli(waypoints_file, action_name):
     environment = {
         **os.environ,
         "ROS_DOMAIN_ID": TEST_DOMAIN_ID,
@@ -91,19 +93,24 @@ def _start_cli(waypoints_file):
         "DYLD_LIBRARY_PATH": str(INSTALL_LIBRARY_DIRECTORY),
     }
     return subprocess.Popen(
-        [sys.executable, "-m", "lightnav_mission.send_waypoints", str(waypoints_file)],
+        [sys.executable, "-m", "lightnav_mission.send_waypoints", str(waypoints_file),
+         "--action-name", action_name],
         env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
 
 
 def _interrupt_and_check(
         tmp_path, accept_delay_s, interrupt_after, cancel_response=CancelResponse.ACCEPT):
     """interrupt_after(server) を待ってから SIGINT を送り、cancel が届くことを確かめる。"""
+    # 試験ごとに action 名を変える。同じ名前だと、同じプロセスで 2 つ目以降の試験の CLI が送った goal が
+    # 15 秒待っても偽サーバに届かないことがある（負荷が高いとき。#32）。1 つ目の試験は落ちず、名前を
+    # 変えると落ちなくなるので、直前の試験の endpoint が discovery に残って混ざるとみている。
+    action_name = f"/lightnav/mission/follow_waypoints_test_{uuid.uuid4().hex}"
     context = rclpy.Context()
     rclpy.init(context=context, domain_id=int(TEST_DOMAIN_ID))
-    server = FakeFollowWaypointsServer(context, accept_delay_s, cancel_response)
+    server = FakeFollowWaypointsServer(context, action_name, accept_delay_s, cancel_response)
     waypoints_file = tmp_path / "waypoints.yaml"
     waypoints_file.write_text(yaml.safe_dump({"waypoints": [{"x": 1.0, "y": 0.0}]}))
-    process = _start_cli(waypoints_file)
+    process = _start_cli(waypoints_file, action_name)
     try:
         assert interrupt_after(server).wait(GOAL_START_TIMEOUT_S), "goal が届かなかった"
         process.send_signal(signal.SIGINT)

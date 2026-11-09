@@ -16,6 +16,7 @@
 - **人の確認が要るもの**: ブランチの保護、ルールセット、リポジトリの設定の変更（エージェントは行わない）。
 - 仕様 Issue を参照しない PR（`Refs #` / `Closes #` が無いもの）は自動マージしない。例外は誤字・リンクの修正だけで、AGENTS.md・CLAUDE.md を変える PR は例外に含めない。
 - rebase・force push・履歴の書き換えはしません。取り込みは merge で行います。
+- **self-hosted runner（#50）**: `build-test (ubuntu-latest)` と `docker` は宅内の機械（ラベル `tsukuchalle-pixi` / `tsukuchalle-docker`）で動く。fork の PR は自分の ci.yml でこのラベルを指定できるので、外部の人の PR の workflow を承認する前に、必ず `.github/` の差分を読む（承認を求める設定は 2026-11-09 にユーザーの決定で入れた）。差分が `runs-on` や self-hosted に触れていれば承認しない。
 - 承認の根拠: リポジトリの持ち主が 2026-11-08 に、このリポジトリを含むつくちゃれ部のリポジトリの自動マージを承認した（範囲は上のとおり）。
 
 ## 公開について

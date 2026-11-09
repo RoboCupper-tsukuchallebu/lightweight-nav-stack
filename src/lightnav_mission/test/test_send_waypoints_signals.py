@@ -99,9 +99,12 @@ def test_interrupt_before_send_does_not_send_goal(monkeypatch):
         return True
 
     client.server_is_ready.side_effect = server_ready
-    monkeypatch.setattr(send_waypoints, "ActionClient", Mock(return_value=client))
+    action_client_class = Mock(return_value=client)
+    monkeypatch.setattr(send_waypoints, "ActionClient", action_client_class)
     assert send_waypoints._run(["unused.yaml"], interrupted) == send_waypoints.EXIT_FAILED
     client.send_goal_async.assert_not_called()
+    # Without --action-name the CLI must use the action name that mission_node serves.
+    assert action_client_class.call_args.args[2] == "/lightnav/mission/follow_waypoints"
 
 
 @pytest.mark.parametrize("accepted", [True, False])

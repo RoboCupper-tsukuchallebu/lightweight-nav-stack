@@ -111,6 +111,12 @@ struct Scenario {
   bool reinitialize_after_lost = false;
   int false_convergence_every = 0;
   double false_shift_m = 0.0;
+  // No wheel, scan or GPS input in (begin, end): the odometry keeps integrating, as it does while
+  // a bag has a hole in it (Issue #45).
+  double wheel_gap_begin_sec = -1.0;
+  double wheel_gap_end_sec = -1.0;
+  bool reinitialize_after_gap = false;  // set_initial_pose with the truth when the input resumes
+  double stop_sec = -1.0;  // ends the run early
 };
 
 struct Measurement {
@@ -156,6 +162,8 @@ struct Report {
   double scan_ms_max = 0.0;
   double match_ms_max = 0.0;
   double rebuild_ms_max = 0.0;
+  std::vector<Eigen::Isometry3d> lidar_keyframe_poses;  // at the end of the run
+  Eigen::Isometry3d final_truth = Eigen::Isometry3d::Identity();
 };
 
 Report run(const Scenario& scenario) {
@@ -252,8 +260,10 @@ Report run(const Scenario& scenario) {
   const int step_count = static_cast<int>(course.total_sec() / kDt);
   for (int step = 0; step <= step_count; ++step) {
     const double time_sec = step * kDt;
+    if (scenario.stop_sec >= 0.0 && time_sec > scenario.stop_sec) break;
     current_time_sec = time_sec;
     const Eigen::Isometry3d truth = truth_at(time_sec);
+    report.final_truth = truth;
     if (scenario.has_ramp && scenario.ramp_blend_m == 0.0 &&
         !pitch_step_begin_sec && truth.translation().x() >= 5.0) {
       pitch_step_begin_sec = 5.0 / kSpeed;
@@ -271,6 +281,7 @@ Report run(const Scenario& scenario) {
       odom = odom * drifted;
       wheel_only = wheel_only * drifted;
     }
+    if (time_sec > scenario.wheel_gap_begin_sec && time_sec < scenario.wheel_gap_end_sec) continue;
     // Scans are fed BEFORE the wheel sample of the same stamp so that the queue has to wait.
     if (step > 0 && step % static_cast<int>(scenario.scan_period_sec / kDt) == 0 && time_sec >= kScanDuration) {
       localizer.on_scan(time_sec, world.synthesize_scan(truth_at, time_sec - kScanDuration, kScanDuration, true, 360, 8));
@@ -293,7 +304,10 @@ Report run(const Scenario& scenario) {
     if (scenario.fail_optimization_at_sec >= 0.0 && std::abs(time_sec - scenario.fail_optimization_at_sec) < kDt / 2) {
       localizer.inject_optimization_failure_for_test();
     }
-    if (scenario.reinitialize_after_lost && report.saw_lost && !has_reinitialized) {
+    const bool should_reinitialize =
+        (scenario.reinitialize_after_lost && report.saw_lost) ||
+        (scenario.reinitialize_after_gap && time_sec >= scenario.wheel_gap_end_sec);
+    if (should_reinitialize && !has_reinitialized) {
       localizer.initialize(truth);
       has_reinitialized = true;
     }
@@ -374,6 +388,7 @@ Report run(const Scenario& scenario) {
   report.gps_acceptance_ratio = report.gps_submitted_count > 0
       ? static_cast<double>(gps_accepted_count) / report.gps_submitted_count : 0.0;
   report.last_error = localizer.last_error();
+  report.lidar_keyframe_poses = localizer.lidar_keyframe_poses_for_test();
   report.wheel_only_end_error_m = (wheel_only.translation() - truth_at(course.total_sec()).translation()).head<2>().norm();
   const auto* test_info = ::testing::UnitTest::GetInstance()->current_test_info();
   std::printf("[ MEASURED ] scenario=%s error_m=%.9g final_error_m=%.9g pitch_error_ramp_deg=%.9g pitch_step_recovery_sec=%.9g pitch_error_after_step_entry_deg=%.9g pitch_error_after_step_exit_deg=%.9g pitch_samples_after_step_entry=%d pitch_samples_after_step_exit=%d scan_period_sec=%.9g wheel_sigma=%.9g gps_sigma=%.9g degeneracy_ratio=%.9g pillars=%d gps_accepted_before_10s=%d gps_accepted_10_to_20s=%d gps_accepted_after_20s=%d gps_submitted_count=%d gps_acceptance_ratio=%.9g gps_time_gap_rejection_count=%zu gps_gate_rejection_count=%zu max_keyframe_interval_sec=%.9g max_gps_factors_per_keyframe=%zu saw_conflict=%d sample_columns=time_sec,truth_x_m,pitch_error_deg,along_track_error_m,position_std_m,eigen_ratio,weak_axis_x,weak_axis_y,weak_axis_z\n",
@@ -508,6 +523,50 @@ TEST(Localizer, RecoversFromOptimizationFailure) {
   EXPECT_EQ(report.last_error.find("unknown node"), std::string::npos);  // no stale node index
   EXPECT_LT(report.max_position_error_m, 0.3);
   EXPECT_TRUE(report.is_tracking_at_end);
+}
+
+// Issue #45: after a wheel-odometry gap longer than the 30 s fixed-lag window the window drops every
+// old node, so the LiDAR sub-map must drop those keyframes too. Before the fix they were all drawn at
+// the newest pose and last_error stayed at "pose requested for unknown node".
+Scenario make_wheel_gap_scenario() {
+  Scenario scenario;
+  scenario.use_spec_course = true;
+  scenario.wheel_scale = 1.01;
+  scenario.scan_period_sec = 0.1;
+  scenario.wheel_gap_begin_sec = 20.0;
+  scenario.wheel_gap_end_sec = 80.0;  // 60 s: twice the window
+  return scenario;
+}
+
+TEST(Localizer, WheelGapLongerThanTheWindowKeepsTheLidarSubmapPoses) {
+  Scenario scenario = make_wheel_gap_scenario();
+  scenario.stop_sec = 86.0;  // about five keyframes after the gap
+  const Report report = run(scenario);
+  EXPECT_EQ(report.last_error.find("unknown node"), std::string::npos) << report.last_error;
+  EXPECT_TRUE(report.last_error.empty()) << report.last_error;
+  const std::vector<Eigen::Isometry3d>& poses = report.lidar_keyframe_poses;
+  ASSERT_GE(poses.size(), 3u);
+  // The robot drives along +x at kSpeed: successive keyframes are at least 0.3 m further on, and none
+  // is further behind the robot than 10 keyframe-seconds (6 m) plus a 1 m margin.
+  constexpr double kMaxDistanceBehindRobotM = 6.0 + 1.0;
+  for (std::size_t index = 0; index < poses.size(); ++index) {
+    EXPECT_LE((poses[index].translation() - report.final_truth.translation()).norm(), kMaxDistanceBehindRobotM)
+        << "keyframe " << index;
+    if (index == 0) continue;
+    EXPECT_GT(poses[index].translation().x() - poses[index - 1].translation().x(), 0.3)
+        << "keyframe " << index << " is stacked on its predecessor";
+  }
+}
+
+TEST(Localizer, ReturnsToTrackingAfterWheelGapAndInitialPose) {
+  Scenario scenario = make_wheel_gap_scenario();
+  scenario.reinitialize_after_gap = true;
+  scenario.stop_sec = 120.0;
+  const Report report = run(scenario);
+  EXPECT_TRUE(report.published_after_reinitialize);
+  EXPECT_TRUE(report.is_tracking_at_end);
+  EXPECT_LT(report.final_position_error_m, 0.5);
+  EXPECT_TRUE(report.last_error.empty()) << report.last_error;
 }
 
 // Review high 4: initialize() is the way out of LOST.

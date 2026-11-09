@@ -86,6 +86,8 @@ class Localizer {
   void inject_optimization_failure_for_test();
   // Next prior-map rebuild: 1 = the worker throws, 2 = starting the worker throws system_error.
   void inject_map_rebuild_failure_for_test(int mode);
+  // Poses (map_to_base, oldest first) of the keyframes in the LiDAR odometry sub-map.
+  std::vector<Eigen::Isometry3d> lidar_keyframe_poses_for_test() const;
 
   double last_scan_time_ms() const;
   double last_match_time_ms() const;

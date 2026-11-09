@@ -20,6 +20,7 @@ constexpr double kWheelBufferSec = 3.0;
 constexpr double kNeverSec = -1e9;
 constexpr std::size_t kMaxPendingScans = 20;
 constexpr std::size_t kMaxPendingGps = 20;
+const std::string kUnknownNodeError = "internal: pose requested for unknown node ";
 
 using Clock = std::chrono::steady_clock;
 double elapsed_ms(Clock::time_point start) {
@@ -150,12 +151,14 @@ struct Localizer::Implementation {
   std::optional<double> match_eigenvalue_ratio;
   std::optional<Eigen::Vector3d> match_weakest_axis;
 
-  Eigen::Isometry3d pose_of(int index) {
+  // nullopt for a node the window no longer holds: callers skip the work instead of using another
+  // node's pose, and last_error says so until sync_lidar_submap() sees every pose again.
+  std::optional<Eigen::Isometry3d> pose_of(int index) {
     if (const auto pose = graph->pose(index)) return pose_cache[index] = *pose;
     const auto cached = pose_cache.find(index);
     if (cached != pose_cache.end()) return cached->second;
-    last_error = "internal: pose requested for unknown node " + std::to_string(index);
-    return pose_cache.empty() ? Eigen::Isometry3d::Identity() : pose_cache.rbegin()->second;
+    last_error = kUnknownNodeError + std::to_string(index);
+    return std::nullopt;
   }
 
   // Optimizes; returns true when the optimization failed and the window was restarted from the
@@ -212,13 +215,27 @@ struct Localizer::Implementation {
       pose_cache.erase(nodes.front().index);
       nodes.pop_front();
     }
+    // The graph no longer holds the poses of LiDAR keyframes older than the window (a gap in the
+    // input longer than window_s drops all of them), so the sub-map must forget them as well.
+    std::size_t stale_lidar_keyframe_count = 0;
+    while (!lidar_nodes.empty() && lidar_nodes.front() < nodes.front().index) {
+      lidar_nodes.pop_front();
+      ++stale_lidar_keyframe_count;
+    }
+    lidar.drop_oldest_keyframes(stale_lidar_keyframe_count);
     return was_restarted;
   }
 
   void sync_lidar_submap() {
     const auto start = Clock::now();
     std::vector<Eigen::Isometry3d> poses;
-    for (const int index : lidar_nodes) poses.push_back(pose_of(index));
+    for (const int index : lidar_nodes) {
+      const auto pose = pose_of(index);
+      if (!pose) return;  // keep the sub-map as it is rather than draw a keyframe at a wrong pose
+      poses.push_back(*pose);
+    }
+    // Every pose is known again, so the unknown-node error no longer describes the state.
+    if (last_error.rfind(kUnknownNodeError, 0) == 0) last_error.clear();
     lidar.update_keyframe_poses(poses);
     lidar.rebuild_submap();
     submap_rebuild_time_ms = elapsed_ms(start);
@@ -351,7 +368,8 @@ struct Localizer::Implementation {
     }
 
     const NodeRecord last = nodes.back();
-    const Eigen::Isometry3d last_pose = pose_of(last.index);
+    const auto last_pose = pose_of(last.index);
+    if (!last_pose) return;
     const Eigen::Isometry3d wheel_relative = invert_isometry(last.odom_to_base) * *odom_now;
     const Eigen::Isometry3d prediction = corrector.target() * *odom_now;
 
@@ -380,7 +398,7 @@ struct Localizer::Implementation {
       const int index = graph->add_node_with_wheel_factor(pending.stamp, best, wheel_relative);
       if (lidar_result) {
         graph->add_lidar_odometry_factor(
-            last.index, index, invert_isometry(last_pose) * best,
+            last.index, index, invert_isometry(*last_pose) * best,
             information_from_hessian(lidar_result->information, parameters.lidar_odometry_information));
       }
       nodes.push_back({index, pending.stamp, *odom_now});
@@ -391,7 +409,9 @@ struct Localizer::Implementation {
       try_map_match(index, pending.stamp, best, cloud);
       refresh_after_optimize();
       const int current_index = nodes.back().index;  // renumbered after a restart
-      lidar.add_keyframe(pose_of(current_index), cloud);
+      const auto current_pose = pose_of(current_index);
+      if (!current_pose) return;
+      lidar.add_keyframe(*current_pose, cloud);
       lidar_nodes.push_back(current_index);
       while (static_cast<int>(lidar_nodes.size()) > parameters.lidar_odometry.submap_keyframes) {
         lidar_nodes.pop_front();
@@ -418,7 +438,9 @@ struct Localizer::Implementation {
     const auto odom_at_fix = buffer.interpolate(pending.stamp);
     if (!odom_at_fix) return;
     const int node_index = nearest->index;
-    const Eigen::Isometry3d keyframe_pose = pose_of(node_index);
+    const auto found_pose = pose_of(node_index);
+    if (!found_pose) return;
+    const Eigen::Isometry3d keyframe_pose = *found_pose;
     const Eigen::Isometry3d predicted = keyframe_pose * invert_isometry(nearest->odom_to_base) * *odom_at_fix;
     const GpsDecision decision = gps->evaluate(pending.fix, predicted, position_std_m);
     if (decision.rejection == GpsRejection::kGate) ++gps_gate_rejections;
@@ -517,6 +539,10 @@ std::size_t Localizer::pending_scan_count() const { return implementation_->pend
 const std::string& Localizer::last_error() const { return implementation_->last_error; }
 
 void Localizer::inject_map_rebuild_failure_for_test(int mode) { implementation_->rebuild_failure_mode = mode; }
+
+std::vector<Eigen::Isometry3d> Localizer::lidar_keyframe_poses_for_test() const {
+  return implementation_->lidar.keyframe_poses();
+}
 
 void Localizer::inject_optimization_failure_for_test() { implementation_->graph->inject_failure_once(); }
 
