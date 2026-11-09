@@ -44,6 +44,8 @@ LIGHTNAV_BUILD_HOST=<ssh 宛先> LIGHTNAV_ROBOT_HOST=<ssh 宛先> scripts/deploy
 - `config/robot.yaml` を現地で変えない（次の deploy が差分を見せて止まる）。値の変更は `docker/config/robot.yaml` を PR で直す。
 - 起動（毎回人の承認）: `docker compose up -d nav`。`safety_gate_node` が起動と同時に active になり、Start の前に mission が `IDLE` であることを確かめる。ティーチ走行（パッドで `record_waypoints`）だけ `LIGHTNAV_SAFETY_GATE=false docker compose up -d nav`。その状態で `send_waypoints` をしない。gate の稼働中はパッドで操縦しない（止める手段はパッドの Back と 24 V）。
 - 停止: `docker compose exec nav bash -lc 'ros2 lifecycle set /safety_gate_node deactivate'`（Twist 0）→ `docker compose stop nav`。`stop` だけだと 0 は出ず、ドライバの 0.5 s のタイムアウトで止まる。
+- 全 ROS コンテナで `ipc: host`・`pid: host` と同一 uid/gid を揃える（drivers #33）。
+- `/dev/shm` は ROS 動作中に消さず、全 ROS コンテナ停止後のみ drivers の掃除手順を使う（docker/README.md）。
 - コンテナ内の確認用 CLI は `docker compose exec nav bash -lc '…'` で行う（`run --rm` だと毎回 daemon と共有メモリが増える）。`ros2 node list` / `ros2 topic list` など daemon を使うコマンドには `--no-daemon` を付ける（`ros2 topic hz` / `info` はこの引数が無い）。起動直後はノードが見えるまで数秒かかる。
 - DDS の `docker/dds/` は tsukuchalle_drivers `ros2/dds/` の複製（正は drivers 側）。
 
@@ -64,3 +66,13 @@ LIGHTNAV_BUILD_HOST=<ssh 宛先> LIGHTNAV_ROBOT_HOST=<ssh 宛先> scripts/deploy
 - ament_python: `setup.py` に `extras_require={"test": ["pytest"]}` を書き、`test/` に pytest 形式で置く（colcon が unittest 扱いにして 0 件で落ちるのを防ぐ）。launch_testing は `@pytest.mark.launch_test` で動く。pytest は 9 で launch_testing plugin が壊れるため `>=8,<9` にピン留め済み。
 - C++ の gtest: `ament_add_gtest` は ROS の gtest ソースと conda の gtest 1.18 ヘッダが食い違いビルド不能。`find_package(GTest REQUIRED)` + `add_executable` + `GTest::gtest_main` + `ament_add_test(... --gtest_output=xml:${AMENT_TEST_RESULTS_DIR}/${PROJECT_NAME}/<name>.gtest.xml GENERATE_RESULT_FOR_RETURN_CODE_ZERO)` を使う。
 - C++ ノードが Python に依存する場合は `find_package(Python3 REQUIRED COMPONENTS Development)` + `Python3::Python` と書くだけでよい（`pixi run build` が `Python3_FIND_STRATEGY=LOCATION` / `Python3_ROOT_DIR` / `Python3_FIND_FRAMEWORK=NEVER` を渡し、Homebrew の Python に繋がるのを防ぐ。パッケージ側で指定しない）。
+
+## 差分だけのビルドと試験（作業中）
+
+作業中は `scripts/dev.sh` を使う（2026-11-09 ユーザー決定: ビルドも試験も差分だけにする）。全体の `docker build --target test` は CI に任せる。
+
+```sh
+scripts/dev.sh up <名前>                  # 一度だけ。base イメージと長く動くコンテナを用意する
+scripts/dev.sh test <名前> <パッケージ...>  # 触ったパッケージだけビルドして試験する（2 回目以降は数十秒）
+scripts/dev.sh down <名前>                # 終わったら消す
+```

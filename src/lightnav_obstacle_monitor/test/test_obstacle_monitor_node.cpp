@@ -15,6 +15,7 @@
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/point_cloud2_iterator.hpp>
 #include <tf2_ros/static_transform_broadcaster.h>
+#include <tf2_ros/transform_broadcaster.h>
 
 #include "lightnav_obstacle_monitor/obstacle_monitor_node.hpp"
 
@@ -104,6 +105,9 @@ protected:
     transform.child_frame_id = kSensorFrame;
     transform.transform.rotation.w = 1.0;
     broadcaster_ = std::make_unique<tf2_ros::StaticTransformBroadcaster>(helper_);
+    broadcaster_->sendTransform(transform);
+    transform.header.frame_id = "odom";
+    transform.child_frame_id = "base_link";
     broadcaster_->sendTransform(transform);
   }
 
@@ -225,6 +229,21 @@ TEST_F(ObstacleMonitorNodeTest, MissingTransformIsReportedAsTfStale)
   EXPECT_EQ(gridCount_, 0);
 }
 
+TEST_F(ObstacleMonitorNodeTest, MissingMemoryTransformIsReportedAsStale)
+{
+  bringUp();
+  geometry_msgs::msg::TransformStamped transform;
+  transform.header.stamp = helper_->now();
+  transform.header.frame_id = "base_link";
+  transform.child_frame_id = kSensorFrame;
+  transform.transform.rotation.w = 1.0;
+  broadcaster_ = std::make_unique<tf2_ros::StaticTransformBroadcaster>(helper_);
+  broadcaster_->sendTransform(transform);
+  ASSERT_TRUE(waitUntil([this] {return isStale("tf:odom");}, true));
+  EXPECT_TRUE(lastStatus_.is_input_stale);
+  EXPECT_EQ(gridCount_, 0);
+}
+
 TEST_F(ObstacleMonitorNodeTest, ObstacleInStopZoneIsReportedThenInputLossBecomesStale)
 {
   bringUp();
@@ -258,6 +277,118 @@ TEST_F(ObstacleMonitorNodeTest, InvalidCloudIsDroppedAndBecomesStale)
     isStaleNow = lastStatus_.is_input_stale;
   }
   EXPECT_TRUE(isStaleNow);
+}
+
+
+TEST_F(ObstacleMonitorNodeTest, BlindMemoryKeepsStopAndGridPastAge)
+{
+  ASSERT_TRUE(monitor_->set_parameter(rclcpp::Parameter("memory_max_age_s", 0.1)).successful);
+  bringUp();
+  publishIdentityTransform();
+  geometry_msgs::msg::TransformStamped approach;
+  approach.header.stamp = helper_->now();
+  approach.header.frame_id = "odom";
+  approach.child_frame_id = "base_link";
+  approach.transform.rotation.w = 1.0;
+  approach.transform.translation.x = -0.4;
+  broadcaster_->sendTransform(approach);
+  spinFor(milliseconds(100));
+  const auto seenEnd = std::chrono::steady_clock::now() + milliseconds(500);
+  while (std::chrono::steady_clock::now() < seenEnd) {
+    auto cloud = makeObstacleCloud();
+    sensor_msgs::PointCloud2Iterator<float> x(cloud, "x");
+    for (int index = 0; index < 6; ++index, ++x) {*x = 0.95F;}
+    pointsPublisher_->publish(cloud);
+    spinFor(milliseconds(50));
+  }
+  approach.header.stamp = helper_->now();
+  approach.transform.translation.x = 0.0;
+  broadcaster_->sendTransform(approach);
+  spinFor(milliseconds(100));
+  const auto end = std::chrono::steady_clock::now() + milliseconds(500);
+  while (std::chrono::steady_clock::now() < end) {
+    auto cloud = makeObstacleCloud();
+    sensor_msgs::PointCloud2Iterator<float> x(cloud, "x"), z(cloud, "z");
+    for (int index = 0; index < 6; ++index, ++x, ++z) {*x = 1.5F; *z = 0.0F;}
+    pointsPublisher_->publish(cloud);
+    spinFor(milliseconds(50));
+  }
+  EXPECT_FALSE(lastStatus_.is_input_stale);
+  EXPECT_TRUE(lastStatus_.is_stop_zone_occupied);
+  EXPECT_GE(lastStatus_.stop_zone_cell_count, 2U);
+  EXPECT_TRUE(std::any_of(lastGrid_.data.begin(), lastGrid_.data.end(), [](auto value) {return value > 0;}));
+  // Move back to make the remembered area observable, then observe ground there.
+  geometry_msgs::msg::TransformStamped transform;
+  transform.header.stamp = helper_->now();
+  transform.header.frame_id = "odom";
+  transform.child_frame_id = "base_link";
+  transform.transform.rotation.w = 1.0;
+  transform.transform.translation.x = -0.7;
+  broadcaster_->sendTransform(transform);
+  spinFor(milliseconds(100));
+  const auto clearEnd = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (std::chrono::steady_clock::now() < clearEnd) {
+    auto cloud = makeObstacleCloud();
+    sensor_msgs::PointCloud2Iterator<float> x(cloud, "x"), z(cloud, "z");
+    for (int index = 0; index < 6; ++index, ++x, ++z) {*x = 1.25F; *z = 0.0F;}
+    pointsPublisher_->publish(cloud);
+    spinFor(milliseconds(50));
+  }
+  EXPECT_FALSE(lastStatus_.is_input_stale);
+  EXPECT_FALSE(lastStatus_.is_stop_zone_occupied);
+  EXPECT_TRUE(std::none_of(lastGrid_.data.begin(), lastGrid_.data.end(), [](auto value) {return value > 0;}));
+}
+
+TEST_F(ObstacleMonitorNodeTest, SlightlyOlderDynamicTransformWorksButOldTransformIsStale)
+{
+  bringUp();
+  geometry_msgs::msg::TransformStamped transform;
+  transform.header.stamp = helper_->now();
+  transform.header.frame_id = "base_link";
+  transform.child_frame_id = kSensorFrame;
+  transform.transform.rotation.w = 1.0;
+  broadcaster_ = std::make_unique<tf2_ros::StaticTransformBroadcaster>(helper_);
+  broadcaster_->sendTransform(transform);
+  tf2_ros::TransformBroadcaster dynamicBroadcaster(helper_);
+  transform.header.frame_id = "odom";
+  transform.child_frame_id = "base_link";
+  transform.header.stamp = helper_->now() - rclcpp::Duration::from_seconds(0.05);
+  dynamicBroadcaster.sendTransform(transform);
+  spinFor(milliseconds(100));
+  ASSERT_TRUE(waitUntil([this] {return lastStatus_.is_stop_zone_occupied &&
+    !lastStatus_.is_input_stale && gridCount_ > 0;}, true));
+  // Keep sending fresh clouds while the dynamic transform becomes too old.
+  ASSERT_TRUE(waitUntil([this] {return isStale("tf:odom");}, true));
+  EXPECT_TRUE(lastStatus_.is_input_stale);
+}
+
+TEST_F(ObstacleMonitorNodeTest, OldCloudReportsMemoryTfStale)
+{
+  bringUp();
+  publishIdentityTransform();
+  ASSERT_TRUE(waitUntil([this] {return lastStatus_.is_stop_zone_occupied;}, true));
+  auto cloud = makeObstacleCloud();
+  cloud.header.stamp = helper_->now() - rclcpp::Duration::from_seconds(2.0);
+  pointsPublisher_->publish(cloud);
+  ASSERT_TRUE(waitUntil([this] {return isStale("tf:odom");}, false));
+  EXPECT_TRUE(lastStatus_.is_input_stale);
+}
+
+TEST_F(ObstacleMonitorNodeTest, TransformJumpIsReported)
+{
+  bringUp();
+  publishIdentityTransform();
+  ASSERT_TRUE(waitUntil([this] {return lastStatus_.is_stop_zone_occupied;}, true));
+  geometry_msgs::msg::TransformStamped transform;
+  transform.header.stamp = helper_->now();
+  transform.header.frame_id = "odom";
+  transform.child_frame_id = "base_link";
+  transform.transform.rotation.w = 1.0;
+  transform.transform.translation.x = 2.0;
+  broadcaster_->sendTransform(transform);
+  spinFor(milliseconds(100));
+  ASSERT_TRUE(waitUntil([this] {return isStale("obstacle_memory_reset");}, true));
+  EXPECT_TRUE(lastStatus_.is_input_stale);
 }
 
 TEST_F(ObstacleMonitorNodeTest, ShutdownFromActiveStopsPublishing)
