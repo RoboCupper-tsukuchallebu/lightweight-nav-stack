@@ -111,6 +111,23 @@ TEST(EvaluateArcCandidates, StopZoneDoesNotBlockPointsBehindOrOutsideItsWidth) {
   EXPECT_FALSE(evaluateArcCandidates(grid, kOrigin, makeStraightPath(), 0, 0.0, parameters)[0].is_feasible);
 }
 
+TEST(EvaluateArcCandidates, RawFootprintAvoidsDoubleInflationAndDetectsCorner) {
+  auto inflated = makeEmptyGrid();
+  auto raw = makeEmptyGrid();
+  auto parameters = makeAvoidParameters();
+  parameters.arc_candidate_count = 1;
+  parameters.arc_length_m = 0.1;
+  parameters.arc_step_m = 0.1;
+  parameters.stop_zone_x_m = 0.3;
+  parameters.stop_zone_y_half_m = 0.6;
+  fillRectangle(inflated, 0.3, 0.3, 0.55, 0.55);
+  const auto path = makeStraightPath();
+  EXPECT_TRUE(evaluateArcCandidates(inflated, kOrigin, path, 0, 0.0, parameters, &raw)[0].is_feasible);
+  EXPECT_FALSE(evaluateArcCandidates(inflated, kOrigin, path, 0, 0.0, parameters)[0].is_feasible);
+  fillRectangle(raw, 0.39, 0.39, 0.59, 0.59);
+  EXPECT_FALSE(evaluateArcCandidates(inflated, kOrigin, path, 0, 0.0, parameters, &raw)[0].is_feasible);
+}
+
 TEST(EvaluateArcCandidates, ArcsEndingBeyondMaxPathDeviationAreRejected) {
   AvoidParameters parameters = makeAvoidParameters();
   parameters.max_path_deviation_m = 0.2;
@@ -460,6 +477,22 @@ TEST(ArcAvoidLayer, CycleWithFifteenArcsOnEightyByEightyGridIsFast) {
   RecordProperty("mean_ms", std::to_string(mean_ms));
   std::cout << "avoid cycle mean_ms=" << mean_ms << " sink=" << sink << std::endl;
   EXPECT_LT(mean_ms, 10.0);
+}
+
+TEST(EvaluateArcCandidates, RawFootprintCycleTiming) {
+  auto parameters = makeAvoidParameters();
+  parameters.stop_zone_x_m = 0.3;
+  parameters.stop_zone_y_half_m = 0.4;
+  const auto grid = makeEmptyGrid();
+  const auto path = makeStraightPath();
+  const auto start = std::chrono::steady_clock::now();
+  for (int iteration = 0; iteration < 1000; ++iteration) {
+    EXPECT_EQ(evaluateArcCandidates(grid, kOrigin, path, 0, 0.0, parameters, &grid).size(), 15U);
+  }
+  const double mean_ms = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - start).count() / 1000;
+  std::cout << "raw footprint cycle mean_ms=" << mean_ms << std::endl;
+  EXPECT_LT(mean_ms, 50.0);
 }
 
 TEST(ArcAvoidLayer, ConservativeUpdatePreservesAvoidanceAndReleaseTimer) {

@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <chrono>
 #include <functional>
 #include <limits>
@@ -50,7 +51,10 @@ protected:
       });
     gridSubscription_ = helper_->create_subscription<nav_msgs::msg::OccupancyGrid>(
       "/lightnav/local_grid", rclcpp::QoS(1).reliable(),
-      [this](nav_msgs::msg::OccupancyGrid::SharedPtr) {++gridCount_;});
+      [this](nav_msgs::msg::OccupancyGrid::SharedPtr grid) {lastGrid_ = *grid; ++gridCount_;});
+    rawGridSubscription_ = helper_->create_subscription<nav_msgs::msg::OccupancyGrid>(
+      "/lightnav/local_grid_raw", rclcpp::QoS(1).reliable(),
+      [this](nav_msgs::msg::OccupancyGrid::SharedPtr grid) {lastRawGrid_ = *grid; ++rawGridCount_;});
     executor_.add_node(monitor_->get_node_base_interface());
     executor_.add_node(helper_);
   }
@@ -144,6 +148,10 @@ protected:
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pointsPublisher_;
   rclcpp::Subscription<ObstacleStatus>::SharedPtr statusSubscription_;
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr gridSubscription_;
+  rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr rawGridSubscription_;
+  nav_msgs::msg::OccupancyGrid lastRawGrid_;
+  nav_msgs::msg::OccupancyGrid lastGrid_;
+  int rawGridCount_ = 0;
   std::unique_ptr<tf2_ros::StaticTransformBroadcaster> broadcaster_;
   ObstacleStatus lastStatus_;
   int statusCount_ = 0;
@@ -173,6 +181,22 @@ TEST_F(ObstacleMonitorNodeTest, DefaultPointsQoSReliabilityAcceptsReliablePublis
   publishIdentityTransform();
   ASSERT_TRUE(waitUntil([this] {return lastStatus_.is_stop_zone_occupied;}, true));
   EXPECT_FALSE(lastStatus_.is_input_stale);
+}
+
+TEST_F(ObstacleMonitorNodeTest, PublishesRawGridWithBinaryCells)
+{
+  bringUp();
+  publishIdentityTransform();
+  ASSERT_TRUE(waitUntil([this] {return rawGridCount_ > 0;}, true));
+  EXPECT_EQ(lastRawGrid_.header.frame_id, "base_link");
+  EXPECT_EQ(lastRawGrid_.header.stamp, lastGrid_.header.stamp);
+  EXPECT_EQ(lastRawGrid_.info.width, lastGrid_.info.width);
+  EXPECT_EQ(lastRawGrid_.info.height, lastGrid_.info.height);
+  EXPECT_EQ(lastRawGrid_.info.resolution, lastGrid_.info.resolution);
+  EXPECT_EQ(lastRawGrid_.data.size(), lastRawGrid_.info.width * lastRawGrid_.info.height);
+  EXPECT_GT(lastRawGrid_.info.resolution, 0.0F);
+  EXPECT_GT(std::count(lastRawGrid_.data.begin(), lastRawGrid_.data.end(), 100), 0);
+  for (const auto cell : lastRawGrid_.data) {EXPECT_TRUE(cell == 0 || cell == 100);}
 }
 
 TEST_F(ObstacleMonitorNodeTest, InvalidPointsQoSReliabilityIsRejected)

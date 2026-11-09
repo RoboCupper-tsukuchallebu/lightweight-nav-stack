@@ -7,6 +7,7 @@ import launch_testing.actions
 import rclpy
 from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import PoseStamped, Twist
+from visualization_msgs.msg import MarkerArray
 from launch import LaunchDescription
 from launch.actions import IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
@@ -41,11 +42,29 @@ class ClosedLoopTest(unittest.TestCase):
         cls.obstacle_receipts = []
         cls.commands = []
         cls.lifecycle_recoveries = []
+        cls.trace = []
+        cls.selected_arc = None
+        cls.last_trace_time = 0.0
         cls.node.create_subscription(PoseStamped, "/lightnav/pose", cls.poses.append, 10)
-        cls.node.create_subscription(FollowStatus, "/lightnav/follow_status", cls.status.append, 10)
+        cls.node.create_subscription(FollowStatus, "/lightnav/follow_status", cls.record_status, 10)
+        cls.node.create_subscription(MarkerArray, "/lightnav/controller/arc_candidates", cls.record_arcs, 10)
         cls.node.create_subscription(ObstacleStatus, "/lightnav/obstacle_status", cls.record_obstacle, 10)
         cls.node.create_subscription(Twist, "/cmd_vel", cls.record_command, 10)
         cls.action = ActionClient(cls.node, FollowWaypoints, "/lightnav/mission/follow_waypoints")
+
+    @classmethod
+    def record_arcs(cls, message):
+        selected = [marker for marker in message.markers if marker.ns == "feasible" and marker.scale.x > 0.05]
+        cls.selected_arc = selected[0].id if selected else None
+
+    @classmethod
+    def record_status(cls, message):
+        cls.status.append(message)
+        now = time.monotonic()
+        if cls.poses and (now - cls.last_trace_time >= 0.5 or message.state == FollowStatus.BLOCKED):
+            pose = cls.poses[-1].pose.position
+            cls.trace.append((now, pose.x, pose.y, message.state, message.active_layer, cls.selected_arc))
+            cls.last_trace_time = now
 
     @classmethod
     def record_obstacle(cls, message):
@@ -58,6 +77,10 @@ class ClosedLoopTest(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
+        if any(item.state == FollowStatus.BLOCKED for item in cls.status):
+            print("TRACE monotonic_s x_m y_m state layer selected_arc_id", flush=True)
+            for row in cls.trace:
+                print("TRACE", *row, flush=True)
         cls.action.destroy()
         cls.node.destroy_node()
         rclpy.shutdown()

@@ -392,3 +392,14 @@ TEST_F(ControllerNodeAvoidWiring, RuntimeSpeedLimitChangesNextPublishedCommand) 
   ASSERT_TRUE(last_status_.has_value());
   EXPECT_NEAR(last_status_->commanded_linear_mps, 0.3, 1e-5);
 }
+
+TEST(RawGridMatching, RejectsStaleMismatchedAndInvalidGeometry) {
+  lightnav_controller::LocalGrid grid;
+  auto raw = grid;
+  EXPECT_TRUE(lightnav_controller::rawGridMatches(grid, raw, true, 0.1, 0.5));
+  EXPECT_FALSE(lightnav_controller::rawGridMatches(grid, raw, false, 0.1, 0.5));
+  EXPECT_FALSE(lightnav_controller::rawGridMatches(grid, raw, true, 0.6, 0.5));
+  EXPECT_FALSE(lightnav_controller::rawGridMatches(grid, raw, true, -0.1, 0.5));
+  raw.origin_x_m = 1.0;
+  EXPECT_FALSE(lightnav_controller::rawGridMatches(grid, raw, true, 0.1, 0.5));
+}

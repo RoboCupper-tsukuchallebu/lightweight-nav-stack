@@ -30,6 +30,14 @@ namespace {
 
 using CallbackReturn = rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn;
 
+bool rawGridMatches(const LocalGrid& inflated, const LocalGrid& raw, bool stamp_matches,
+                    double age_s, double timeout_s) {
+  return stamp_matches && age_s >= 0.0 && age_s <= timeout_s &&
+         raw.width_cells == inflated.width_cells && raw.height_cells == inflated.height_cells &&
+         raw.resolution_m == inflated.resolution_m && raw.origin_x_m == inflated.origin_x_m &&
+         raw.origin_y_m == inflated.origin_y_m;
+}
+
 double yawFromQuaternion(const geometry_msgs::msg::Quaternion& quaternion) {
   return std::atan2(2.0 * (quaternion.w * quaternion.z + quaternion.x * quaternion.y),
                     1.0 - 2.0 * (quaternion.y * quaternion.y + quaternion.z * quaternion.z));
@@ -454,14 +462,10 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
       arbitration_input.follow = follow_result.output;
       const LocalGrid* raw_grid = nullptr;
       if (is_grid_fresh && last_raw_grid_ &&
-          (current_time - last_raw_grid_->received_at).seconds() >= 0.0 &&
-          (current_time - last_raw_grid_->received_at).seconds() <= timeouts_.grid_timeout_s &&
-          last_raw_grid_->stamp == last_grid_->stamp &&
-          last_raw_grid_->grid.width_cells == last_grid_->grid.width_cells &&
-          last_raw_grid_->grid.height_cells == last_grid_->grid.height_cells &&
-          last_raw_grid_->grid.resolution_m == last_grid_->grid.resolution_m &&
-          last_raw_grid_->grid.origin_x_m == last_grid_->grid.origin_x_m &&
-          last_raw_grid_->grid.origin_y_m == last_grid_->grid.origin_y_m) {
+          rawGridMatches(last_grid_->grid, last_raw_grid_->grid,
+                         last_raw_grid_->stamp == last_grid_->stamp,
+                         (current_time - last_raw_grid_->received_at).seconds(),
+                         timeouts_.grid_timeout_s)) {
         raw_grid = &last_raw_grid_->grid;
       }
       arbitration_input.avoid = avoid_layer_->compute(AvoidContext{
