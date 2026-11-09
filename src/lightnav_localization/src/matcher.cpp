@@ -29,18 +29,22 @@ double rotation_angle_rad(const Eigen::Isometry3d& transform) {
 
 struct PreparedTarget::Implementation {
   explicit Implementation(const PointList& points, const MatcherParameters& parameters)
-      : cloud(make_cloud_with_covariances(points)), tree(cloud) {
-    if (parameters.method == "vgicp") {
+      : cloud(make_cloud_with_covariances(points)) {
+    if (parameters.method == "gicp") {
+      tree = std::make_shared<small_gicp::KdTree<small_gicp::PointCloud>>(cloud);
+    } else if (parameters.method == "vgicp") {
       voxel = std::make_shared<small_gicp::GaussianVoxelMap>(parameters.vgicp_voxel_m);
+      voxel->set_search_offsets(27);
       voxel->insert(*cloud);
       if (parameters.vgicp_two_stage) {
         coarse = std::make_shared<small_gicp::GaussianVoxelMap>(parameters.vgicp_coarse_voxel_m);
+        coarse->set_search_offsets(27);
         coarse->insert(*cloud);
       }
     }
   }
   std::shared_ptr<small_gicp::PointCloud> cloud;
-  small_gicp::KdTree<small_gicp::PointCloud> tree;
+  std::shared_ptr<small_gicp::KdTree<small_gicp::PointCloud>> tree;
   std::shared_ptr<small_gicp::GaussianVoxelMap> voxel;
   std::shared_ptr<small_gicp::GaussianVoxelMap> coarse;
 };
@@ -64,14 +68,16 @@ MatchResult match_scan(const PreparedTarget& target, const PointList& source,
   auto initial = prediction;
   if (parameters.method == "vgicp" && target.implementation_->coarse) {
     registration.rejector.max_dist_sq = parameters.vgicp_coarse_correspondence_m * parameters.vgicp_coarse_correspondence_m;
-    initial = registration.align(*target.implementation_->coarse, *source_cloud,
-                                 *target.implementation_->coarse, prediction).T_target_source;
+    const auto coarse_result = registration.align(*target.implementation_->coarse, *source_cloud,
+                                                  *target.implementation_->coarse, prediction);
+    if (coarse_result.converged) initial = coarse_result.T_target_source;
     registration.rejector.max_dist_sq = parameters.max_correspondence_distance_m * parameters.max_correspondence_distance_m;
   }
   if (parameters.method == "vgicp" && !target.implementation_->voxel) return result;
+  if (parameters.method != "vgicp" && !target.implementation_->tree) return result;
   const auto raw = parameters.method == "vgicp"
       ? registration.align(*target.implementation_->voxel, *source_cloud, *target.implementation_->voxel, initial)
-      : registration.align(*target.implementation_->cloud, *source_cloud, target.implementation_->tree, initial);
+      : registration.align(*target.implementation_->cloud, *source_cloud, *target.implementation_->tree, initial);
 
   result.target_to_source = raw.T_target_source;
   result.converged = raw.converged;

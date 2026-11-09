@@ -1,6 +1,11 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <small_gicp/ann/gaussian_voxelmap.hpp>
+#include <small_gicp/factors/gicp_factor.hpp>
+#include <small_gicp/points/point_cloud.hpp>
+#include <small_gicp/registration/registration.hpp>
+#include <small_gicp/util/normal_estimation.hpp>
 
 #include "lightnav_localization/deskew.hpp"
 #include "lightnav_localization/downsample.hpp"
@@ -165,4 +170,61 @@ TEST(Matcher, vgicp_recovers_shifted_predictions) {
     EXPECT_TRUE(result.converged) << offset;
     EXPECT_LT((result.target_to_source.translation() - truth.translation()).norm(), 0.15) << offset;
   }
+}
+
+TEST(Matcher, two_stage_compares_with_gicp_on_shifted_scene) {
+  const Scenario scenario;
+  const auto points = scenario.world.sample_map(kMapSpacingM);
+  const auto scan = corrected_scan(scenario, true);
+  const auto truth = pose_at(kScanDurationSec);
+  for (const double offset : {0.1, 0.5, 1.0, 2.0}) {
+    for (const auto* method : {"gicp", "vgicp"}) {
+      MatcherParameters parameters = make_parameters();
+      parameters.method = method;
+      parameters.vgicp_voxel_m = 0.3;
+      parameters.vgicp_two_stage = true;
+      parameters.vgicp_coarse_voxel_m = 2.0;
+      parameters.vgicp_coarse_correspondence_m = 2.0;
+      parameters.max_correspondence_distance_m = 3.0;
+      parameters.max_iterations = 100;
+      const PreparedTarget target(points, parameters);
+      const auto result = match_scan(target, scan, offset_pose(truth, offset, -offset, 0.02), parameters);
+      EXPECT_TRUE(result.converged) << method << " offset=" << offset;
+      const double error = (result.target_to_source.translation() - truth.translation()).norm();
+      if (parameters.method == "vgicp" && offset == 2.0) {
+        EXPECT_GT(error, 2.0);  // Repeated corridor structure admits a wrong alignment.
+      } else {
+        EXPECT_LT(error, 0.15) << method << " offset=" << offset;
+      }
+    }
+  }
+}
+
+TEST(Matcher, unconverged_coarse_stage_uses_original_prediction) {
+  const Scenario scenario;
+  const auto points = scenario.world.sample_map(kMapSpacingM);
+  const auto scan = corrected_scan(scenario, true);
+  const auto prediction = offset_pose(pose_at(kScanDurationSec), 0.1, -0.1, 0.02);
+  MatcherParameters parameters = make_parameters();
+  parameters.method = "vgicp";
+  parameters.vgicp_voxel_m = 0.3;
+  parameters.max_correspondence_distance_m = 1.0;
+  parameters.max_iterations = 1;
+  const auto single = match_scan(PreparedTarget(points, parameters), scan, prediction, parameters);
+  parameters.vgicp_two_stage = true;
+  small_gicp::PointCloud target_cloud(points), source_cloud(scan);
+  small_gicp::estimate_covariances(target_cloud, 10);
+  small_gicp::estimate_covariances(source_cloud, 10);
+  small_gicp::GaussianVoxelMap coarse(parameters.vgicp_coarse_voxel_m);
+  coarse.set_search_offsets(27);
+  coarse.insert(target_cloud);
+  small_gicp::Registration<small_gicp::GICPFactor, small_gicp::SerialReduction> registration;
+  registration.optimizer.max_iterations = 1;
+  registration.rejector.max_dist_sq = parameters.vgicp_coarse_correspondence_m * parameters.vgicp_coarse_correspondence_m;
+  const auto coarse_result = registration.align(coarse, source_cloud, coarse, prediction);
+  ASSERT_FALSE(coarse_result.converged);
+  ASSERT_GT((coarse_result.T_target_source.matrix() - prediction.matrix()).norm(), 1e-6);
+  const auto fallback = match_scan(PreparedTarget(points, parameters), scan, prediction, parameters);
+  EXPECT_EQ(single.converged, fallback.converged);
+  EXPECT_NEAR((single.target_to_source.matrix() - fallback.target_to_source.matrix()).norm(), 0.0, 1e-12);
 }

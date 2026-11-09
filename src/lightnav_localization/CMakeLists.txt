@@ -105,6 +105,7 @@ if(BUILD_TESTING)
     target_compile_options(test_${test_name} PRIVATE -Wall -Wextra -Werror)
     add_test(NAME ${test_name} COMMAND test_${test_name})
   endforeach()
+  target_include_directories(test_matcher SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/small_gicp/include)
 
   add_executable(test_localization_node test/test_localization_node.cpp)
   target_link_libraries(test_localization_node

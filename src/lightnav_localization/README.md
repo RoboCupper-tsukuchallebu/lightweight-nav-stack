@@ -119,6 +119,11 @@ params ファイル `docker/config/localization_indoor.yaml` で切り替える
 | `path_min_step_m` / `path_max_poses` | 0.1 / 20000 | 軌跡に足す最小の移動量、最大の個数（超えたら古い方から捨てる） |
 | `window_s` / `huber_k` | 30.0 / 1.0 | 姿勢グラフ |
 | `voxel_size_m` / `keyframe_distance_m` / `keyframe_time_s` | 0.5 / 1.0 / 1.0 | LiDAR オドメトリ |
+| `map_match_method` | `gicp` | 事前地図照合の方式（`gicp` / `vgicp`） |
+| `map_vgicp_voxel_m` | 0.5 | VGICP の細段ボクセル幅（m） |
+| `map_vgicp_two_stage` | false | VGICP の粗密 2 段階照合を有効にする。粗段が未収束なら元の予測から細段を開始 |
+| `map_vgicp_coarse_voxel_m` / `map_vgicp_coarse_correspondence_m` | 2.0 / 2.0 | 粗段のボクセル幅 / 対応点距離の上限（m） |
+| `map_max_correspondence_distance_m` / `map_max_iterations` | 1.0 / 30 | GICP または VGICP 細段の対応点距離上限（m） / 各段の反復回数上限 |
 | `map_inlier_ratio_min` / `map_gate_translation_m` / `map_gate_rotation_rad` | 0.5 / 1.0 / 0.2 | 事前地図照合 |
 | `gps_std_m_by_status` | `[2.0, 1.0, 0.3]` | GST 無しの FIX / SBAS / GBAS |
 | `gps_min_status` | -1 | この `NavSatStatus` 未満の fix は `Localizer` に渡さない（-1 = 全部受ける）。`docker/config/robot.yaml` は 1（Float 以上）。Single（status 0）は初期化・mapping の原点・因子のどれにも使わず、棄却数にも数えない |
@@ -127,6 +132,8 @@ params ファイル `docker/config/localization_indoor.yaml` で切り替える
 | `correction_slew_mps` / `correction_slew_rps` / `large_correction_threshold_m` | 0.2 / 0.1 / 1.0 | 補正の平滑化 |
 | `tracking_window_s` / `lost_position_std_m` | 5.0 / 2.0 | 状態判定 |
 | `odom_only_max_distance_m` / `odom_only_max_s` / `drift_rate` | 50 / 60 / 0.02 | ODOM_ONLY の上限。**`mode: mapping` では無効**（この 2 つで LOST にしない。D5） |
+
+VGICP は対象点のボクセルと隣接する 26 ボクセルを探索するため、対応距離を大きくしても探索範囲はボクセル幅で制限される。VGICP のインライア率は距離条件を満たすボクセル対応がある入力点の割合で、GICP の点同士の対応率とは異なる。`map_inlier_ratio_min` は方式ごとに調整する。
 
 ## 診断とエラーの保持
 

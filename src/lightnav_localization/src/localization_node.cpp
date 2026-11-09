@@ -783,7 +783,8 @@ LocalizationNode::CallbackReturn LocalizationNode::on_activate(
       [this]() { handle_watchdog(); });
   publish_status();
   publish_prior_map_cloud();
-  RCLCPP_INFO(get_logger(), "localization node active in %s mode", mode_.c_str());
+  RCLCPP_INFO(get_logger(), "localization node active in %s mode (map match: %s)",
+              mode_.c_str(), localizer_parameters_.map_matcher.method.c_str());
   return CallbackReturn::SUCCESS;
 }
 
