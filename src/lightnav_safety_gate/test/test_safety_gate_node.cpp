@@ -478,6 +478,36 @@ TEST_F(SafetyGateNodeTest, runtimeLimitsApplyAndRespectStartupCeilings)
   EXPECT_FALSE(gate_->set_parameter(rclcpp::Parameter("use_sim_time", true)).successful);
 }
 
+TEST_F(SafetyGateNodeTest, useSimTimeRejectedInEveryLifecycleState)
+{
+  EXPECT_FALSE(gate_->set_parameter(rclcpp::Parameter("use_sim_time", true)).successful);
+  ASSERT_EQ(gate_->cleanup().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED);
+  EXPECT_FALSE(gate_->set_parameter(rclcpp::Parameter("use_sim_time", true)).successful);
+  ASSERT_EQ(gate_->configure().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE);
+  activate();
+  EXPECT_FALSE(gate_->set_parameter(rclcpp::Parameter("use_sim_time", true)).successful);
+}
+
+TEST_F(SafetyGateNodeTest, configureRejectsStartupLimitAboveFiniteCeiling)
+{
+  executor_.remove_node(gate_->get_node_base_interface());
+  gate_->shutdown();
+  for (const auto & overrides : {
+      std::vector<rclcpp::Parameter>{rclcpp::Parameter("v_max", 0.8),
+        rclcpp::Parameter("v_max_ceiling", 0.5)},
+      std::vector<rclcpp::Parameter>{rclcpp::Parameter("w_max", 0.6),
+        rclcpp::Parameter("w_max_ceiling", 0.5)}})
+  {
+    rclcpp::NodeOptions options;
+    options.parameter_overrides(overrides);
+    gate_ = std::make_shared<lightnav_safety_gate::SafetyGateNode>(options);
+    EXPECT_EQ(gate_->configure().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED);
+    gate_->shutdown();
+  }
+  gate_ = std::make_shared<lightnav_safety_gate::SafetyGateNode>();
+  executor_.add_node(gate_->get_node_base_interface());
+}
+
 TEST_F(SafetyGateNodeTest, cleanupDoesNotRaiseCeiling)
 {
   activate();
@@ -530,6 +560,8 @@ TEST_F(SafetyGateNodeTest, logsAcceptedAndRejectedChanges)
   const auto output = testing::internal::GetCapturedStderr();
   EXPECT_TRUE(accepted.successful);
   EXPECT_FALSE(rejected.successful);
+  EXPECT_NE(rejected.reason.find("requested 2"), std::string::npos);
+  EXPECT_NE(rejected.reason.find("ceiling 0.800000"), std::string::npos);
   EXPECT_NE(output.find("parameter changed: v_max"), std::string::npos);
   EXPECT_NE(output.find("parameter rejected: v_max"), std::string::npos);
 }

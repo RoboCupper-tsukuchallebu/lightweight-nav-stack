@@ -62,7 +62,9 @@ public:
               std::isfinite(ceiling) && value <= ceiling))
             {
               result.successful = false;
-              result.reason = name + ": must be finite, positive and no greater than its finite ceiling";
+              result.reason = name + ": must be finite, positive and no greater than its finite ceiling" +
+                " (requested " + parameter.value_to_string() + ", ceiling " +
+                std::to_string(ceiling) + ")";
             }
           }
           if (!result.successful) {
