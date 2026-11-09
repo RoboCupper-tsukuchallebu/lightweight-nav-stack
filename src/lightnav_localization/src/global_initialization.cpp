@@ -6,6 +6,7 @@
 #include <limits>
 #include <chrono>
 #include <array>
+#include <map>
 #include <Eigen/Eigenvalues>
 #include "lightnav_localization/matcher.hpp"
 
@@ -184,6 +185,32 @@ PointList select_band(const PointList& scan, const GlobalInitializationSearchPar
   return result;
 }
 
+PointList map_height_band(const PointList& map, const GlobalInitializationSearchParameters& parameters) {
+  using Cell = std::pair<int, int>;
+  std::map<Cell, float> ground;
+  for (const auto& point : map) {
+    if (!point.allFinite()) continue;
+    const Cell cell{static_cast<int>(std::floor(point.x())), static_cast<int>(std::floor(point.y()))};
+    const auto found = ground.find(cell);
+    if (found == ground.end()) ground.emplace(cell, point.z());
+    else found->second = std::min(found->second, point.z());
+  }
+  PointList band;
+  for (const auto& point : map) {
+    if (!point.allFinite()) continue;
+    const int x = static_cast<int>(std::floor(point.x()));
+    const int y = static_cast<int>(std::floor(point.y()));
+    float height = std::numeric_limits<float>::infinity();
+    for (int dx = -1; dx <= 1; ++dx) for (int dy = -1; dy <= 1; ++dy) {
+      const auto found = ground.find({x + dx, y + dy});
+      if (found != ground.end()) height = std::min(height, found->second);
+    }
+    if (point.z() - height >= parameters.height_min_m &&
+        point.z() - height <= parameters.height_max_m) band.push_back(point);
+  }
+  return band;
+}
+
 double likelihood(const GlobalInitializationLikelihoodField& field, const PointList& scan,
                   const GlobalInitializationPeak& peak, double sigma) {
   const Eigen::Rotation2Dd rotation(peak.yaw_rad);
@@ -333,7 +360,7 @@ GlobalInitializationSearchResult search_global_initialization(
       parameters.likelihood_sigma_m <= 0) { output.decision.error = "map_too_large"; return output; }
   try {
     const Eigen::Vector2d padding = Eigen::Vector2d::Constant(parameters.maximum_range_m);
-    GlobalInitializationLikelihoodField field(map, parameters.minimum - padding, parameters.maximum + padding,
+    GlobalInitializationLikelihoodField field(map_height_band(map, parameters), parameters.minimum - padding, parameters.maximum + padding,
                                                parameters.grid_resolution_m, parameters.maximum_grid_cells);
     auto peaks = coarse_search(field, band, context);
     if (context.stopped()) { output.decision.error = context.error; return output; }
