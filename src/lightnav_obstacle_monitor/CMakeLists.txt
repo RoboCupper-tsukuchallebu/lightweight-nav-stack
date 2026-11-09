@@ -19,6 +19,7 @@ find_package(Eigen3 REQUIRED)
 find_package(lightnav_msgs REQUIRED)
 
 add_library(obstacle_monitor_core
+  src/obstacle_memory.cpp
   src/obstacle_grid.cpp
   src/sensor_projection.cpp
   src/frame_processor.cpp
