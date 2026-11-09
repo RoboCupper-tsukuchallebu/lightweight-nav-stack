@@ -114,9 +114,9 @@ class MissionNode(LifecycleNode):
         for name in POSITIVE_PARAMETERS + NON_NEGATIVE_PARAMETERS:
             value = values[name]
             if not math.isfinite(value):
-                return f"{name}: value must be finite"
+                return f"{name}: value must be finite (requested {value})"
             if value < 0 or (name in POSITIVE_PARAMETERS and value == 0):
-                return f"{name}: value is outside the allowed range"
+                return f"{name}: value is outside the allowed range (requested {value})"
         if not values["pose_topic"]:
             return "pose_topic: must not be empty"
         return ""
@@ -133,9 +133,11 @@ class MissionNode(LifecycleNode):
                     reason = f"{name}: incorrect type"
                 elif name == "pose_timeout_s" and not (
                     math.isfinite(self._pose_timeout_baseline)
-                    and math.isfinite(value) and value <= self._pose_timeout_baseline
+                    and math.isfinite(value) and 0 < value <= self._pose_timeout_baseline
                 ):
-                    reason = f"{name}: must be finite and no greater than the startup value"
+                    reason = (f"{name}: must be positive and finite and no greater than "
+                              f"the startup value (startup {self._pose_timeout_baseline}, "
+                              f"requested {value})")
                 else:
                     values[name] = value
             if reason:

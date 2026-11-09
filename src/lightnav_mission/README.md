@@ -15,3 +15,22 @@ ROS_DOMAIN_ID=48 を使用し、実機用の domain 42 は使用しません。
 ### 実行時パラメータ
 
 到着半径、通過判定、計画タイムアウト、移動検知と再計画の設定は実行中に変更でき、次の tick から使われます。計画の締め切りには計画開始時の `plan_timeout_s` を使い、姿勢の欠落中に期限を延長するときも同じ値を使います。`pose_timeout_s` は起動時の値を上限として、正の有限値にだけ変更できます。トピック名と `tick_hz`、`use_sim_time` は実行時には変更できません。変更は YAML に保存されず、再起動すると起動時の値に戻ります。正であるべき値や非負であるべき値が有限でない場合も configure は失敗します。
+
+
+| 種類 | パラメータ | 既定値 | 実行時の変更 |
+|---|---|---:|---|
+| tuning | `default_arrival_radius_m` | 1.0 | 正の有限値 |
+| tuning | `final_arrival_radius_m` | 0.5 | 正の有限値 |
+| tuning | `pass_index_margin` | 5 | 0 以上の整数 |
+| tuning | `plan_timeout_s` | 5.0 | 正の有限値 |
+| tuning | `v_progress_min` | 0.1 | 0 以上の有限値 |
+| tuning | `no_motion_timeout_s` | 5.0 | 正の有限値 |
+| tuning | `no_motion_distance_m` | 0.1 | 正の有限値 |
+| tuning | `replan_on_large_correction` | `true` | 真偽値 |
+| safety | `pose_timeout_s` | 0.5 | 正の有限値で、起動時の値以下（↓） |
+| structural (read_only) | `pose_topic` | `/lightnav/pose` | 不可 |
+| structural (read_only) | `localization_status_topic` | `/lightnav/localization/status` | 不可 |
+| structural (read_only) | `tick_hz` | 10.0 | 不可 |
+| structural | `use_sim_time` | `false` | コンストラクタ後は不可 |
+
+安全パラメータは起動時の値が有限でなければ変更をすべて拒否します。
