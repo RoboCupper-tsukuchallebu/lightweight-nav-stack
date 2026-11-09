@@ -920,7 +920,7 @@ TEST(Localizer, WheelYawSlipDuringTurnKeepsTrackingAndYawCloseToTruth) {
   Scenario scenario;
   scenario.has_pillars = true;
   scenario.degeneracy_ratio = 0.0;
-  scenario.scan_period_sec = 0.8;
+  scenario.scan_period_sec = 0.1;
   scenario.correction_slew_rps = 2.0;
   scenario.is_gps_enabled = false;
   scenario.wheel_scale = 1.0;
@@ -928,7 +928,27 @@ TEST(Localizer, WheelYawSlipDuringTurnKeepsTrackingAndYawCloseToTruth) {
   scenario.slip_end_sec = scenario.slip_begin_sec + 0.8;
   scenario.stop_sec = scenario.slip_end_sec + 2.0;
   const Report report = run(scenario);
+  std::printf("[ MEASURED ] wheel_yaw_slip_max_error_deg=%.9g\n", report.max_yaw_error_deg);
   EXPECT_FALSE(report.saw_odom_only_during_slip);
   EXPECT_TRUE(report.is_tracking_at_end);
-  EXPECT_LT(report.max_yaw_error_deg, 12.0);
+  EXPECT_LT(report.max_yaw_error_deg, 5.5);
+}
+
+// Sparse observations expose the effect of slip handling; retain the 10 Hz test above.
+TEST(Localizer, WheelYawSlipWithSparseScansKeepsYawBounded) {
+  Scenario scenario;
+  scenario.has_pillars = true;
+  scenario.degeneracy_ratio = 0.0;
+  scenario.scan_period_sec = 0.3;
+  scenario.correction_slew_rps = 2.0;
+  scenario.is_gps_enabled = false;
+  scenario.wheel_scale = 1.0;
+  scenario.slip_begin_sec = 20.0 / kSpeed + 0.5;
+  scenario.slip_end_sec = scenario.slip_begin_sec + 0.8;
+  scenario.stop_sec = scenario.slip_end_sec + 2.0;
+  const Report report = run(scenario);
+  std::printf("[ MEASURED ] wheel_yaw_slip_max_error_deg=%.9g\n", report.max_yaw_error_deg);
+  EXPECT_FALSE(report.saw_odom_only_during_slip);
+  EXPECT_TRUE(report.is_tracking_at_end);
+  EXPECT_LT(report.max_yaw_error_deg, 11.99);
 }

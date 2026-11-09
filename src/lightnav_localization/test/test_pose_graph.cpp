@@ -1,3 +1,4 @@
+#include <limits>
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -211,7 +212,7 @@ TEST(PoseGraph, GpsAltitudeDoesNotChangeHeightOrTilt) {
 TEST(PoseGraph, WheelKernelChoicesLetLidarOverrideYawSlip) {
   for (const std::string kernel : {"huber", "cauchy"}) {
     PoseGraphParameters parameters;
-    EXPECT_DOUBLE_EQ(parameters.wheel_sigma_yaw_floor_rad, 0.03);
+    EXPECT_DOUBLE_EQ(parameters.wheel_yaw_slip_threshold_rad, 0.1);
     EXPECT_EQ(parameters.wheel_robust_kernel, "huber");
     EXPECT_DOUBLE_EQ(parameters.wheel_robust_k, 8.0);
     parameters.wheel_robust_kernel = kernel;
@@ -220,7 +221,7 @@ TEST(PoseGraph, WheelKernelChoicesLetLidarOverrideYawSlip) {
     ASSERT_TRUE(graph.optimize());
     const auto wheel = yaw_translation(0.0, 0.0, 0.0);
     const auto lidar = yaw_translation(0.0, 0.0, 0.3);
-    const int index = graph.add_node_with_wheel_factor(1.0, wheel, wheel);
+    const int index = graph.add_node_with_wheel_factor(1.0, wheel, wheel, 0.3);
     graph.add_lidar_odometry_factor(0, index, lidar, diagonal_information(0.02, 0.005));
     ASSERT_TRUE(graph.optimize());
     const auto estimate = graph.pose(index);
@@ -233,4 +234,26 @@ TEST(PoseGraph, RejectsUnknownWheelKernel) {
   PoseGraphParameters parameters;
   parameters.wheel_robust_kernel = "unknown";
   EXPECT_THROW(PoseGraph graph(parameters), std::invalid_argument);
+}
+
+TEST(PoseGraph, RejectsNonpositiveOrNonfiniteWheelKernelScaleAndSlipThreshold) {
+  for (const double invalid : {0.0, -1.0, std::numeric_limits<double>::infinity(),
+                               std::numeric_limits<double>::quiet_NaN()}) {
+    PoseGraphParameters kernel_parameters;
+    kernel_parameters.wheel_robust_k = invalid;
+    EXPECT_THROW(PoseGraph graph(kernel_parameters), std::invalid_argument);
+    PoseGraphParameters threshold_parameters;
+    threshold_parameters.wheel_yaw_slip_threshold_rad = invalid;
+    EXPECT_THROW(PoseGraph graph(threshold_parameters), std::invalid_argument);
+  }
+}
+
+TEST(PoseGraph, WheelYawSigmaChangesOnlyAboveSlipThreshold) {
+  const PoseGraphParameters parameters;
+  const auto wheel = yaw_translation(1.0, 0.0, 0.2);
+  const double original_sigma = std::max(parameters.sigma_floor_rad,
+      parameters.wheel_sigma_yaw_per_rad * 0.2 + parameters.wheel_sigma_yaw_per_m);
+  EXPECT_NEAR(wheel_yaw_sigma(parameters, wheel, 0.0), original_sigma, 1e-12);
+  EXPECT_NEAR(wheel_yaw_sigma(parameters, wheel, 0.1), original_sigma, 1e-12);
+  EXPECT_NEAR(wheel_yaw_sigma(parameters, wheel, 0.2), 0.2, 1e-12);
 }
