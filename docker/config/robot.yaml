@@ -20,6 +20,9 @@ controller_node:
     # TENTATIVE: 1.5 is the value of the contract table of Issue #1, not a measured one. Decide it from the width of
     # the real course before the first run on a path (before 1c).
     max_path_deviation_m: 1.5
+    # Must equal obstacle_monitor.base_frame above: the controller drops every local_grid whose frame_id differs
+    # (Issue #1). test_robot_config_frames.py of lightnav_bringup checks that the two stay equal.
+    grid_frame: base_footprint
 
 localization_node:
   ros__parameters:
