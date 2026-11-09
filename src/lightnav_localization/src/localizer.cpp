@@ -660,6 +660,28 @@ std::size_t Localizer::accepted_gps_factor_count() const {
 
 void Localizer::interrupt_mapping() { implementation_->mapping_paused = true; }
 
+void Localizer::seed_mapping_for_test(const std::vector<Eigen::Isometry3d>& poses) {
+  Implementation& self = *implementation_;
+  if (!self.parameters.mapping || poses.empty()) throw std::invalid_argument("mapping poses required");
+  self.graph = std::make_unique<PoseGraph>(history_parameters_for(self.parameters));
+  self.mapping_keyframes.clear();
+  const PointList cloud{Eigen::Vector3f(0.0f, 0.0f, 0.0f)};
+  self.graph->add_first_node(0.0, poses.front(), 0.1, 0.1);
+  self.mapping_keyframes.push_back({0, 0.0, cloud});
+  for (std::size_t index = 1; index < poses.size(); ++index) {
+    const Eigen::Isometry3d motion = invert_isometry(poses[index - 1]) * poses[index];
+    const int node = self.graph->add_node_with_wheel_factor(static_cast<double>(index), poses[index], motion);
+    self.mapping_keyframes.push_back({node, static_cast<double>(index), cloud});
+  }
+}
+
+std::vector<BatchPose> Localizer::batch_poses_for_test(int max_iterations) {
+  if (!implementation_->graph->batch_optimize(max_iterations)) {
+    throw std::runtime_error(implementation_->graph->last_error());
+  }
+  return implementation_->graph->batch_poses();
+}
+
 bool Localizer::save_map(const MapOutputParameters& parameters, MapOutputResult& result,
                          std::string& error) {
   Implementation& self = *implementation_;
@@ -667,12 +689,25 @@ bool Localizer::save_map(const MapOutputParameters& parameters, MapOutputResult&
     error = "save_map requires mapping mode";
     return false;
   }
+  const auto save_start = Clock::now();
   if (!self.graph->batch_optimize(parameters.batch_max_iterations)) {
     error = "batch optimization failed: " + self.graph->last_error();
     return false;
   }
+  LoopClosureResult loops;
+  loops.poses = self.graph->batch_poses();
+  try {
+    loops = close_loops(
+        *self.graph, self.mapping_keyframes, parameters.loop_closure, parameters.batch_max_iterations,
+        self.parameters.map_information.degeneracy_ratio,
+        std::chrono::duration<double>(Clock::now() - save_start).count(),
+        parameters.loop_closure_test_hooks);
+  } catch (const std::exception&) {
+    self.graph->clear_loop_factors();
+    loops.warning = "loop closure skipped: verification failed";
+  }
   std::map<int, const BatchPose*> poses;
-  for (const BatchPose& pose : self.graph->batch_poses()) poses[pose.index] = &pose;
+  for (const BatchPose& pose : loops.poses) poses[pose.index] = &pose;
   std::vector<TrajectoryPoint> trajectory;
   trajectory.reserve(self.mapping_keyframes.size());
   for (const KeyframeCloud& keyframe : self.mapping_keyframes) {
@@ -694,10 +729,17 @@ bool Localizer::save_map(const MapOutputParameters& parameters, MapOutputResult&
   }
   MapOutputParameters output_parameters = parameters;
   output_parameters.batch_optimized = true;
+  output_parameters.loop_closure_count = loops.count;
   output_parameters.has_gps_origin = self.gps_origin.has_value();
   if (self.gps_origin) output_parameters.gps_origin = *self.gps_origin;
   try {
     result = write_map_outputs(output_parameters, self.mapping_keyframes, trajectory);
+    result.warning = loops.warning;
+    result.statistics = loops.statistics;
+    if (parameters.loop_closure.enabled) {
+      result.statistics += ", save_map_s=" + std::to_string(
+          std::chrono::duration<double>(Clock::now() - save_start).count());
+    }
   } catch (const std::exception& exception) {
     error = exception.what();
     return false;

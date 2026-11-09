@@ -63,6 +63,11 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
   CallbackReturn on_shutdown(const rclcpp_lifecycle::State& state) override;
 
  private:
+  friend class LoopClosureNodeTestAccess;
+  void seed_loop_closure_for_test(const std::vector<Eigen::Isometry3d>& poses,
+                                  const LoopClosureTestHooks* hooks);
+  void clear_loop_closure_hooks_for_test() { loop_closure_test_hooks_ = nullptr; }
+
   void declare_parameters();
   bool read_parameters(std::string& error);
   bool load_map_data(std::string& error);
@@ -135,6 +140,7 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
   double map_voxel_size_m_ = 0.2;
   double keyframe_cloud_voxel_m_ = 0.25;
   int batch_max_iterations_ = 100;
+  LoopClosureParameters loop_closure_parameters_;
   double init_travel_m_ = 3.0;
   bool allow_mapping_without_gps_ = false;
   std::string map_frame_;
@@ -172,6 +178,7 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
   bool map_has_no_gps_origin_ = false;
 
   // Localizer and initial alignment.
+  const LoopClosureTestHooks* loop_closure_test_hooks_ = nullptr;
   std::unique_ptr<Localizer> localizer_;
   bool is_localizer_initialized_ = false;
   bool has_localizer_wheel_ = false;

@@ -134,6 +134,26 @@ W-1 は既定で無効。スリップ判定の根拠は LiDAR の照合だけな
 | `tracking_window_s` / `lost_position_std_m` | 5.0 / 2.0 | 状態判定 |
 | `odom_only_max_distance_m` / `odom_only_max_s` / `drift_rate` | 50 / 60 / 0.02 | ODOM_ONLY の上限。**`mode: mapping` では無効**（この 2 つで LOST にしない。D5） |
 
+## mapping 保存時のループ閉じ込み
+
+保存時に再訪候補を二段の GICP で検証し、支持し合うループをバッチ最適化に加える。保存した地図と `trajectory.csv` に反映し、走行中の推定は変えない。保存時間を制限し、最適化に失敗した場合はループを加える前の結果で保存する。`map.yaml` の `loop_closure_count` は残った因子の数である。
+
+反復上限に達した場合はパス 0 の結果を保存する。時間予算によって上限を減らした場合は応答に `loop closure skipped: time budget`、通常の上限まで使った場合は `loop closure skipped: not converged` を含める。検証中に例外が発生した場合は `loop closure skipped: verification failed` を含める。
+
+| パラメータ | 既定 | 意味 |
+|---|---|---|
+| `loop_closure_enabled` | true | 保存時のループ閉じ込み |
+| `loop_min_travel_m` / `loop_search_radius_m` | 8.0 / 3.0 | 経路長差の下限と水平探索半径 |
+| `loop_candidate_spacing_m` / `loop_max_verifications` | 0.5 / 200 | 候補の間隔と照合回数の上限 |
+| `loop_submap_half_keyframes` | 5 | 照合先に重ねる前後のキーフレーム数 |
+| `loop_coarse_correspondence_m` / `loop_fine_correspondence_m` | 2.0 / 0.5 | 粗・精の対応距離 |
+| `loop_inlier_ratio_min` | 0.7 | 精照合の一致率の下限 |
+| `loop_max_drift_ratio` / `loop_max_rotation_correction_rad` | 0.1 / 0.35 | 補正量のゲート |
+| `loop_min_support` / `loop_covariance_scale` | 1 / 1.0 | 支持数と共分散の倍率 |
+| `loop_outlier_chi2` / `loop_time_budget_s` | 12.6 / 25.0 | 外れ値の閾値と保存処理の締め切り |
+
+周辺共分散に取っておく時間はパス0の測定値であり、ループ追加後に増える計算時間は反映しない。候補の探索半径を超えるドリフトは検出できず、周期的な構造で複数の誤照合が同じずれを支持し合う場合もある。
+
 ## 診断とエラーの保持
 
 `/diagnostics` には GNSS に加え、state、map match、errors、performance を同じ配列で 1 Hz に出す。
@@ -187,7 +207,7 @@ performance は直近のスキャン処理時間とプロセスの CPU・メモ�
 - mapping 中は LOST にしない（odom_only の 50 m／60 s と、位置の不確かさ `lost_position_std_m` の両方を
   無効にする。`drift_rate` の項が GNSS 欠測の距離で増えるため、後者を残すと約 30 s で LOST になる）。
   localization モードは従来どおり。
-- ループ閉じ込み・動的物体除去・地図更新は v1 の非スコープ。
+- 動的物体除去・地図更新は v1 の非スコープ。
 
 ## IMU を後から足すとき
 

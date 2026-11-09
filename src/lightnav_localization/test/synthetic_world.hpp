@@ -27,17 +27,38 @@ class SyntheticWorld {
   // `centerline` must have axis-aligned legs. Walls end flush at the course ends (closed by caps).
   // `has_end_caps = false` leaves the ends open (only the max range limits the view), which makes
   // the corridor axis unobservable for scan matching.
-  explicit SyntheticWorld(const std::vector<Eigen::Vector2d>& centerline, bool has_end_caps = true) {
+  explicit SyntheticWorld(const std::vector<Eigen::Vector2d>& centerline, bool has_end_caps = true,
+                          bool closed_course = false) {
     centerline_ = centerline;
     // Use the stored copy: reading the caller's vector (often a two-point initializer_list) here
     // makes GCC 15 report a false -Warray-bounds for Eigen's vectorized 2-vector operations.
-    for (std::size_t leg = 0; leg + 1 < centerline_.size(); ++leg) {
-      add_leg_walls(centerline_, leg);
+    if (closed_course) {
+      std::vector<Eigen::Vector2d> cyclic_line;
+      cyclic_line.push_back(centerline_[centerline_.size() - 2]);
+      cyclic_line.insert(cyclic_line.end(), centerline_.begin(), centerline_.end());
+      cyclic_line.push_back(centerline_[1]);
+      for (std::size_t leg = 1; leg + 2 < cyclic_line.size(); ++leg) {
+        add_leg_walls(cyclic_line, leg);
+      }
+    } else {
+      for (std::size_t leg = 0; leg + 1 < centerline_.size(); ++leg) {
+        add_leg_walls(centerline_, leg);
+      }
     }
-    if (has_end_caps) {
+    if (has_end_caps && !closed_course) {
       walls_.push_back({front_cap_start(centerline_), front_cap_end(centerline_)});
       walls_.push_back({back_cap_start(centerline_), back_cap_end(centerline_)});
     }
+  }
+
+  double distance_to_wall(const Eigen::Vector2d& point) const {
+    double nearest_distance = std::numeric_limits<double>::infinity();
+    for (const WallSegment& wall : walls_) {
+      const Eigen::Vector2d segment = wall.end - wall.start;
+      const double fraction = std::clamp((point - wall.start).dot(segment) / segment.squaredNorm(), 0.0, 1.0);
+      nearest_distance = std::min(nearest_distance, (point - (wall.start + fraction * segment)).norm());
+    }
+    return nearest_distance;
   }
 
   // Boxes along each leg at `spacing_m` intervals, starting half an interval from the leg start

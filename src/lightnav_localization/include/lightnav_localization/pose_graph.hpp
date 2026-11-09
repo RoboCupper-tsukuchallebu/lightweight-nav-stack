@@ -5,6 +5,7 @@
 #include <memory>
 #include <string>
 #include <optional>
+#include <set>
 #include <vector>
 
 namespace lightnav_localization {
@@ -74,7 +75,24 @@ class PoseGraph {
   // Optimizes. Returns false if GTSAM threw; the caller then rebuilds from the current estimate.
   bool optimize();
   // Batch re-optimization of every retained factor (record_history must be on). Fills batch_poses().
-  bool batch_optimize(int max_iterations);
+  bool batch_optimize(int max_iterations, bool start_from_previous = false,
+                      bool calculate_marginals = true);
+  bool add_loop_factor(int from_index, int to_index, const Eigen::Isometry3d& relative,
+                       const Eigen::Matrix<double, 6, 6>& information);
+  bool remove_loop_factor(std::size_t loop_index);
+  void clear_loop_factors();
+  std::size_t loop_factor_count() const;
+  std::vector<double> loop_factor_chi_squared() const;
+  const std::set<int>& gps_factor_indices() const;
+  int batch_iterations() const;
+  double batch_optimization_seconds() const;
+  double batch_marginals_seconds() const;
+  bool calculate_batch_marginals();
+  bool batch_marginals_failed() const;
+  // Test only; do not call from production code.
+  void inject_marginals_failure_once_for_test() { should_fail_marginals_once_ = true; }
+  void remove_history_prior_for_test();
+  int marginal_construction_attempts() const;
   const std::vector<BatchPose>& batch_poses() const;
 
   // Estimate of a node; nullopt after it left the window.
@@ -93,6 +111,7 @@ class PoseGraph {
   int latest_index_ = -1;
   std::string last_error_;
   bool should_fail_once_ = false;
+  bool should_fail_marginals_once_ = false;
   mutable std::string covariance_error_;
 };
 
