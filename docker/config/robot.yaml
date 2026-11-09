@@ -3,13 +3,23 @@
 # Mounted read-only at /config/robot.yaml by docker/compose.yaml; scripts/deploy.sh stops when the copy on the
 # robot differs from this file, so a value changed on site goes back through a PR.
 #
-# safety_gate_node is left out on purpose: its limits stay at the defaults of lightnav_safety_gate.
 # points_qos_reliability of obstacle_monitor also stays at its default (reliable) until tsukuchalle_drivers #19 is in.
+
+safety_gate_node:
+  ros__parameters:
+    v_max_ceiling: 0.8
+    w_max_ceiling: 0.6
 
 obstacle_monitor:
   ros__parameters:
     # TF comes from the description container (base_footprint); the code default is base_link.
     base_frame: base_footprint
+    # Issue #1, user decision 2026-11-09: stop 0.3 m ahead of base_footprint (the body front is about 0.2 m ahead, so
+    # about 0.1 m from the front). The code default is 1.0 m. stop_zone_y_half_m and the slow zone keep their defaults.
+    stop_zone_x_m: 0.3
+    # Issue #1, user decision 2026-11-09: 0.3 m indoors and outdoors (default 0.5 m closed the passage in a room).
+    # The body is about 0.30 m wide, so about 0.15 m stays between an obstacle and the side of the body.
+    inflation_radius_m: 0.3
 
 controller_node:
   ros__parameters:
@@ -28,6 +38,9 @@ controller_node:
 
 localization_node:
   ros__parameters:
+    # Issue #59, user decision 2026-11-09: accept map-match yaw corrections up to 2.0 rad (code default 0.2 rad
+    # rejected correct corrections after wheel slip, so the yaw stayed off).
+    map_gate_rotation_rad: 2.0
     # GNSS input contract (Issue #43 section 4.3, decisions D1, D8, D10). Mapping and localization use the same topic.
     gps_topic: /rtk/fix_all
     # 1 = SBAS (Float) or better. The single-point solution (status 0) is no GNSS observation: it does not

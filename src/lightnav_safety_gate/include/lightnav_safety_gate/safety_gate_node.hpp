@@ -4,6 +4,8 @@
 #include <chrono>
 #include <cmath>
 #include <memory>
+#include <limits>
+#include <vector>
 #include <string>
 
 #include "geometry_msgs/msg/twist.hpp"
@@ -33,6 +35,61 @@ public:
     declareNumericParameter("deceleration_max_mps2", 1.0);
     declareNumericParameter("angular_acceleration_max_rps2", 1.0);
     declareNumericParameter("angular_deceleration_max_rps2", 2.0);
+    double startup_linear = std::numeric_limits<double>::quiet_NaN();
+    double startup_angular = std::numeric_limits<double>::quiet_NaN();
+    readNumericParameter("v_max", startup_linear);
+    readNumericParameter("w_max", startup_angular);
+    limits_.linear_max_mps = startup_linear;
+    limits_.angular_max_rps = startup_angular;
+    declareNumericParameter("v_max_ceiling", startup_linear);
+    declareNumericParameter("w_max_ceiling", startup_angular);
+    readNumericParameter("v_max_ceiling", linear_ceiling_);
+    readNumericParameter("w_max_ceiling", angular_ceiling_);
+    validation_callback_ = add_on_set_parameters_callback(
+      [this](const std::vector<rclcpp::Parameter> & parameters) {
+        rcl_interfaces::msg::SetParametersResult result;
+        result.successful = true;
+        for (const auto & parameter : parameters) {
+          const auto & name = parameter.get_name();
+          if (name != "v_max" && name != "w_max") {
+            result.successful = false;
+            result.reason = name + ": read-only after startup";
+          } else {
+            double value = 0.0;
+            const bool numeric = numericValue(parameter, value);
+            const double ceiling = name == "v_max" ? linear_ceiling_ : angular_ceiling_;
+            if (!(numeric && std::isfinite(value) && value > 0.0 &&
+              std::isfinite(ceiling) && value <= ceiling))
+            {
+              result.successful = false;
+              result.reason = name + ": must be finite, positive and no greater than its finite ceiling" +
+                " (requested " + parameter.value_to_string() + ", ceiling " +
+                std::to_string(ceiling) + ")";
+            }
+          }
+          if (!result.successful) {
+            RCLCPP_WARN(get_logger(), "parameter rejected: %s", result.reason.c_str());
+            return result;
+          }
+        }
+        return result;
+      });
+    application_callback_ = add_post_set_parameters_callback(
+      [this](const std::vector<rclcpp::Parameter> & parameters) {
+        auto updated = limits_;
+        for (const auto & parameter : parameters) {
+          double value = 0.0;
+          if (!numericValue(parameter, value)) {continue;}
+          double * target = parameter.get_name() == "v_max" ? &updated.linear_max_mps :
+            parameter.get_name() == "w_max" ? &updated.angular_max_rps : nullptr;
+          if (target) {
+            RCLCPP_INFO(get_logger(), "parameter changed: %s %.6g -> %.6g",
+              parameter.get_name().c_str(), *target, value);
+            *target = value;
+          }
+        }
+        limits_ = updated;
+      });
   }
 
   CallbackReturn on_configure(const rclcpp_lifecycle::State &) override
@@ -59,7 +116,9 @@ public:
       std::isfinite(publish_hz) && publish_hz > 0.0 && std::isfinite(publish_period_s_) &&
       std::isfinite(timeouts_.command_timeout_s) && timeouts_.command_timeout_s > 0.0 &&
       std::isfinite(timeouts_.obstacle_status_timeout_s) &&
-      timeouts_.obstacle_status_timeout_s > 0.0 && areLimitsValid(limits_);
+      timeouts_.obstacle_status_timeout_s > 0.0 && areLimitsValid(limits_) &&
+      (!std::isfinite(linear_ceiling_) || limits_.linear_max_mps <= linear_ceiling_) &&
+      (!std::isfinite(angular_ceiling_) || limits_.angular_max_rps <= angular_ceiling_);
     if (!are_parameters_valid) {
       RCLCPP_ERROR(get_logger(), "invalid parameters; configure rejected");
       return CallbackReturn::FAILURE;
@@ -125,12 +184,20 @@ private:
     rcl_interfaces::msg::ParameterDescriptor descriptor;
     descriptor.dynamic_typing = true;
     descriptor.description = "A number; an integer is accepted as well as a double.";
+    descriptor.read_only = name != "v_max" && name != "w_max";
     declare_parameter(name, rclcpp::ParameterValue(default_value), descriptor);
   }
 
   bool readNumericParameter(const std::string & name, double & value)
   {
     const rclcpp::Parameter parameter = get_parameter(name);
+    if (numericValue(parameter, value)) {return true;}
+    RCLCPP_ERROR(get_logger(), "parameter '%s' must be an integer or a double", name.c_str());
+    return false;
+  }
+
+  static bool numericValue(const rclcpp::Parameter & parameter, double & value)
+  {
     if (parameter.get_type() == rclcpp::ParameterType::PARAMETER_INTEGER) {
       value = static_cast<double>(parameter.as_int());
       return true;
@@ -139,7 +206,6 @@ private:
       value = parameter.as_double();
       return true;
     }
-    RCLCPP_ERROR(get_logger(), "parameter '%s' must be an integer or a double", name.c_str());
     return false;
   }
 
@@ -208,6 +274,10 @@ private:
   double publish_period_s_{0.05};
   EmergencyStopTimeouts timeouts_;
   SafetyGateLimits limits_;
+  double linear_ceiling_{std::numeric_limits<double>::quiet_NaN()};
+  double angular_ceiling_{std::numeric_limits<double>::quiet_NaN()};
+  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr validation_callback_;
+  rclcpp::node_interfaces::PostSetParametersCallbackHandle::SharedPtr application_callback_;
   bool is_active_{false};
 
   lightnav_msgs::msg::ObstacleStatus latest_obstacle_status_;
