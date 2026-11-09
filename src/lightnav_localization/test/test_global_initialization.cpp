@@ -266,3 +266,25 @@ TEST(GlobalInitializationSearch, G13MovedFurnitureNeverAcceptsWrongPose) {
     EXPECT_LE(std::abs(std::atan2(result.pose.linear()(1, 0), result.pose.linear()(0, 0))), M_PI / 180.0);
   }
 }
+
+TEST(GlobalInitializationSearch, G4RejectsTwoIdenticalRooms) {
+  using lightnav_localization::testing::SyntheticWorld;
+  SyntheticWorld world({{0.0, 0.0}, {5.0, 0.0}});
+  world.add_box({1.0, 0.5}, {1.7, 1.4});
+  PointList map = world.sample_map(0.15);
+  const PointList first_room = map;
+  for (const auto& point : first_room) map.push_back(point + Eigen::Vector3f(8.0f, 0.0f, 0.0f));
+  Eigen::Isometry3d sensor = Eigen::Isometry3d::Identity();
+  sensor.translation() = Eigen::Vector3d(2.5, 0.0, 0.5);
+  const auto timed = world.synthesize_scan([&](double) { return sensor; }, 0.0, 0.1, true, 360, 8);
+  PointList scan;
+  for (const auto& point : timed) scan.push_back(point.position + Eigen::Vector3f(0, 0, 0.5f));
+  GlobalInitializationSearchParameters parameters;
+  parameters.minimum = {0.0, -2.0};
+  parameters.maximum = {13.0, 2.0};
+  parameters.maximum_range_m = 6.0;
+  std::atomic<bool> abort{false};
+  const auto result = search_global_initialization(map, scan, parameters, abort);
+  EXPECT_FALSE(result.decision.accepted);
+  EXPECT_EQ(result.decision.error, "ambiguous");
+}
