@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
+#include <stdexcept>
 
 namespace lightnav_localization {
 namespace {
@@ -16,6 +18,45 @@ bool are_distinct(const GlobalInitializationPeak& left, const GlobalInitializati
 }
 
 }  // namespace
+
+GlobalInitializationLikelihoodField::GlobalInitializationLikelihoodField(
+    const PointList& points, const Eigen::Vector2d& minimum, const Eigen::Vector2d& maximum,
+    double resolution, std::size_t maximum_cells)
+    : minimum_(minimum), resolution_(resolution), width_(0), height_(0) {
+  if (!minimum.allFinite() || !maximum.allFinite() || !std::isfinite(resolution) ||
+      resolution <= 0.0 || (maximum.array() < minimum.array()).any()) {
+    throw std::invalid_argument("invalid likelihood field bounds");
+  }
+  const double width = std::floor((maximum.x() - minimum.x()) / resolution) + 1.0;
+  const double height = std::floor((maximum.y() - minimum.y()) / resolution) + 1.0;
+  if (width > static_cast<double>(maximum_cells) || height > static_cast<double>(maximum_cells) ||
+      width * height > static_cast<double>(maximum_cells)) {
+    throw std::length_error("map_too_large");
+  }
+  width_ = static_cast<std::size_t>(width);
+  height_ = static_cast<std::size_t>(height);
+  distances_.resize(width_ * height_, std::numeric_limits<double>::infinity());
+  for (std::size_t row = 0; row < height_; ++row) {
+    for (std::size_t column = 0; column < width_; ++column) {
+      const Eigen::Vector2d cell = minimum_ + resolution_ * Eigen::Vector2d(column, row);
+      for (const auto& point : points) {
+        if (point.allFinite()) {
+          distances_[row * width_ + column] = std::min(
+              distances_[row * width_ + column], (cell - point.head<2>().cast<double>()).norm());
+        }
+      }
+    }
+  }
+}
+
+double GlobalInitializationLikelihoodField::distance(const Eigen::Vector2d& position) const {
+  if (!position.allFinite()) return std::numeric_limits<double>::infinity();
+  const Eigen::Vector2d cell = (position - minimum_) / resolution_;
+  if ((cell.array() < 0.0).any() || cell.x() >= static_cast<double>(width_) ||
+      cell.y() >= static_cast<double>(height_)) return std::numeric_limits<double>::infinity();
+  return distances_[static_cast<std::size_t>(cell.y()) * width_ +
+                    static_cast<std::size_t>(cell.x())];
+}
 
 bool has_too_many_global_initialization_peaks(
     const std::vector<GlobalInitializationPeak>& coarse_peaks,
