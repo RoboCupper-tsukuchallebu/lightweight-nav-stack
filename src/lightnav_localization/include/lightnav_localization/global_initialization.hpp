@@ -34,6 +34,7 @@ struct GlobalInitializationPeak {
   double yaw_rad = 0.0;
   double coarse_score = 0.0;
   double verification_score = 0.0;
+  bool degenerate = false;
 };
 
 struct GlobalInitializationPeakParameters {

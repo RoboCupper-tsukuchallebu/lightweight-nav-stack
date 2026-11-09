@@ -34,6 +34,18 @@ TEST(GlobalInitializationPeaks, RejectsCompetitorBelowFifthCoarseRank) {
   EXPECT_EQ(decision.error, "ambiguous");
 }
 
+TEST(GlobalInitializationPeaks, DegenerateSecondPeakStillMakesResultAmbiguous) {
+  std::vector<GlobalInitializationPeak> peaks(2);
+  peaks[0].verification_score = 0.95;
+  peaks[1].position.x() = 2.0;
+  peaks[1].verification_score = 0.94;
+  peaks[1].degenerate = true;
+  const auto decision = decide_global_initialization_peaks(peaks, {});
+  EXPECT_FALSE(decision.accepted);
+  EXPECT_EQ(decision.error, "ambiguous");
+  EXPECT_DOUBLE_EQ(decision.second_score, 0.94);
+}
+
 TEST(GlobalInitializationPeaks, RejectsEleventhNearbyCoarseScore) {
   std::vector<GlobalInitializationPeak> peaks(11);
   for (auto& peak : peaks) peak.coarse_score = 0.9;

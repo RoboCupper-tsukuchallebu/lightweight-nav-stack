@@ -416,19 +416,19 @@ GlobalInitializationSearchResult search_global_initialization(
     if (peaks.size() > parameters.peaks.peak_count) peaks.resize(parameters.peaks.peak_count);
     std::vector<GlobalInitializationPeak> verified;
     std::vector<Eigen::Isometry3d> poses;
-    std::vector<bool> degeneracies;
     for (auto peak : peaks) {
       peak = refine_peak(field, band, peak, context);
       Eigen::Isometry3d pose;
       bool degenerate = false;
       if (verify_peak(peak, map, scan, band, field, context, pose, degenerate)) {
-        verified.push_back(peak); poses.push_back(pose); degeneracies.push_back(degenerate);
+        peak.degenerate = degenerate;
+        verified.push_back(peak); poses.push_back(pose);
       }
       if (context.stopped()) { output.decision.error = context.error; return output; }
     }
     // All converged peaks compete for b2, even if degenerate; only b1 is checked below.
     output.decision = decide_global_initialization_peaks(verified, parameters.peaks);
-    if (output.decision.accepted && degeneracies[output.decision.best_index]) {
+    if (output.decision.accepted && verified[output.decision.best_index].degenerate) {
       output.decision.accepted = false;
       output.decision.error = "degenerate";
     }
