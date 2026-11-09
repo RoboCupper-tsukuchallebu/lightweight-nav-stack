@@ -4,6 +4,7 @@ import math
 
 import pytest
 import rclpy
+from rclpy.lifecycle import TransitionCallbackReturn
 from rclpy.parameter import Parameter
 
 from lightnav_mission.mission_node import MissionNode
@@ -133,9 +134,10 @@ def test_tuning_rejects_invalid_range(mission, name, value):
 def test_use_sim_time_rejected_in_each_lifecycle_state(mission, state):
     # Arrange
     if state in ("inactive", "active"):
-        mission.trigger_configure()
+        assert mission.trigger_configure() == TransitionCallbackReturn.SUCCESS
     if state == "active":
-        mission.trigger_activate()
+        assert mission.trigger_activate() == TransitionCallbackReturn.SUCCESS
+    assert mission._state_machine.current_state[1] == state
 
     # Act
     result = set_value(mission, "use_sim_time", True)
