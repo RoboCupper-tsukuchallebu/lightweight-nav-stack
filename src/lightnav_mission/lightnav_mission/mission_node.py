@@ -93,17 +93,21 @@ class MissionNode(LifecycleNode):
             self.declare_parameter(name, default, descriptor)
         self._mission_parameters = {name: self.get_parameter(name).value for name in PARAMETER_DEFAULTS}
         self._pose_timeout_baseline = self._mission_parameters["pose_timeout_s"]
-        self.add_pre_set_parameters_callback(self._log_read_only_attempts)
+        self.add_pre_set_parameters_callback(self._log_descriptor_rejections)
         self.add_on_set_parameters_callback(self._validate_parameter_changes)
         self.add_post_set_parameters_callback(self._apply_parameter_changes)
         self._last_path_message: PathWithId | None = None
 
-    def _log_read_only_attempts(self, parameters):
+    def _log_descriptor_rejections(self, parameters):
         # descriptor による拒否は on_set より先に起こる。
         for parameter in parameters:
             if parameter.name in READ_ONLY_PARAMETERS:
                 self.get_logger().warn(
                     f"parameter change rejected: {parameter.name}: read-only")
+            elif (parameter.name in PARAMETER_DEFAULTS
+                  and type(parameter.value) is not type(PARAMETER_DEFAULTS[parameter.name])):
+                self.get_logger().warn(
+                    f"parameter change rejected: {parameter.name}: incorrect type")
         return parameters
 
     def _parameter_error(self, values):
