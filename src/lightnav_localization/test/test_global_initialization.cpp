@@ -6,6 +6,10 @@
 #include <stdexcept>
 #include <cmath>
 #include <iostream>
+#include <fstream>
+#include <string>
+
+#include "lightnav_localization/matcher.hpp"
 
 #include "lightnav_localization/global_initialization.hpp"
 #include "synthetic_world.hpp"
@@ -442,17 +446,31 @@ TEST(GlobalInitializationSearch, G10MeasuresSearchOn2500SquareMetres) {
   world.add_box({2.0, 0.5}, {2.8, 1.5});
   world.add_box({5.0, -1.7}, {5.5, -0.4});
   world.add_box({8.0, 3.4}, {8.5, 4.2});
-  const auto map = world.sample_map(0.15);
+  PointList map;
+  const PointList room = world.sample_map(0.3);
+  for (int x = -20; x < 30; x += 10)
+    for (int y = -20; y < 30; y += 10)
+      for (const auto& point : room) map.push_back(point + Eigen::Vector3f(x, y, 0));
   Eigen::Isometry3d sensor = Eigen::Isometry3d::Identity();
   sensor.translation() = Eigen::Vector3d(1.0, 0.0, 0.5);
   const auto timed = world.synthesize_scan([&](double) { return sensor; }, 0.0, 0.1, true, 360, 8);
   PointList scan;
   for (const auto& point : timed) scan.push_back(point.position + Eigen::Vector3f(0, 0, 0.5f));
   GlobalInitializationSearchParameters parameters;
+  parameters.time_budget_s = 120.0;
   parameters.minimum = {-20.0, -20.0};
   parameters.maximum = {30.0, 30.0};
   parameters.maximum_range_m = 12.0;
   std::atomic<bool> abort{false};
+  const auto peak_memory_kib = [] {
+    std::ifstream status("/proc/self/status");
+    std::string line;
+    while (std::getline(status, line)) {
+      if (line.rfind("VmHWM:", 0) == 0) return std::stoul(line.substr(6));
+    }
+    return 0ul;
+  };
+  const auto memory_before = peak_memory_kib();
   const auto started = std::chrono::steady_clock::now();
   const auto result = search_global_initialization(map, scan, parameters, abort);
   const double total = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
@@ -460,34 +478,67 @@ TEST(GlobalInitializationSearch, G10MeasuresSearchOn2500SquareMetres) {
             << " cells=" << result.field_cells << " coarse=" << result.coarse_seconds
             << " fine=" << result.fine_seconds << " verification=" << result.verification_seconds
             << " reason=" << result.decision.error << std::endl;
+  std::cout << "G10 VmHWM_before_kib=" << memory_before << " after_kib=" << peak_memory_kib() << std::endl;
+  EXPECT_NE(result.decision.error, "map_too_large");
+  EXPECT_GT(result.field_cells, 0u);
+  for (double duration : {total, result.field_seconds, result.coarse_seconds, result.fine_seconds, result.verification_seconds})
+    EXPECT_TRUE(std::isfinite(duration) && duration >= 0.0);
+  for (double duration : result.target_seconds) EXPECT_TRUE(std::isfinite(duration) && duration >= 0.0);
+  for (double duration : result.matching_seconds) EXPECT_TRUE(std::isfinite(duration) && duration >= 0.0);
   for (double duration : result.target_seconds) std::cout << "G10 target=" << duration << std::endl;
   for (double duration : result.matching_seconds) std::cout << "G10 matching=" << duration << std::endl;
 }
 
 TEST(GlobalInitializationSearch, G11RejectsDuplicatedRoomWithDecoyBoxes) {
   using lightnav_localization::testing::SyntheticWorld;
-  SyntheticWorld world({{0.0, 0.0}, {5.0, 0.0}});
-  world.add_box({1.0, 0.5}, {1.7, 1.4});
-  PointList map = world.sample_map(0.15);
-  const PointList room = map;
-  for (const auto& point : room) map.push_back(point + Eigen::Vector3f(8.0f, 0.0f, 0.0f));
-  // Additional short obstacles create competing 2D features between the rooms.
-  SyntheticWorld decoy({{16.0, 0.0}, {20.0, 0.0}});
-  decoy.add_box({17.0, 0.5}, {17.7, 1.4});
-  for (const auto& point : decoy.sample_map(0.15)) map.push_back(point);
+  SyntheticWorld world({{0.0, 0.0}, {9.0, 0.0}, {9.0, 6.0}});
+  world.add_box({2.0, 0.5}, {2.8, 1.5});
+  world.add_box({5.0, -1.7}, {5.5, -0.4});
+  world.add_box({8.0, 3.4}, {8.5, 4.2});
+  const PointList room = world.sample_map(0.15);
+  PointList map = room;
+  for (const auto& point : room) map.push_back(point + Eigen::Vector3f(20.0f, 0.0f, 0.0f));
   Eigen::Isometry3d sensor = Eigen::Isometry3d::Identity();
-  sensor.translation() = Eigen::Vector3d(2.5, 0.0, 0.5);
+  sensor.translation() = Eigen::Vector3d(1.0, 0.0, 0.5);
   const auto timed = world.synthesize_scan([&](double) { return sensor; }, 0.0, 0.1, true, 360, 8);
   PointList scan;
   for (const auto& point : timed) scan.push_back(point.position + Eigen::Vector3f(0, 0, 0.5f));
+  for (int decoy = 0; decoy < 5; ++decoy) {
+    const float offset = static_cast<float>(40 + decoy * 12);
+    for (const auto& point : scan) {
+      if (point.z() >= 0.3f && point.z() <= 2.0f) {
+        for (float height = 0.4f; height <= 1.6f; height += 0.2f)
+          map.emplace_back(point.x() + offset, point.y(), height);
+      }
+    }
+    for (float x = offset - 5.0f; x <= offset + 10.0f; x += 0.8f)
+      for (float y = -5.0f; y <= 8.0f; y += 0.8f) map.emplace_back(x, y, 0.0f);
+  }
   GlobalInitializationSearchParameters parameters;
-  parameters.minimum = {0.0, -2.0};
-  parameters.maximum = {20.0, 2.0};
-  parameters.maximum_range_m = 6.0;
+  parameters.minimum = {0.0, -1.5};
+  parameters.maximum = {90.0, 6.0};
+  parameters.maximum_range_m = 12.0;
   std::atomic<bool> abort{false};
   const auto result = search_global_initialization(map, scan, parameters, abort);
+  for (std::size_t index = 0; index < std::min<std::size_t>(15, result.coarse_peaks.size()); ++index)
+    std::cout << "G11 rank=" << index + 1 << " position=" << result.coarse_peaks[index].position.transpose()
+              << " yaw=" << result.coarse_peaks[index].yaw_rad << " score=" << result.coarse_peaks[index].coarse_score << std::endl;
+  std::size_t partner_rank = 0;
+  for (std::size_t index = 0; index < result.coarse_peaks.size(); ++index) {
+    const auto& peak = result.coarse_peaks[index];
+    if ((peak.position - Eigen::Vector2d(21.0, 0.0)).norm() < 0.3 && std::abs(peak.yaw_rad) < 0.1) {
+      partner_rank = index + 1;
+      break;
+    }
+  }
+  ASSERT_GE(partner_rank, 6u);
+  // The first-version rule would verify only the five band-only decoys and miss the partner.
+  std::cout << "G11 reason=" << result.decision.error << std::endl;
   EXPECT_FALSE(result.decision.accepted);
   EXPECT_EQ(result.decision.error, "ambiguous");
+  parameters.maximum = {10.5, 6.0};
+  const auto control = search_global_initialization(room, scan, parameters, abort);
+  EXPECT_TRUE(control.decision.accepted) << control.decision.error;
 }
 
 TEST(GlobalInitializationSearch, G12RejectsRoomAbsentFromMap) {
@@ -505,7 +556,29 @@ TEST(GlobalInitializationSearch, G12RejectsRoomAbsentFromMap) {
   parameters.maximum = {5.0, 2.0};
   parameters.maximum_range_m = 8.0;
   std::atomic<bool> abort{false};
+  PreparedTarget target(map);
+  Eigen::Isometry3d wrong_pose = Eigen::Isometry3d::Identity();
+  wrong_pose.translation().x() = 2.5;
+  MatcherParameters matcher_parameters;
+  matcher_parameters.max_correspondence_distance_m = 2.0;
+  auto matching = match_scan(target, scan, wrong_pose, matcher_parameters);
+  ASSERT_TRUE(matching.converged);
+  matcher_parameters.max_correspondence_distance_m = 0.5;
+  const auto fine_matching = match_scan(target, scan, matching.target_to_source, matcher_parameters);
+  if (fine_matching.converged) matching = fine_matching;
+  std::size_t inliers = 0;
+  for (const auto& point : scan) {
+    const Eigen::Vector3d transformed = matching.target_to_source * point.cast<double>();
+    double nearest_squared = std::numeric_limits<double>::infinity();
+    for (const auto& map_point : map)
+      nearest_squared = std::min(nearest_squared, (transformed - map_point.cast<double>()).squaredNorm());
+    if (nearest_squared <= parameters.correspondence_m * parameters.correspondence_m) ++inliers;
+  }
+  const double scan_to_map_score = static_cast<double>(inliers) / scan.size();
+  std::cout << "G12 scan_to_map=" << scan_to_map_score << std::endl;
+  EXPECT_GE(scan_to_map_score, parameters.peaks.score_min);
   const auto result = search_global_initialization(map, scan, parameters, abort);
+  std::cout << "G12 reason=" << result.decision.error << std::endl;
   EXPECT_FALSE(result.decision.accepted);
   EXPECT_TRUE(result.decision.error == "low_score" || result.decision.error == "ambiguous")
       << result.decision.error;

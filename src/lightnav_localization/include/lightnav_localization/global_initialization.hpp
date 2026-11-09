@@ -110,6 +110,7 @@ struct GlobalInitializationSearchResult {
   double coarse_seconds = 0.0;
   double fine_seconds = 0.0;
   double verification_seconds = 0.0;
+  std::vector<GlobalInitializationPeak> coarse_peaks;
   std::vector<double> target_seconds;
   std::vector<double> matching_seconds;
 };

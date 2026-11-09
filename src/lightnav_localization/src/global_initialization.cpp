@@ -455,6 +455,7 @@ GlobalInitializationSearchResult search_global_initialization(
     stage_started = Clock::now();
     auto peaks = coarse_search(field, band, context, search_minimum, search_maximum);
     output.coarse_seconds = std::chrono::duration<double>(Clock::now() - stage_started).count();
+    output.coarse_peaks = peaks;
     if (context.stopped()) { output.decision.error = context.error; return output; }
     if (has_too_many_global_initialization_peaks(peaks, parameters.peaks)) {
       output.decision.error = "ambiguous"; return output;
