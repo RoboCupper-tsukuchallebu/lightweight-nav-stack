@@ -433,6 +433,9 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
           follow_result.remaining_distance_m, follow_inputs.is_stop_zone_occupied,
           follow_inputs.is_obstacle_status_fresh});
     }
+    if (!is_pose_fresh) {
+      avoid_layer_->resetWaiting();
+    }
     const ArbitrationResult result = arbitrate(arbitration_input);
     publish(result, follow_result);
   }

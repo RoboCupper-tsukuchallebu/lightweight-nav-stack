@@ -104,6 +104,7 @@ class ArcAvoidLayer final : public AvoidLayer {
   LayerOutput compute(const AvoidContext& context) override;
 
   bool isAvoiding() const { return is_avoiding_; }
+  void resetWaiting() { waiting_since_s_.reset(); }
 
  private:
   void reset();
