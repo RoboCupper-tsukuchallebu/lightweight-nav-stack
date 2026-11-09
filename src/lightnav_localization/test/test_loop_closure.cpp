@@ -205,12 +205,16 @@ TEST(LoopClosure, AConflictingLoopIsRemovedUsingItsWhitenedResidual) {
   }
   const std::size_t correct_count = supported_loops(correct_loops, fixture.poses, lengths, {}).size();
   bool injected = false;
-  hooks.before_batch = [&](int) {
-    if (injected) return;
+  hooks.before_batch_with_graph = [&](PoseGraph& graph) -> std::optional<LoopCandidate> {
+    if (injected) return std::nullopt;
     Eigen::Isometry3d incorrect = Eigen::Isometry3d::Identity();
     incorrect.translation().x() = 5.0;
-    ASSERT_TRUE(fixture.graph.add_loop_factor(0, 20, incorrect, diagonal_information(0.05, 0.01)));
+    if (!graph.add_loop_factor(0, 20, incorrect, diagonal_information(0.05, 0.01))) {
+      ADD_FAILURE() << "Failed to add conflicting loop factor";
+      return std::nullopt;
+    }
     injected = true;
+    return LoopCandidate{0, 20, 0.0};
   };
 
   const auto result = close_loops(fixture.graph, fixture.keyframes, {}, 100, 0.05, 0.0, &hooks);
@@ -223,6 +227,33 @@ TEST(LoopClosure, AConflictingLoopIsRemovedUsingItsWhitenedResidual) {
   ASSERT_EQ(result.poses.size(), fixture.poses.size());
   EXPECT_LT((result.poses.back().map_to_base.translation() -
              fixture.poses.back().map_to_base.translation()).norm(), 0.3);
+  EXPECT_TRUE(fixture.graph.loop_factor_chi_squared().empty());
+}
+
+TEST(LoopClosure, UntrackedLoopFactorRestoresPassZeroWithoutOutOfBoundsAccess) {
+  SyntheticLoopGraph fixture;
+  LoopClosureTestHooks hooks;
+  hooks.verify = [&](const LoopCandidate& candidate) { return fixture.match(candidate); };
+  hooks.elapsed_seconds = [] { return 0.0; };
+  hooks.iteration_seconds = 0.001;
+  bool injected = false;
+  hooks.before_batch = [&](int) {
+    if (injected) return;
+    Eigen::Isometry3d incorrect = Eigen::Isometry3d::Identity();
+    incorrect.translation().x() = 5.0;
+    ASSERT_TRUE(fixture.graph.add_loop_factor(0, 20, incorrect, diagonal_information(0.05, 0.01)));
+    injected = true;
+  };
+
+  const auto result = close_loops(fixture.graph, fixture.keyframes, {}, 100, 0.05, 0.0, &hooks);
+
+  ASSERT_TRUE(injected);
+  EXPECT_EQ(result.warning, "loop closure skipped: optimization failed");
+  EXPECT_EQ(result.count, 0);
+  ASSERT_EQ(result.poses.size(), fixture.poses.size());
+  for (std::size_t index = 0; index < result.poses.size(); ++index) {
+    EXPECT_TRUE(result.poses[index].map_to_base.matrix().isApprox(fixture.poses[index].map_to_base.matrix()));
+  }
   EXPECT_TRUE(fixture.graph.loop_factor_chi_squared().empty());
 }
 

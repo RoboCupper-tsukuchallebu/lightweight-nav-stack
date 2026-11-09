@@ -372,6 +372,12 @@ LoopClosureResult close_loops(PoseGraph& graph, const std::vector<KeyframeCloud>
           active_loops.push_back(marker);
         }
       }
+      // Each factor must have a corresponding candidate for removal and logging.
+      // A pre-existing or unreported factor invalidates that correspondence.
+      if (graph.loop_factor_count() != active_loops.size()) {
+        failure = "optimization failed";
+        break;
+      }
       result.count = static_cast<int>(graph.loop_factor_count());
       if (!graph.batch_optimize(limit, true, false)) { failure = "optimization failed"; break; }
       const double measured_iteration_seconds =
