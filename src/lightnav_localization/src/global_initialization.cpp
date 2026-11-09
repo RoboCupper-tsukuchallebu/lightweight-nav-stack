@@ -4,6 +4,10 @@
 #include <cmath>
 #include <stdexcept>
 #include <limits>
+#include <chrono>
+#include <array>
+#include <Eigen/Eigenvalues>
+#include "lightnav_localization/matcher.hpp"
 
 namespace lightnav_localization {
 namespace {
@@ -142,6 +146,213 @@ GlobalInitializationPeakDecision decide_global_initialization_peaks(
     decision.accepted = true;
   }
   return decision;
+}
+
+namespace {
+using Clock = std::chrono::steady_clock;
+
+struct SearchContext {
+  const GlobalInitializationSearchParameters& parameters;
+  const std::atomic<bool>& abort;
+  Clock::time_point started = Clock::now();
+  std::size_t candidates = 0;
+  std::string error;
+  bool stopped() {
+    if (abort.load()) error = "cancelled";
+    else if (std::chrono::duration<double>(Clock::now() - started).count() >=
+             parameters.time_budget_s || candidates >= parameters.candidate_budget) error = "time_budget";
+    return !error.empty();
+  }
+};
+
+PointList select_band(const PointList& scan, const GlobalInitializationSearchParameters& parameters) {
+  std::array<float, 360> ranges;
+  ranges.fill(std::numeric_limits<float>::infinity());
+  std::array<Eigen::Vector3f, 360> points;
+  for (const auto& point : scan) {
+    if (!point.allFinite() || point.z() < parameters.height_min_m ||
+        point.z() > parameters.height_max_m) continue;
+    const float range = point.head<2>().norm();
+    if (range > parameters.maximum_range_m) continue;
+    const double angle = std::atan2(point.y(), point.x());
+    const int bin = (static_cast<int>(std::floor((angle + M_PI) * 180.0 / M_PI)) + 360) % 360;
+    if (range < ranges[bin]) { ranges[bin] = range; points[bin] = point; }
+  }
+  PointList result;
+  for (std::size_t index = 0; index < ranges.size(); ++index)
+    if (std::isfinite(ranges[index])) result.push_back(points[index]);
+  return result;
+}
+
+double likelihood(const GlobalInitializationLikelihoodField& field, const PointList& scan,
+                  const GlobalInitializationPeak& peak, double sigma) {
+  const Eigen::Rotation2Dd rotation(peak.yaw_rad);
+  double sum = 0.0;
+  for (const auto& point : scan) {
+    const double distance = field.distance(peak.position + rotation * point.head<2>().cast<double>());
+    sum += std::exp(-distance * distance / (2.0 * sigma * sigma));
+  }
+  return sum / static_cast<double>(scan.size());
+}
+
+std::vector<GlobalInitializationPeak> suppress_peaks(
+    std::vector<GlobalInitializationPeak> candidates, const GlobalInitializationPeakParameters& parameters,
+    bool verified) {
+  std::sort(candidates.begin(), candidates.end(), [verified](const auto& left, const auto& right) {
+    return verified ? left.verification_score > right.verification_score : left.coarse_score > right.coarse_score;
+  });
+  std::vector<GlobalInitializationPeak> result;
+  for (const auto& candidate : candidates) {
+    bool distinct = true;
+    for (const auto& previous : result) if (!are_distinct(candidate, previous, parameters)) { distinct = false; break; }
+    if (distinct) result.push_back(candidate);
+  }
+  return result;
+}
+
+std::vector<GlobalInitializationPeak> coarse_search(
+    const GlobalInitializationLikelihoodField& field, const PointList& scan, SearchContext& context) {
+  const auto& parameters = context.parameters;
+  std::vector<GlobalInitializationPeak> candidates;
+  for (double x = parameters.minimum.x(); x <= parameters.maximum.x() + 1e-9; x += parameters.coarse_translation_step_m) {
+    for (double y = parameters.minimum.y(); y <= parameters.maximum.y() + 1e-9; y += parameters.coarse_translation_step_m) {
+      const double distance = field.distance({x, y});
+      if (distance < 0.3 || distance > parameters.maximum_range_m) continue;
+      for (double yaw = -M_PI; yaw < M_PI - 1e-9; yaw += parameters.coarse_yaw_step_rad) {
+        if (context.stopped()) return {};
+        GlobalInitializationPeak peak;
+        peak.position = {x, y}; peak.yaw_rad = yaw;
+        peak.coarse_score = likelihood(field, scan, peak, parameters.likelihood_sigma_m);
+        ++context.candidates;
+        candidates.push_back(peak);
+      }
+    }
+  }
+  return suppress_peaks(std::move(candidates), parameters.peaks, false);
+}
+
+GlobalInitializationPeak refine_peak(const GlobalInitializationLikelihoodField& field,
+                                     const PointList& scan, GlobalInitializationPeak peak,
+                                     SearchContext& context) {
+  const auto& parameters = context.parameters;
+  const auto center = peak;
+  for (double x = -parameters.coarse_translation_step_m; x <= parameters.coarse_translation_step_m + 1e-9; x += parameters.fine_translation_step_m)
+    for (double y = -parameters.coarse_translation_step_m; y <= parameters.coarse_translation_step_m + 1e-9; y += parameters.fine_translation_step_m)
+      for (double yaw = -parameters.coarse_yaw_step_rad; yaw <= parameters.coarse_yaw_step_rad + 1e-9; yaw += parameters.fine_yaw_step_rad) {
+        if (context.stopped()) return peak;
+        GlobalInitializationPeak candidate = center;
+        candidate.position += Eigen::Vector2d(x, y); candidate.yaw_rad += yaw;
+        if ((candidate.position.array() < parameters.minimum.array()).any() ||
+            (candidate.position.array() > parameters.maximum.array()).any()) continue;
+        candidate.coarse_score = likelihood(field, scan, candidate, parameters.likelihood_sigma_m);
+        ++context.candidates;
+        if (candidate.coarse_score > peak.coarse_score) peak = candidate;
+      }
+  return peak;
+}
+
+double scan_to_map(const PointList& scan, const PointList& map, const Eigen::Isometry3d& pose, double threshold) {
+  std::size_t inliers = 0;
+  for (const auto& point : scan) {
+    const Eigen::Vector3d transformed = pose * point.cast<double>();
+    for (const auto& target : map) {
+      if ((transformed - target.cast<double>()).squaredNorm() <= threshold * threshold) { ++inliers; break; }
+    }
+  }
+  return scan.empty() ? 0.0 : static_cast<double>(inliers) / scan.size();
+}
+
+double map_to_scan(const GlobalInitializationLikelihoodField& field, const PointList& scan,
+                   const GlobalInitializationPeak& peak, const GlobalInitializationSearchParameters& parameters) {
+  std::array<double, 360> ranges;
+  ranges.fill(std::numeric_limits<double>::infinity());
+  for (const auto& point : scan) {
+    const double angle = std::atan2(point.y(), point.x());
+    const int bin = (static_cast<int>(std::floor((angle + M_PI) * 180.0 / M_PI)) + 360) % 360;
+    ranges[bin] = std::min(ranges[bin], static_cast<double>(point.head<2>().norm()));
+  }
+  std::size_t visible = 0, consistent = 0;
+  for (int bin = 0; bin < 360; ++bin) {
+    const double angle = peak.yaw_rad + (bin + 0.5) * M_PI / 180.0 - M_PI;
+    const Eigen::Vector2d direction(std::cos(angle), std::sin(angle));
+    for (double range = 0.3; range <= parameters.maximum_range_m; range += parameters.grid_resolution_m) {
+      if (field.distance(peak.position + range * direction) <= parameters.grid_resolution_m * 0.5) {
+        ++visible;
+        if (ranges[bin] <= range + parameters.see_through_m) ++consistent;
+        break;
+      }
+    }
+  }
+  return visible == 0 ? 0.0 : static_cast<double>(consistent) / visible;
+}
+
+bool verify_peak(GlobalInitializationPeak& peak, const PointList& map, const PointList& scan,
+                 const PointList& band, const GlobalInitializationLikelihoodField& field,
+                 SearchContext& context, Eigen::Isometry3d& pose) {
+  if (context.stopped()) return false;
+  PointList local_map;
+  for (const auto& point : map)
+    if ((point.head<2>().cast<double>() - peak.position).norm() <= context.parameters.maximum_range_m) local_map.push_back(point);
+  PreparedTarget target(local_map);
+  if (context.stopped() || !target.is_valid()) return false;
+  pose = Eigen::Isometry3d::Identity();
+  pose.linear() = Eigen::AngleAxisd(peak.yaw_rad, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+  pose.translation().head<2>() = peak.position;
+  MatcherParameters parameters;
+  parameters.max_correspondence_distance_m = 2.0;
+  auto result = match_scan(target, scan, pose, parameters);
+  if (context.stopped() || !result.converged) return false;
+  parameters.max_correspondence_distance_m = 0.5;
+  result = match_scan(target, scan, result.target_to_source, parameters);
+  if (context.stopped() || !result.converged || !result.target_to_source.matrix().allFinite()) return false;
+  Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> eigenvalues(result.information.block<3, 3>(0, 0));
+  if (eigenvalues.info() != Eigen::Success || eigenvalues.eigenvalues().maxCoeff() <= 0.0 ||
+      eigenvalues.eigenvalues().minCoeff() / eigenvalues.eigenvalues().maxCoeff() < context.parameters.degeneracy_ratio) return false;
+  pose = result.target_to_source;
+  peak.position = pose.translation().head<2>();
+  peak.yaw_rad = std::atan2(pose.linear()(1, 0), pose.linear()(0, 0));
+  peak.verification_score = std::min(scan_to_map(scan, local_map, pose, context.parameters.correspondence_m),
+                                    map_to_scan(field, band, peak, context.parameters));
+  return true;
+}
+}  // namespace
+
+GlobalInitializationSearchResult search_global_initialization(
+    const PointList& map, const PointList& scan, const GlobalInitializationSearchParameters& parameters,
+    const std::atomic<bool>& abort) {
+  GlobalInitializationSearchResult output;
+  SearchContext context{parameters, abort};
+  if (context.stopped()) { output.decision.error = context.error; return output; }
+  const PointList band = select_band(scan, parameters);
+  if (band.size() < parameters.minimum_scan_points) { output.decision.error = "not_enough_scan_points"; return output; }
+  const Eigen::Vector2d extent = parameters.maximum - parameters.minimum;
+  if ((extent.array() < 0.0).any() || extent.prod() > parameters.maximum_area_m2 ||
+      parameters.coarse_translation_step_m <= 0 || parameters.coarse_yaw_step_rad <= 0 ||
+      parameters.fine_translation_step_m <= 0 || parameters.fine_yaw_step_rad <= 0 ||
+      parameters.likelihood_sigma_m <= 0) { output.decision.error = "map_too_large"; return output; }
+  try {
+    const Eigen::Vector2d padding = Eigen::Vector2d::Constant(parameters.maximum_range_m);
+    GlobalInitializationLikelihoodField field(map, parameters.minimum - padding, parameters.maximum + padding,
+                                               parameters.grid_resolution_m, parameters.maximum_grid_cells);
+    auto peaks = coarse_search(field, band, context);
+    if (context.stopped()) { output.decision.error = context.error; return output; }
+    if (has_too_many_global_initialization_peaks(peaks, parameters.peaks)) {
+      output.decision.error = "ambiguous"; return output;
+    }
+    if (peaks.size() > parameters.peaks.peak_count) peaks.resize(parameters.peaks.peak_count);
+    std::vector<GlobalInitializationPeak> verified;
+    std::vector<Eigen::Isometry3d> poses;
+    for (auto peak : peaks) {
+      peak = refine_peak(field, band, peak, context);
+      Eigen::Isometry3d pose;
+      if (verify_peak(peak, map, scan, band, field, context, pose)) { verified.push_back(peak); poses.push_back(pose); }
+      if (context.stopped()) { output.decision.error = context.error; return output; }
+    }
+    output.decision = decide_global_initialization_peaks(verified, parameters.peaks);
+    if (output.decision.accepted) output.pose = poses[output.decision.best_index];
+    output.evaluated_candidates = context.candidates;
+  } catch (const std::length_error&) { output.decision.error = "map_too_large"; }
+  return output;
 }
 
 }  // namespace lightnav_localization
