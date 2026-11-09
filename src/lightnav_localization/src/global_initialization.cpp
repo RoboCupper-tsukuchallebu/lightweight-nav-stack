@@ -206,6 +206,7 @@ std::vector<GlobalInitializationPeak> suppress_peaks(
     bool distinct = true;
     for (const auto& previous : result) if (!are_distinct(candidate, previous, parameters)) { distinct = false; break; }
     if (distinct) result.push_back(candidate);
+    if (!verified && result.size() > parameters.peak_count) break;
   }
   return result;
 }
