@@ -28,10 +28,6 @@ ArbitrationResult arbitrate(const ArbitrationInput& input) {
   if (input.follow.reason == StopReason::kObstacleStale) {
     return makeStop(StopReason::kObstacleStale);
   }
-  if (input.follow.is_asserted && input.follow.twist.linear_mps == 0.0 &&
-      input.follow.twist.angular_rps != 0.0) {
-    return makeAdopted(input.follow, Layer::kFollow);
-  }
   if (input.avoid.is_asserted && input.is_grid_fresh) {
     if (input.avoid.reason != StopReason::kOk && input.avoid.twist.angular_rps == 0.0) {
       // Avoid layer is waiting (no feasible arc / stuck): hold still and say why.

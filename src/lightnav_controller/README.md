@@ -43,3 +43,5 @@ In-place rotation starts when heading error exceeds `rotate_in_place_heading_thr
 
 The user decision in Issue #1 (2026-11-09) permits rotation without checking the footprint, obstacles or stop zone and without an angle or attempt limit. People or objects beside or behind the robot can be struck; a person must be ready to use emergency stop. Stale pose or obstacle status still stops the controller.
 The existing safety gate still stops all commands when its forward stop zone is occupied. Its acceleration limits can leave a temporary forward output while transitioning from driving to an in-place rotation command.
+
+Avoidance takes priority over heading alignment, including during STUCK rotation. If the stop zone is occupied, the unchanged safety gate stops even an in-place rotation; recovery can therefore remain blocked until the zone clears. A change to that gate requires user confirmation.

@@ -233,3 +233,13 @@ TEST(FollowLayer, EmptyPausePathStopsAnActiveRotation) {
   EXPECT_EQ(stopped.output.reason, StopReason::kNoPath);
   EXPECT_DOUBLE_EQ(stopped.output.twist.angular_rps, 0.0);
 }
+
+TEST(FollowLayer, CoincidentLookaheadDoesNotClaimPathEnd) {
+  FollowParameters parameters;
+  parameters.lookahead_m = 2.0;
+  FollowLayer layer{parameters};
+  ASSERT_TRUE(layer.tryAcceptPath(1, 1, {{0.0, 0.0}, {1.0, 0.0}, {0.0, 0.0}, {2.0, 0.0}}));
+  const auto result = layer.compute(Pose2D{0.0, 0.0, 0.0}, freshInputs());
+  EXPECT_GT(result.remaining_distance_m, parameters.goal_tolerance_m);
+  EXPECT_EQ(result.output.reason, StopReason::kBlocked);
+}

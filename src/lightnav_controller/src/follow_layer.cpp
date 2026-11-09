@@ -116,7 +116,7 @@ FollowResult FollowLayer::compute(const Pose2D& pose, const FollowInputs& inputs
   }
   if (squared_distance_m2 < kMinimumCurvature * kMinimumCurvature) {
     result.output.is_asserted = false;
-    result.output.reason = StopReason::kAtPathEnd;
+    result.output.reason = StopReason::kBlocked;
     return result;
   }
 

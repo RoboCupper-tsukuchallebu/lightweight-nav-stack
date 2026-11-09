@@ -93,3 +93,17 @@ TEST(Arbitrate, StalePoseOrObstacleStopsRotation) {
   EXPECT_EQ(arbitrate(input).reason, StopReason::kObstacleStale);
   EXPECT_DOUBLE_EQ(arbitrate(input).twist.angular_rps, 0.0);
 }
+
+TEST(Arbitrate, AvoidRotationAndArcTakePriorityOverHeadingAlignment) {
+  ArbitrationInput input;
+  input.is_pose_fresh = true;
+  input.is_grid_fresh = true;
+  input.follow = LayerOutput{true, Twist2D{0.0, -0.3}, StopReason::kOk};
+  for (const auto avoid : {LayerOutput{true, Twist2D{0.0, 0.3}, StopReason::kStuck},
+                           LayerOutput{true, Twist2D{0.25, 0.1}, StopReason::kOk}}) {
+    input.avoid = avoid;
+    const auto result = arbitrate(input);
+    EXPECT_EQ(result.source_layer, Layer::kAvoid);
+    EXPECT_DOUBLE_EQ(result.twist.angular_rps, avoid.twist.angular_rps);
+  }
+}
