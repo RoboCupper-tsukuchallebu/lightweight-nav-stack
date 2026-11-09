@@ -349,7 +349,7 @@ GlobalInitializationSearchResult search_global_initialization(
     const PointList& map, const PointList& scan, const GlobalInitializationSearchParameters& parameters,
     const std::atomic<bool>& abort) {
   GlobalInitializationSearchResult output;
-  SearchContext context{parameters, abort};
+  SearchContext context{parameters, abort, Clock::now(), 0, {}};
   if (context.stopped()) { output.decision.error = context.error; return output; }
   const PointList band = select_band(scan, parameters);
   if (band.size() < parameters.minimum_scan_points) { output.decision.error = "not_enough_scan_points"; return output; }
