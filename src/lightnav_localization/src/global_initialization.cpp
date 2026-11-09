@@ -333,7 +333,7 @@ bool verify_peak(GlobalInitializationPeak& peak, const PointList& map, const Poi
   parameters.max_correspondence_distance_m = 0.5;
   result = match_scan(target, scan, result.target_to_source, parameters);
   if (context.stopped() || !result.converged || !result.target_to_source.matrix().allFinite()) return false;
-  Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> eigenvalues(result.information.block<3, 3>(0, 0));
+  Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> eigenvalues(result.information.block<3, 3>(3, 3));
   if (eigenvalues.info() != Eigen::Success || eigenvalues.eigenvalues().maxCoeff() <= 0.0 ||
       eigenvalues.eigenvalues().minCoeff() / eigenvalues.eigenvalues().maxCoeff() < context.parameters.degeneracy_ratio) return false;
   pose = result.target_to_source;
