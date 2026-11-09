@@ -5,3 +5,12 @@
 Parameters: `resolution_m` (0.2), `global_frame` (`map`, non-empty), `max_path_points` (100000). A request that would need more points (or overflows) fails with `success=false` before any allocation.
 
 Processing time: the service handler (request validation, interpolation and `nav_msgs/Path` assembly) takes about 3-4 ms for 100 waypoints over 100 m (501 poses), measured on a Mac with `pytest -s` (`test_processing_time_including_path_assembly`). The test asserts an upper bound of 1 s so CI jitter does not cause failures.
+
+## パラメータの変更
+
+| パラメータ | 種類 |
+|---|---|
+| `resolution_m`, `global_frame`, `max_path_points` | 構成（read-only） |
+| `use_sim_time` | 起動時のみ設定可能 |
+
+起動時に launch または YAML で指定する。起動後の変更は拒否される。

@@ -45,8 +45,7 @@ def plan(node, request):
     return node._handle_plan_path(request, PlanPath.Response())
 
 
-def configure(node, **parameters):
-    node.set_parameters([Parameter(name, value=value) for name, value in parameters.items()])
+def configure(node):
     return node.trigger_configure()
 
 
@@ -90,10 +89,14 @@ def test_oversized_request_fails_without_exception(node):
     "parameters",
     [{"resolution_m": 0.0}, {"resolution_m": math.nan}, {"global_frame": ""}, {"max_path_points": 0}],
 )
-def test_configure_fails_on_invalid_parameters(node, parameters):
-    result = configure(node, **parameters)
-    assert result == TransitionCallbackReturn.FAILURE or "ERROR" in str(result)
-    assert node._service is None
+def test_configure_fails_on_invalid_parameters(parameters):
+    node = PlannerNode(parameter_overrides=[Parameter(name, value=value) for name, value in parameters.items()])
+    try:
+        result = configure(node)
+        assert result == TransitionCallbackReturn.FAILURE or "ERROR" in str(result)
+        assert node._service is None
+    finally:
+        node.destroy_node()
 
 
 PROBE_SCRIPT = Path(__file__).with_name("real_service_probe.py")
@@ -162,3 +165,24 @@ def test_processing_time_including_path_assembly(node):
     print(f"100 waypoints / 100 m / {len(response.path.poses)} poses: {elapsed_s * 1000:.2f} ms")
     assert response.success
     assert elapsed_s < PROCESSING_TIME_LIMIT_S
+
+
+@pytest.mark.parametrize("name,value", [
+    ("resolution_m", 0.4), ("global_frame", "odom"), ("max_path_points", 100),
+])
+def test_configuration_parameters_are_read_only(node, name, value):
+    original = node.get_parameter(name).value
+    result = node.set_parameters([Parameter(name, value=value)])[0]
+    assert not result.successful
+    assert "read-only" in result.reason.lower()
+    assert node.get_parameter(name).value == original
+
+
+def test_use_sim_time_is_rejected_in_every_lifecycle_state(node):
+    for transition in (None, node.trigger_configure, node.trigger_activate):
+        if transition is not None:
+            assert transition() == TransitionCallbackReturn.SUCCESS
+        result = node.set_parameters([Parameter("use_sim_time", value=True)])[0]
+        assert not result.successful
+        assert "use_sim_time" in result.reason and "read-only" in result.reason
+        assert node.get_parameter("use_sim_time").value is False

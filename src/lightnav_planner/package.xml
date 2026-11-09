@@ -7,6 +7,7 @@
   <maintainer email="maintainers@example.com">lightnav maintainers</maintainer>
   <license>Apache-2.0</license>
 
+  <depend>rcl_interfaces</depend>
   <depend>rclpy</depend>
   <depend>lifecycle_msgs</depend>
   <depend>geometry_msgs</depend>
