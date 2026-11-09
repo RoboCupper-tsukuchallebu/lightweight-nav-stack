@@ -1217,12 +1217,18 @@ TEST_F(LocalizationNodeTest, ConfigureFailsWithInvalidGnssInputParameters) {
   EXPECT_EQ(node_->configure().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED);
 }
 
+TEST_F(LocalizationNodeTest, WheelSlipDeclaredDefaultsAreDisabled) {
+  create_node(make_options(map_file_.string(), map_yaml_.string()));
+  EXPECT_DOUBLE_EQ(node_->get_parameter("lidar_odom_slip_gate_yaw_rad").as_double(), 0.0);
+  EXPECT_DOUBLE_EQ(node_->get_parameter("wheel_yaw_slip_threshold_rad").as_double(), 0.0);
+}
+
 TEST_F(LocalizationNodeTest, ConfigureFailsWithInvalidWheelSlipParameters) {
   const std::vector<rclcpp::Parameter> invalid_parameters = {
       rclcpp::Parameter("lidar_odom_slip_wheel_rate_window_s", 0.0),
       rclcpp::Parameter("lidar_odom_slip_wheel_rate_window_s", std::numeric_limits<double>::infinity()),
       rclcpp::Parameter("lidar_odom_slip_wheel_rate_window_s", std::numeric_limits<double>::quiet_NaN()),
-      rclcpp::Parameter("wheel_yaw_slip_threshold_rad", 0.0),
+      rclcpp::Parameter("wheel_yaw_slip_threshold_rad", -1.0),
       rclcpp::Parameter("wheel_yaw_slip_threshold_rad", std::numeric_limits<double>::infinity()),
       rclcpp::Parameter("wheel_yaw_slip_threshold_rad", std::numeric_limits<double>::quiet_NaN()),
       rclcpp::Parameter("wheel_robust_kernel", "unknown"),

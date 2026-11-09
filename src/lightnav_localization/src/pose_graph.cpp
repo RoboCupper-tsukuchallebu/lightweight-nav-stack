@@ -80,7 +80,7 @@ struct PoseGraph::Implementation {
         smoother(std::make_unique<gtsam::IncrementalFixedLagSmoother>(parameters_in.window_s)) {
     if ((parameters.wheel_robust_kernel != "huber" && parameters.wheel_robust_kernel != "cauchy") ||
         !std::isfinite(parameters.wheel_robust_k) || parameters.wheel_robust_k <= 0.0 ||
-        !std::isfinite(parameters.wheel_yaw_slip_threshold_rad) || parameters.wheel_yaw_slip_threshold_rad <= 0.0) {
+        !std::isfinite(parameters.wheel_yaw_slip_threshold_rad) || parameters.wheel_yaw_slip_threshold_rad < 0.0) {
       throw std::invalid_argument("invalid wheel noise parameters");
     }
   }
@@ -172,7 +172,8 @@ double wheel_yaw_sigma(const PoseGraphParameters& parameters, const Eigen::Isome
   const double yaw = std::abs(Eigen::AngleAxisd(wheel_relative.rotation()).angle());
   double sigma = std::max(parameters.sigma_floor_rad,
       parameters.wheel_sigma_yaw_per_rad * yaw + parameters.wheel_sigma_yaw_per_m * distance);
-  if (yaw_disagreement_rad > parameters.wheel_yaw_slip_threshold_rad) {
+  if (parameters.wheel_yaw_slip_threshold_rad > 0.0 &&
+      yaw_disagreement_rad > parameters.wheel_yaw_slip_threshold_rad) {
     sigma = std::max(sigma, yaw_disagreement_rad);
   }
   return sigma;
@@ -196,7 +197,8 @@ int PoseGraph::add_node_with_wheel_factor(double stamp_sec, const Eigen::Isometr
                                       parameters.planar_sigma_tilt_rad, sigma_yaw);
   const gtsam::Vector3 translation_sigma(sigma_translation, sigma_translation, sigma_z);
   gtsam::SharedNoiseModel wheel_noise = pose_noise(rotation_sigma, translation_sigma);
-  if (yaw_disagreement_rad > parameters.wheel_yaw_slip_threshold_rad) {
+  if (parameters.wheel_yaw_slip_threshold_rad > 0.0 &&
+      yaw_disagreement_rad > parameters.wheel_yaw_slip_threshold_rad) {
     wheel_noise = Robust::Create(parameters.wheel_robust_kernel == "cauchy"
         ? gtsam::noiseModel::mEstimator::Base::shared_ptr(Cauchy::Create(parameters.wheel_robust_k))
         : gtsam::noiseModel::mEstimator::Base::shared_ptr(Huber::Create(parameters.wheel_robust_k)), wheel_noise);

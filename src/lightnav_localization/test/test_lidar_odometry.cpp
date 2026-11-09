@@ -73,3 +73,13 @@ TEST_F(LidarOdometryTest, RejectsYawDisagreementBeyondDefaultGateWhileDrivingStr
   const MatchResult result = odometry_.match(scan_at(world_, truth), pose_at_x(12.0), 0.0, 0.0);
   EXPECT_FALSE(result.is_accepted);
 }
+
+TEST_F(LidarOdometryTest, DefaultSlipGateDoesNotOverrideSmallerYawGate) {
+  LidarOdometryParameters parameters;
+  parameters.gate_yaw_rad = 0.05;
+  LidarOdometry odometry(parameters);
+  for (const double x : {10.0, 11.0, 12.0}) odometry.add_keyframe(pose_at_x(x), scan_at(world_, pose_at_x(x)));
+  Eigen::Isometry3d truth = pose_at_x(12.0);
+  truth.linear() = Eigen::AngleAxisd(0.08, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+  EXPECT_FALSE(odometry.match(scan_at(world_, truth), pose_at_x(12.0), 0.0, 0.0).is_accepted);
+}

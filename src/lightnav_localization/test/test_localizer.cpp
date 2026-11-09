@@ -118,6 +118,7 @@ struct Scenario {
   bool reinitialize_after_gap = false;  // set_initial_pose with the truth when the input resumes
   double correction_slew_rps = CorrectorParameters{}.slew_rps;
   double slip_gate_yaw_rad = LidarOdometryParameters{}.slip_gate_yaw_rad;
+  double wheel_yaw_slip_threshold_rad = PoseGraphParameters{}.wheel_yaw_slip_threshold_rad;
   double slip_begin_sec = -1.0;
   double slip_end_sec = -1.0;
   double stop_sec = -1.0;  // ends the run early
@@ -200,6 +201,7 @@ Report run(const Scenario& scenario) {
   LocalizerParameters parameters;
   parameters.graph.wheel_sigma_translation_per_m = scenario.wheel_sigma_translation_per_m;
   parameters.lidar_odometry.slip_gate_yaw_rad = scenario.slip_gate_yaw_rad;
+  parameters.graph.wheel_yaw_slip_threshold_rad = scenario.wheel_yaw_slip_threshold_rad;
   parameters.map_information.degeneracy_ratio = scenario.degeneracy_ratio;
   parameters.state.odom_only_max_distance_m = scenario.odom_only_max_distance_m;
   parameters.map_submap_rebuild_distance_m = scenario.map_rebuild_distance_m;
@@ -1006,6 +1008,7 @@ TEST(Localizer, WheelYawSlipDuringTurnKeepsTrackingAndYawCloseToTruth) {
   scenario.is_gps_enabled = false;
   scenario.wheel_scale = 1.0;
   scenario.slip_gate_yaw_rad = 0.35;
+  scenario.wheel_yaw_slip_threshold_rad = 0.1;
   scenario.slip_begin_sec = 20.0 / kSpeed + 0.5;
   scenario.slip_end_sec = scenario.slip_begin_sec + 0.8;
   scenario.stop_sec = scenario.slip_end_sec + 2.0;
@@ -1026,6 +1029,7 @@ TEST(Localizer, WheelYawSlipWithSparseScansKeepsYawBounded) {
   scenario.is_gps_enabled = false;
   scenario.wheel_scale = 1.0;
   scenario.slip_gate_yaw_rad = 0.35;
+  scenario.wheel_yaw_slip_threshold_rad = 0.1;
   scenario.slip_begin_sec = 20.0 / kSpeed + 0.5;
   scenario.slip_end_sec = scenario.slip_begin_sec + 0.8;
   scenario.stop_sec = scenario.slip_end_sec + 2.0;

@@ -212,7 +212,8 @@ TEST(PoseGraph, GpsAltitudeDoesNotChangeHeightOrTilt) {
 TEST(PoseGraph, WheelKernelChoicesLetLidarOverrideYawSlip) {
   for (const std::string kernel : {"huber", "cauchy"}) {
     PoseGraphParameters parameters;
-    EXPECT_DOUBLE_EQ(parameters.wheel_yaw_slip_threshold_rad, 0.1);
+    EXPECT_DOUBLE_EQ(parameters.wheel_yaw_slip_threshold_rad, 0.0);
+    parameters.wheel_yaw_slip_threshold_rad = 0.1;
     EXPECT_EQ(parameters.wheel_robust_kernel, "huber");
     EXPECT_DOUBLE_EQ(parameters.wheel_robust_k, 8.0);
     parameters.wheel_robust_kernel = kernel;
@@ -242,18 +243,41 @@ TEST(PoseGraph, RejectsNonpositiveOrNonfiniteWheelKernelScaleAndSlipThreshold) {
     PoseGraphParameters kernel_parameters;
     kernel_parameters.wheel_robust_k = invalid;
     EXPECT_THROW(PoseGraph graph(kernel_parameters), std::invalid_argument);
-    PoseGraphParameters threshold_parameters;
-    threshold_parameters.wheel_yaw_slip_threshold_rad = invalid;
-    EXPECT_THROW(PoseGraph graph(threshold_parameters), std::invalid_argument);
+    if (invalid != 0.0) {
+      PoseGraphParameters threshold_parameters;
+      threshold_parameters.wheel_yaw_slip_threshold_rad = invalid;
+      EXPECT_THROW(PoseGraph graph(threshold_parameters), std::invalid_argument);
+    }
   }
 }
 
 TEST(PoseGraph, WheelYawSigmaChangesOnlyAboveSlipThreshold) {
-  const PoseGraphParameters parameters;
+  PoseGraphParameters parameters;
+  parameters.wheel_yaw_slip_threshold_rad = 0.1;
   const auto wheel = yaw_translation(1.0, 0.0, 0.2);
   const double original_sigma = std::max(parameters.sigma_floor_rad,
       parameters.wheel_sigma_yaw_per_rad * 0.2 + parameters.wheel_sigma_yaw_per_m);
   EXPECT_NEAR(wheel_yaw_sigma(parameters, wheel, 0.0), original_sigma, 1e-12);
   EXPECT_NEAR(wheel_yaw_sigma(parameters, wheel, 0.1), original_sigma, 1e-12);
   EXPECT_NEAR(wheel_yaw_sigma(parameters, wheel, 0.2), 0.2, 1e-12);
+}
+
+TEST(PoseGraph, DefaultWheelFactorIgnoresYawDisagreement) {
+  const PoseGraphParameters parameters;
+  const auto wheel = yaw_translation(1.0, 0.0, 0.2);
+  const double original_sigma = std::max(parameters.sigma_floor_rad,
+      parameters.wheel_sigma_yaw_per_rad * 0.2 + parameters.wheel_sigma_yaw_per_m);
+  EXPECT_NEAR(wheel_yaw_sigma(parameters, wheel, 1.0), original_sigma, 1e-12);
+  auto estimate_with_disagreement = [&](double disagreement) {
+    PoseGraph graph(parameters);
+    graph.add_first_node(0.0, Eigen::Isometry3d::Identity(), 0.05, 0.01);
+    EXPECT_TRUE(graph.optimize());
+    const auto stationary = yaw_translation(0.0, 0.0, 0.0);
+    const int index = graph.add_node_with_wheel_factor(1.0, stationary, stationary, disagreement);
+    graph.add_lidar_odometry_factor(0, index, yaw_translation(0.0, 0.0, 0.3),
+                                    diagonal_information(0.02, 0.005));
+    EXPECT_TRUE(graph.optimize());
+    return Eigen::Matrix3d(graph.pose(index).value().rotation());
+  };
+  EXPECT_TRUE(estimate_with_disagreement(0.0).isApprox(estimate_with_disagreement(1.0), 1e-12));
 }

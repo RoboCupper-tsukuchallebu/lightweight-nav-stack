@@ -20,7 +20,7 @@ struct PoseGraphParameters {
   double window_s = 30.0;
   double huber_k = 1.0;
   double wheel_sigma_translation_per_m = 0.02;
-  double wheel_yaw_slip_threshold_rad = 0.1;
+  double wheel_yaw_slip_threshold_rad = 0.0;
   double wheel_sigma_yaw_per_rad = 0.1;
   double wheel_sigma_yaw_per_m = 0.01;
   std::string wheel_robust_kernel = "huber";

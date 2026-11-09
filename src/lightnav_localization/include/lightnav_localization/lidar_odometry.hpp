@@ -18,7 +18,7 @@ struct LidarOdometryParameters {
   double gate_translation_m = 0.3;
   double gate_translation_ratio = 0.2;
   double gate_yaw_rad = 0.1;
-  double slip_gate_yaw_rad = 0.1;
+  double slip_gate_yaw_rad = 0.0;
   double slip_wheel_yaw_rate_rad_s = 0.05;
   double slip_wheel_rate_window_s = 0.05;
 };
