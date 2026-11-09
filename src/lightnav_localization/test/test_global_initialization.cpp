@@ -76,3 +76,32 @@ TEST(GlobalInitializationSearch, RejectsInsufficientScan) {
   const auto result = search_global_initialization({}, {}, {}, abort);
   EXPECT_EQ(result.decision.error, "not_enough_scan_points");
 }
+
+TEST(GlobalInitializationSearch, RejectsSymmetricRoomThroughSearch) {
+  PointList map;
+  PointList scan;
+  for (int index = -20; index <= 20; ++index) {
+    const float coordinate = static_cast<float>(index) * 0.1f;
+    for (float height : {0.5f, 1.0f, 1.5f}) {
+      map.emplace_back(coordinate, -2.0f, height);
+      map.emplace_back(coordinate, 2.0f, height);
+      map.emplace_back(-2.0f, coordinate, height);
+      map.emplace_back(2.0f, coordinate, height);
+    }
+  }
+  for (const auto& point : map) scan.emplace_back(point.x() - 0.5f, point.y(), point.z());
+  GlobalInitializationSearchParameters parameters;
+  parameters.minimum = {-1.0, -1.0};
+  parameters.maximum = {1.0, 1.0};
+  parameters.maximum_range_m = 5.0;
+  parameters.coarse_yaw_step_rad = M_PI / 2.0;
+  parameters.fine_yaw_step_rad = M_PI / 2.0;
+  parameters.fine_translation_step_m = 0.5;
+  parameters.peaks.peak_count = 2;
+  parameters.peaks.candidate_margin = 1.0;
+  parameters.time_budget_s = 60.0;
+  std::atomic<bool> abort{false};
+  const auto result = search_global_initialization(map, scan, parameters, abort);
+  EXPECT_FALSE(result.decision.accepted);
+  EXPECT_EQ(result.decision.error, "ambiguous");
+}
