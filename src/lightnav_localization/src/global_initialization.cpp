@@ -163,7 +163,7 @@ struct SearchContext {
     if (abort.load()) error = "cancelled";
     else if (std::chrono::duration<double>(Clock::now() - started).count() >=
              parameters.time_budget_s) error = "time_budget";
-    else if (candidates >= parameters.candidate_budget) error = "candidate_budget";
+    else if (candidates >= parameters.candidate_budget) error = "time_budget";
     return !error.empty();
   }
 };
@@ -178,7 +178,7 @@ PointList select_band(const PointList& scan, const GlobalInitializationSearchPar
     const float range = point.head<2>().norm();
     if (range > parameters.maximum_range_m) continue;
     const double angle = std::atan2(point.y(), point.x());
-    const int bin = (static_cast<int>(std::floor((angle + M_PI) * 180.0 / M_PI)) + 360) % 360;
+    const int bin = (static_cast<int>(std::floor((angle + M_PI) * 180.0 / M_PI + 0.5)) + 360) % 360;
     if (range < ranges[bin]) { ranges[bin] = range; points[bin] = point; }
   }
   PointList result;
@@ -318,12 +318,12 @@ double map_to_scan(const GlobalInitializationLikelihoodField& field, const Point
   ranges.fill(std::numeric_limits<double>::infinity());
   for (const auto& point : scan) {
     const double angle = std::atan2(point.y(), point.x());
-    const int bin = (static_cast<int>(std::floor((angle + M_PI) * 180.0 / M_PI)) + 360) % 360;
+    const int bin = (static_cast<int>(std::floor((angle + M_PI) * 180.0 / M_PI + 0.5)) + 360) % 360;
     ranges[bin] = std::min(ranges[bin], static_cast<double>(point.head<2>().norm()));
   }
   std::size_t visible = 0, consistent = 0;
   for (int bin = 0; bin < 360; ++bin) {
-    const double angle = peak.yaw_rad + (bin + 0.5) * M_PI / 180.0 - M_PI;
+    const double angle = peak.yaw_rad + bin * M_PI / 180.0 - M_PI;
     const Eigen::Vector2d direction(std::cos(angle), std::sin(angle));
     for (double range = 0.3; range <= parameters.maximum_range_m; range += parameters.grid_resolution_m) {
       if (field.distance(peak.position + range * direction) <= parameters.grid_resolution_m * 0.5) {
@@ -338,7 +338,7 @@ double map_to_scan(const GlobalInitializationLikelihoodField& field, const Point
 
 bool verify_peak(GlobalInitializationPeak& peak, const PointList& map, const PointList& scan,
                  const PointList& band, const GlobalInitializationLikelihoodField& field,
-                 SearchContext& context, Eigen::Isometry3d& pose) {
+                 SearchContext& context, Eigen::Isometry3d& pose, bool& degenerate) {
   if (context.stopped()) return false;
   PointList local_map;
   for (const auto& point : map)
@@ -366,8 +366,8 @@ bool verify_peak(GlobalInitializationPeak& peak, const PointList& map, const Poi
   result = match_scan(target, scan, result.target_to_source, parameters);
   if (context.stopped() || !result.converged || !result.target_to_source.matrix().allFinite()) return false;
   Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> eigenvalues(result.information.block<3, 3>(3, 3));
-  if (eigenvalues.info() != Eigen::Success || eigenvalues.eigenvalues().maxCoeff() <= 0.0 ||
-      eigenvalues.eigenvalues().minCoeff() / eigenvalues.eigenvalues().maxCoeff() < context.parameters.degeneracy_ratio) return false;
+  degenerate = eigenvalues.info() != Eigen::Success || eigenvalues.eigenvalues().maxCoeff() <= 0.0 ||
+      eigenvalues.eigenvalues().minCoeff() / eigenvalues.eigenvalues().maxCoeff() < context.parameters.degeneracy_ratio;
   pose = result.target_to_source;
   if ((pose.translation().head<2>().array() < context.parameters.minimum.array()).any() ||
       (pose.translation().head<2>().array() > context.parameters.maximum.array()).any()) return false;
@@ -416,13 +416,21 @@ GlobalInitializationSearchResult search_global_initialization(
     if (peaks.size() > parameters.peaks.peak_count) peaks.resize(parameters.peaks.peak_count);
     std::vector<GlobalInitializationPeak> verified;
     std::vector<Eigen::Isometry3d> poses;
+    std::vector<bool> degeneracies;
     for (auto peak : peaks) {
       peak = refine_peak(field, band, peak, context);
       Eigen::Isometry3d pose;
-      if (verify_peak(peak, map, scan, band, field, context, pose)) { verified.push_back(peak); poses.push_back(pose); }
+      bool degenerate = false;
+      if (verify_peak(peak, map, scan, band, field, context, pose, degenerate)) {
+        verified.push_back(peak); poses.push_back(pose); degeneracies.push_back(degenerate);
+      }
       if (context.stopped()) { output.decision.error = context.error; return output; }
     }
     output.decision = decide_global_initialization_peaks(verified, parameters.peaks);
+    if (output.decision.accepted && degeneracies[output.decision.best_index]) {
+      output.decision.accepted = false;
+      output.decision.error = "degenerate";
+    }
     if (output.decision.accepted) output.pose = poses[output.decision.best_index];
     output.evaluated_candidates = context.candidates;
   } catch (const std::length_error&) { output.decision.error = "map_too_large"; }

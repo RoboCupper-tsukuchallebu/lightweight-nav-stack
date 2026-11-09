@@ -79,32 +79,25 @@ TEST(GlobalInitializationSearch, RejectsInsufficientScan) {
 }
 
 TEST(GlobalInitializationSearch, RejectsSymmetricRoomThroughSearch) {
-  PointList map;
+  using lightnav_localization::testing::SyntheticWorld;
+  SyntheticWorld world({{0.0, 0.0}, {6.0, 0.0}});
+  const PointList map = world.sample_map(0.1);
+  Eigen::Isometry3d sensor_pose = Eigen::Isometry3d::Identity();
+  sensor_pose.translation() = Eigen::Vector3d(1.0, 0.0, 1.0);
+  const auto timed = world.synthesize_scan([&](double) { return sensor_pose; }, 0.0, 0.1, true, 360, 8);
   PointList scan;
-  for (int index = -20; index <= 20; ++index) {
-    const float coordinate = static_cast<float>(index) * 0.1f;
-    for (float height : {0.5f, 1.0f, 1.5f}) {
-      map.emplace_back(coordinate, -2.0f, height);
-      map.emplace_back(coordinate, 2.0f, height);
-      map.emplace_back(-2.0f, coordinate, height);
-      map.emplace_back(2.0f, coordinate, height);
-    }
-  }
-  for (const auto& point : map) scan.emplace_back(point.x() - 0.5f, point.y(), point.z());
+  for (const auto& point : timed) scan.push_back(point.position + Eigen::Vector3f(0.0f, 0.0f, 1.0f));
   GlobalInitializationSearchParameters parameters;
-  parameters.minimum = {-1.0, -1.0};
-  parameters.maximum = {1.0, 1.0};
-  parameters.maximum_range_m = 5.0;
-  parameters.coarse_yaw_step_rad = M_PI / 2.0;
-  parameters.fine_yaw_step_rad = M_PI / 2.0;
-  parameters.fine_translation_step_m = 0.5;
-  parameters.peaks.peak_count = 2;
-  parameters.peaks.candidate_margin = 1.0;
-  parameters.time_budget_s = 60.0;
+  parameters.minimum = {0.0, -2.0};
+  parameters.maximum = {6.0, 2.0};
+  parameters.maximum_range_m = 8.0;
   std::atomic<bool> abort{false};
   const auto result = search_global_initialization(map, scan, parameters, abort);
   EXPECT_FALSE(result.decision.accepted);
   EXPECT_EQ(result.decision.error, "ambiguous");
+  EXPECT_GE(result.decision.best_score, parameters.peaks.score_min);
+  EXPECT_GT(result.decision.second_score, 0.0);
+  EXPECT_LT(result.decision.best_score - result.decision.second_score, parameters.peaks.margin_min);
 }
 
 TEST(GlobalInitializationSearch, RejectsWhenCandidateBudgetExpires) {
@@ -123,7 +116,7 @@ TEST(GlobalInitializationSearch, RejectsWhenCandidateBudgetExpires) {
   parameters.minimum_scan_points = 1;
   parameters.candidate_budget = 1;
   std::atomic<bool> abort{false};
-  EXPECT_EQ(search_global_initialization(map, scan, parameters, abort).decision.error, "candidate_budget");
+  EXPECT_EQ(search_global_initialization(map, scan, parameters, abort).decision.error, "time_budget");
 }
 
 TEST(GlobalInitializationSearch, RejectsLikelihoodFieldAboveCellLimit) {
@@ -145,16 +138,17 @@ TEST(GlobalInitializationSearch, RejectsLikelihoodFieldAboveCellLimit) {
 
 TEST(GlobalInitializationSearch, AcceptsFivePosesInAsymmetricRoom) {
   using lightnav_localization::testing::SyntheticWorld;
-  SyntheticWorld world({{0.0, 0.0}, {6.0, 0.0}, {6.0, 6.0}});
-  world.add_pillars(0.25, 0.25, 5.0, 1.0);
+  SyntheticWorld world({{0.0, 0.0}, {9.0, 0.0}, {9.0, 6.0}});
+  world.add_box({2.0, 0.5}, {2.8, 1.5});
+  world.add_box({5.0, -1.7}, {5.5, -0.4});
+  world.add_box({8.0, 3.4}, {8.5, 4.2});
   const PointList map = world.sample_map(0.15);
   const std::vector<Eigen::Vector3d> poses{{1.0, 0.0, 0.0}, {3.0, 0.0, M_PI / 2.0},
-      {5.0, 0.0, M_PI}, {6.0, 3.0, -3.0 * M_PI / 4.0}, {6.0, 5.0, M_PI / 4.0}};
+      {5.0, 0.0, M_PI}, {9.0, 3.0, -3.0 * M_PI / 4.0}, {9.0, 5.0, M_PI / 4.0}};
   GlobalInitializationSearchParameters parameters;
   parameters.minimum = {0.0, -1.5};
-  parameters.maximum = {7.5, 6.0};
+  parameters.maximum = {10.5, 6.0};
   parameters.maximum_range_m = 12.0;
-  parameters.time_budget_s = 120.0;
   std::atomic<bool> abort{false};
   for (const auto& truth : poses) {
     SCOPED_TRACE(truth.transpose());
@@ -165,7 +159,8 @@ TEST(GlobalInitializationSearch, AcceptsFivePosesInAsymmetricRoom) {
     PointList scan;
     for (const auto& point : timed) scan.push_back(point.position + Eigen::Vector3f(0.0f, 0.0f, 1.0f));
     const auto result = search_global_initialization(map, scan, parameters, abort);
-    ASSERT_TRUE(result.decision.accepted) << result.decision.error;
+    ASSERT_TRUE(result.decision.accepted) << result.decision.error << " best="
+        << result.decision.best_score << " second=" << result.decision.second_score;
     EXPECT_LE((result.pose.translation().head<2>() - truth.head<2>()).norm(), 0.1);
     const double yaw = std::atan2(result.pose.linear()(1, 0), result.pose.linear()(0, 0));
     EXPECT_LE(std::abs(std::remainder(yaw - truth.z(), 2.0 * M_PI)), M_PI / 180.0);
@@ -185,9 +180,9 @@ TEST(GlobalInitializationSearch, RejectsInvalidParametersSeparatelyFromMapSize) 
   EXPECT_EQ(search_global_initialization({}, {}, parameters, abort).decision.error, "invalid_parameters");
 }
 
-TEST(GlobalInitializationSearch, ReportsCandidateBudgetSeparatelyFromTimeBudget) {
+TEST(GlobalInitializationSearch, ReportsCandidateBudgetAsTimeBudget) {
   GlobalInitializationSearchParameters parameters;
   parameters.candidate_budget = 0;
   std::atomic<bool> abort{false};
-  EXPECT_EQ(search_global_initialization({}, {}, parameters, abort).decision.error, "candidate_budget");
+  EXPECT_EQ(search_global_initialization({}, {}, parameters, abort).decision.error, "time_budget");
 }
