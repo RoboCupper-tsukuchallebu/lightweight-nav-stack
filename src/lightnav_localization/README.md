@@ -128,6 +128,23 @@ params ファイル `docker/config/localization_indoor.yaml` で切り替える
 | `tracking_window_s` / `lost_position_std_m` | 5.0 / 2.0 | 状態判定 |
 | `odom_only_max_distance_m` / `odom_only_max_s` / `drift_rate` | 50 / 60 / 0.02 | ODOM_ONLY の上限。**`mode: mapping` では無効**（この 2 つで LOST にしない。D5） |
 
+## 診断とエラーの保持
+
+`/diagnostics` には GNSS に加え、state、map match、errors、performance を同じ配列で 1 Hz に出す。
+state は動作状態と位置の不確かさ、map match は一致率と棄却理由別の累計、errors はエラーと出来事の累計、
+performance は直近のスキャン処理時間とプロセスの CPU・メモリを示す。CPU は複数コアのため 100 % を超える。
+メモリは Linux の RSS で、他の OS では `unavailable` と表示する。
+
+| パラメータ | 既定 | 意味 |
+|---|---:|---|
+| `diagnostics_cpu_warn_percent` | 200 | CPU 使用率の警告閾値 |
+| `diagnostics_memory_warn_mb` | 2048 | RSS の警告閾値 |
+| `last_error_hold_s` | 10 | 出来事のエラーを保持する秒数 |
+
+`last_error` の状態エラーは条件が解消すると消える。最適化失敗、地図再構築失敗、車輪時刻の逆行は出来事として扱い、
+最後に起きてからノードの時計で `last_error_hold_s` が経過すると消える。累計は `error_events_total` に残る。
+これは従来の、再初期化まで出来事を保持する意味からの変更である。GNSS 原点なしと保存後の記録停止の注記は警告扱いにしない。
+
 ## GNSS の入力と `/diagnostics`
 
 `gps_topic`（`robot.yaml` は `/rtk/fix_all`）の fix は、購読コールバックで次の順に扱う: 最後に受けた fix の
