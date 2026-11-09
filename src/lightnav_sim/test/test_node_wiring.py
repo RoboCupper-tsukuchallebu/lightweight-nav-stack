@@ -45,7 +45,7 @@ class Harness:
             lambda m: self.static_transforms.extend(m.transforms),
             QoSProfile(depth=10, durability=DurabilityPolicy.TRANSIENT_LOCAL),
         )
-        self.command_publisher = self.helper.create_publisher(Twist, "/cmd_vel", QoSProfile(depth=10))
+        self.command_publisher = self.helper.create_publisher(Twist, "/cmd_vel_nav", QoSProfile(depth=10))
         self.executor = SingleThreadedExecutor()
         self.executor.add_node(self.sim)
         self.executor.add_node(self.helper)

@@ -1,4 +1,4 @@
-"""robot.launch.py with safety_gate:=false starts the nodes but not safety_gate_node (no /cmd_vel publisher).
+"""robot.launch.py with safety_gate:=false starts the nodes but not safety_gate_node (no /cmd_vel_nav publisher).
 
 launch_testing runs the unittest.TestCase classes of this module while the launch is up. A plain `def test_...`
 function is not run (the item reports "Ran 0 tests" and still passes), so the checks must be in a TestCase.
@@ -81,4 +81,5 @@ class TestRobotLaunchWithoutGate(unittest.TestCase):
         time.sleep(SETTLE_SECONDS)
         node_names = self.helper_node.get_node_names()
         self.assertNotIn("safety_gate_node", node_names)
+        self.assertEqual(self.helper_node.count_publishers("/cmd_vel_nav"), 0)
         self.assertEqual(self.helper_node.count_publishers("/cmd_vel"), 0)

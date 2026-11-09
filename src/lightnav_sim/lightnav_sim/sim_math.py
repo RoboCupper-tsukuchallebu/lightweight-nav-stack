@@ -35,7 +35,7 @@ def wrap_angle(angle):
 
 
 def apply_command_timeout(linear_mps, angular_radps, age_s, timeout_s):
-    """Zero the command when the last /cmd_vel is older than the timeout."""
+    """Zero the command when the last /cmd_vel_nav is older than the timeout."""
     if age_s > timeout_s:
         return 0.0, 0.0
     return linear_mps, angular_radps

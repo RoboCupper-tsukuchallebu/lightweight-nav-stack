@@ -1,12 +1,12 @@
 # Runs on the robot PC, in ~/lightnav/ next to .env (scripts/deploy.sh puts this file, config/ and .env.example there).
 # Needs `.env` with TSUKUCHALLE_UID and TSUKUCHALLE_GID (see .env.example): without them compose stops here.
-# Starting `nav` publishes /cmd_vel (through safety_gate_node), so every start needs a person's approval.
+# Starting `nav` publishes /cmd_vel_nav (through safety_gate_node), so every start needs a person's approval.
 #
 # Stop: docker compose exec nav bash -lc 'ros2 lifecycle set /safety_gate_node deactivate'   (Twist 0)
 #       docker compose stop nav
 # `stop` alone does not publish zero; the drive stops by its own 0.5 s command timeout.
 #
-# `localization` (lightnav_localization) builds the map and localizes against it. It publishes no /cmd_vel.
+# `localization` (lightnav_localization) builds the map and localizes against it. It publishes no /cmd_vel_nav.
 # Map: ./data/map/{map.pcd,trajectory.csv,map.yaml} (mounted as /data/map). Starting mapping overwrites the previous map: move it away first.
 # Start (mode: localization, the default; mapping to build a map):
 #       docker compose up -d localization

@@ -1,4 +1,4 @@
-"""Kinematic simulator node: integrates /cmd_vel and publishes odometry and synthetic LiDAR."""
+"""Kinematic simulator node: integrates /cmd_vel_nav and publishes odometry and synthetic LiDAR."""
 import math
 
 import rclpy
@@ -116,7 +116,7 @@ class KinematicSimNode(Node):
         self._static_tf_broadcaster.sendTransform(static_transforms)
         self._path_view_publisher = self.create_publisher(Path, PATH_VIEW_TOPIC, PATH_QOS)
         self.create_subscription(PathWithId, PATH_TOPIC, self._on_path, PATH_QOS)
-        self.create_subscription(Twist, "/cmd_vel", self._on_cmd_vel, 10)
+        self.create_subscription(Twist, "/cmd_vel_nav", self._on_cmd_vel, 10)
         self.create_service(SetBool, SERVICE_PREFIX + "set_pose_publishing", self._on_set_pose_publishing)
         self.create_service(SetBool, SERVICE_PREFIX + "set_motion_enabled", self._on_set_motion_enabled)
         self.create_service(Trigger, SERVICE_PREFIX + "clear_obstacles", self._on_clear_obstacles)

@@ -104,8 +104,8 @@ cat <<EOF_MESSAGE
 deploy: ${image_tag} (and latest) installed in ${ROBOT_PROJECT_PATH} on the robot. ${env_note}
 Nothing was started. On the robot, with a person's approval each time:
   cd ${ROBOT_PROJECT_PATH}
-  docker compose up -d nav                          # starts safety_gate_node (/cmd_vel); drive's motors stay off until the gamepad Start
-  LIGHTNAV_SAFETY_GATE=false docker compose up -d nav   # teaching drive only (no /cmd_vel publisher from this stack)
+  docker compose up -d nav                          # starts safety_gate_node (/cmd_vel_nav); drive's motors stay off until the gamepad Start
+  LIGHTNAV_SAFETY_GATE=false docker compose up -d nav   # teaching drive only (no /cmd_vel_nav publisher from this stack)
 Before Start: confirm mission is IDLE (ros2 action list / /lightnav/follow_status).
 Stop: docker compose exec nav bash -lc 'ros2 lifecycle set /safety_gate_node deactivate' && docker compose stop nav
 EOF_MESSAGE

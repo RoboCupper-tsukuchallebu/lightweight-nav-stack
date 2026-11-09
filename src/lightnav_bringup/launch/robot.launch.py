@@ -2,7 +2,7 @@
 
 Launch arguments:
   robot_config  YAML with the parameters of the nodes (the top-level keys are the node names below).
-  safety_gate   "true" (default) also starts safety_gate_node, the only node of the stack that publishes /cmd_vel.
+  safety_gate   "true" (default) also starts safety_gate_node, the only node of the stack that publishes /cmd_vel_nav.
                 "false" leaves it out: only for teaching drives (record_waypoints with the gamepad), never for
                 following waypoints.
 """
@@ -41,6 +41,7 @@ def build_lifecycle_entities(package, executable, node_name, robot_config):
         namespace="",
         output="screen",
         parameters=[robot_config],
+        remappings=[("/cmd_vel", "/cmd_vel_nav")] if node_name == "safety_gate_node" else [],
     )
     activate_after_configure = RegisterEventHandler(
         OnStateTransition(
