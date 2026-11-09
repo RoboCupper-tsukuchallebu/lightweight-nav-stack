@@ -3,7 +3,6 @@ import importlib.util
 from pathlib import Path
 
 import yaml
-
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
@@ -18,9 +17,10 @@ def launch_setup(context):
     frame = LaunchConfiguration("base_frame").perform(context)
     if scenario not in ("avoid", "blocked") or frame not in ("base_link", "base_footprint"):
         raise ValueError("invalid simulation scenario or base frame")
-    robot_config = Path("/ws/docker/config/robot.yaml")
-    if not robot_config.exists():
-        robot_config = Path.cwd() / "docker/config/robot.yaml"
+    candidates = [parent / "docker" / "config" / "robot.yaml" for parent in Path(__file__).resolve().parents]
+    robot_config = next((path for path in candidates if path.is_file()), None)
+    if robot_config is None:
+        raise FileNotFoundError(f"robot.yaml not found in repository ancestors of {__file__}")
     with robot_config.open() as config_file:
         production = yaml.safe_load(config_file)
     parameters = {

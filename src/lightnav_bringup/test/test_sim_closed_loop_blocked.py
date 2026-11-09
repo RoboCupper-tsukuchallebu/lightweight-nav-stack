@@ -1,7 +1,8 @@
-from lightnav_msgs.msg import FollowStatus
-from std_srvs.srv import Trigger
 import pytest
 from closed_loop_helpers import ClosedLoopTest, description
+from std_srvs.srv import Trigger
+
+from lightnav_msgs.msg import FollowStatus
 
 
 @pytest.mark.launch_test
