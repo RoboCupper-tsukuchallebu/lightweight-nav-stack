@@ -3,18 +3,18 @@
 #include <chrono>
 #include <cstdarg>
 #include <cstdio>
-#include <vector>
-#include <rcutils/logging.h>
 #include <functional>
 #include <limits>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <lifecycle_msgs/msg/state.hpp>
 #include <lightnav_msgs/msg/obstacle_status.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <rcutils/logging.h>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/point_cloud2_iterator.hpp>
 #include <tf2_ros/static_transform_broadcaster.h>
@@ -190,7 +190,7 @@ TEST_F(ObstacleMonitorNodeTest, StructuralParametersAreReadOnly)
 {
   const auto result = monitor_->set_parameter(rclcpp::Parameter("step_neighbor_radius_m", 0.1));
   EXPECT_FALSE(result.successful);
-  EXPECT_FALSE(result.reason.empty());
+  EXPECT_NE(result.reason.find("read-only"), std::string::npos);
   EXPECT_FALSE(monitor_->set_parameter(rclcpp::Parameter("use_sim_time", true)).successful);
 }
 
@@ -325,14 +325,35 @@ TEST_F(ObstacleMonitorNodeTest, InvalidStartupZoneFailsConfigure)
 
 TEST_F(ObstacleMonitorNodeTest, UpdatingThresholdPreservesOccupiedState)
 {
+  // Arrange
   bringUp();
   publishIdentityTransform();
   ASSERT_TRUE(waitUntil([this] {return lastStatus_.is_stop_zone_occupied;}, true));
   const int previousCount = statusCount_;
+  // Act
   ASSERT_TRUE(monitor_->set_parameter(rclcpp::Parameter("clear_hold_s", 1.0)).successful);
+  // Assert: the occupied state survives the update.
   EXPECT_DOUBLE_EQ(monitor_->get_parameter("clear_hold_s").as_double(), 1.0);
   ASSERT_TRUE(waitUntil([this, previousCount] {return statusCount_ > previousCount;}, false));
   EXPECT_TRUE(lastStatus_.is_stop_zone_occupied);
+
+  // Continue sending valid empty clouds so the hysteresis advances without stale input.
+  auto emptyCloud = makeObstacleCloud();
+  sensor_msgs::PointCloud2Modifier modifier(emptyCloud);
+  modifier.resize(0);
+  const auto start = std::chrono::steady_clock::now();
+  while (std::chrono::steady_clock::now() - start < milliseconds(500)) {
+    emptyCloud.header.stamp = helper_->now();
+    pointsPublisher_->publish(emptyCloud);
+    spinFor(milliseconds(50));
+  }
+  EXPECT_FALSE(lastStatus_.is_input_stale);
+  EXPECT_TRUE(lastStatus_.is_stop_zone_occupied);
+  ASSERT_TRUE(waitUntil([this, &emptyCloud] {
+    emptyCloud.header.stamp = helper_->now();
+    pointsPublisher_->publish(emptyCloud);
+    return !lastStatus_.is_stop_zone_occupied;
+  }, false));
 }
 
 TEST_F(ObstacleMonitorNodeTest, DefaultPointsQoSReliabilityAcceptsReliablePublisher)

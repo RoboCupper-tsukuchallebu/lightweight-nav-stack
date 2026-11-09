@@ -89,3 +89,5 @@ LiDAR 高さ 0.7 m、80×80 セル、`step_neighbor_radius_m = 0.5`。ctest の�
 | `use_sim_time` | read_only | なし | いいえ |
 
 `tf_timeout_s` は現状 TF の取得処理では未使用のため、変更しても動作は変わりません。
+
+構造パラメータの read_only 拒否は rclcpp が行うためノードの WARN は出ませんが、reason は返ります。
