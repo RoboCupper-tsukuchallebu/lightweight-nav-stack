@@ -12,6 +12,9 @@ localization_node:
     gps_topic: /gps/fix
     publish_tf: true
     status_rate_hz: 2.0
+    diagnostics_cpu_warn_percent: 200.0
+    diagnostics_memory_warn_mb: 2048.0
+    last_error_hold_s: 10.0
     num_threads: 4
 
     # Initial alignment (Issue #2 section 8, localization mode).

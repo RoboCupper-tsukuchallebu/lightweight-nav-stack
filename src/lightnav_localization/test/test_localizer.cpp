@@ -788,6 +788,40 @@ TEST(Localizer, CompensatesWheelDisplacementBetweenGpsAndKeyframe) {
   EXPECT_EQ(localizer.gps_time_gap_rejection_count(), 0u);
 }
 
+TEST(Localizer, CountsFirstMapMatchRejectionReason) {
+  const SyntheticWorld world(kShortCourse.centerline());
+  LocalizerParameters parameters;
+  parameters.keyframe_time_s = 0.1;
+  parameters.match_period_s = 0.0;
+  Localizer localizer(parameters, world.sample_map(0.2), std::nullopt);
+  const Eigen::Isometry3d pose = Eigen::Isometry3d::Identity();
+  localizer.initialize(pose);
+  int attempt = 0;
+  localizer.set_map_match_hook([&](MatchResult& result) {
+    ++attempt;
+    result.converged = attempt != 1;
+    result.inlier_ratio = attempt == 2 ? 0.0 : 1.0;
+    result.target_to_source = pose;
+    if (attempt == 3) result.target_to_source.translation().x() = 10.0;
+    if (attempt == 4) result.target_to_source.linear() = Eigen::AngleAxisd(1.0, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+    result.information = Eigen::Matrix<double, 6, 6>::Identity();
+  });
+  const auto truth = [&](double) { return pose; };
+  for (int index = 0; index <= 4; ++index) {
+    const double stamp = index * 0.2;
+    localizer.on_wheel_odom(stamp, pose);
+    localizer.on_scan(stamp, world.synthesize_scan(truth, stamp, 0.0, false));
+    localizer.on_wheel_odom(stamp + 0.01, pose);
+  }
+  const MapMatchStatistics counts = localizer.map_match_statistics();
+  EXPECT_EQ(counts.attempted_total, 4U);
+  EXPECT_EQ(counts.accepted_total, 0U);
+  EXPECT_EQ(counts.rejected_not_converged_total, 1U);
+  EXPECT_EQ(counts.rejected_inlier_total, 1U);
+  EXPECT_EQ(counts.rejected_translation_gate_total, 1U);
+  EXPECT_EQ(counts.rejected_rotation_gate_total, 1U);
+}
+
 TEST(Localizer, DegenerateMapMatchDoesNotRefreshAbsoluteObservation) {
   const SyntheticWorld world(kShortCourse.centerline());
   LocalizerParameters parameters;
@@ -836,6 +870,50 @@ TEST(Localizer, KeyframeTimeComparisonToleratesTimestampRounding) {
     }
   }
   EXPECT_NEAR(localizer.max_keyframe_interval_sec(), 1.0, 1e-12);
+}
+
+TEST(Localizer, EventErrorExpiresAndRetainsCumulativeCount) {
+  LocalizerParameters parameters;
+  parameters.last_error_hold_s = 1.0;
+  Localizer localizer(parameters, PointList{}, std::nullopt);
+  const Eigen::Isometry3d pose = Eigen::Isometry3d::Identity();
+  localizer.initialize(pose);
+  localizer.poll_state(10.0);
+  localizer.on_wheel_odom(2.0, pose);
+  localizer.on_wheel_odom(1.0, pose);
+  EXPECT_EQ(localizer.error_events_total(), 1U);
+  EXPECT_NE(localizer.last_error().find("time went backwards"), std::string::npos);
+  localizer.poll_state(10.9);
+  EXPECT_FALSE(localizer.last_error().empty());
+  localizer.on_wheel_odom(0.5, pose);
+  EXPECT_EQ(localizer.error_events_total(), 2U);
+  localizer.poll_state(11.0);
+  EXPECT_FALSE(localizer.last_error().empty());
+  localizer.poll_state(12.0);
+  EXPECT_TRUE(localizer.last_error().empty());
+  EXPECT_EQ(localizer.error_events_total(), 2U);
+}
+
+TEST(Localizer, ScanTimeStatisticsIncludeDeskewFailuresAndResetAfterReading) {
+  Localizer localizer(LocalizerParameters{}, PointList{}, std::nullopt);
+  const Eigen::Isometry3d pose = Eigen::Isometry3d::Identity();
+  localizer.initialize(pose);
+  localizer.on_wheel_odom(1.0, pose);
+  // The scan precedes the first wheel sample and cannot be deskewed.
+  localizer.on_scan(0.5, {TimedPoint{Eigen::Vector3f(1, 0, 0), 0.0F}});
+  localizer.on_wheel_odom(1.1, pose);
+  localizer.on_scan(1.1, std::vector<TimedPoint>(10, TimedPoint{Eigen::Vector3f(1, 0, 0), 0.0F}));
+  localizer.on_wheel_odom(1.1, pose);
+
+  const ScanTimeStatistics statistics = localizer.take_scan_time_statistics();
+  EXPECT_EQ(statistics.count, 2U);
+  EXPECT_GT(statistics.total_ms, 0.0);
+  EXPECT_GT(statistics.maximum_ms, 0.0);
+  EXPECT_LE(statistics.maximum_ms, statistics.total_ms);
+  const ScanTimeStatistics reset = localizer.take_scan_time_statistics();
+  EXPECT_EQ(reset.count, 0U);
+  EXPECT_DOUBLE_EQ(reset.total_ms, 0.0);
+  EXPECT_DOUBLE_EQ(reset.maximum_ms, 0.0);
 }
 
 TEST(Localizer, AcceptsOneHertzGpsAtLateKeyframePhases) {
