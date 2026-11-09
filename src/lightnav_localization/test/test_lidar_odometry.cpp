@@ -46,3 +46,12 @@ TEST_F(LidarOdometryTest, RejectsMatchFarFromPredictionAcrossCorridor) {
   const MatchResult result = odometry_.match(scan_at(world_, truth), wrong_prediction, 0.6);
   EXPECT_FALSE(result.is_accepted);
 }
+
+TEST_F(LidarOdometryTest, AcceptsScanRotationBeyondWheelYawGateDuringSlip) {
+  Eigen::Isometry3d truth = pose_at_x(12.0);
+  truth.linear() = Eigen::AngleAxisd(0.2, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+  const MatchResult result = odometry_.match(scan_at(world_, truth), pose_at_x(12.0), 0.0);
+  ASSERT_TRUE(result.is_accepted);
+  const Eigen::Matrix3d error = truth.rotation().transpose() * result.target_to_source.rotation();
+  EXPECT_LT(std::abs(std::atan2(error(1, 0), error(0, 0))), 0.05);
+}

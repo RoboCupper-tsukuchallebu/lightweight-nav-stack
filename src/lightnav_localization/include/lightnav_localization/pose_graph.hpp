@@ -20,8 +20,11 @@ struct PoseGraphParameters {
   double window_s = 30.0;
   double huber_k = 1.0;
   double wheel_sigma_translation_per_m = 0.02;
+  double wheel_sigma_yaw_floor_rad = 0.03;
   double wheel_sigma_yaw_per_rad = 0.1;
   double wheel_sigma_yaw_per_m = 0.01;
+  std::string wheel_robust_kernel = "huber";
+  double wheel_robust_k = 8.0;
   double planar_sigma_z_per_m = 0.05;
   double planar_sigma_tilt_rad = 0.05;
   double sigma_floor_m = 0.01;  // keeps a stationary wheel factor from becoming a hard constraint

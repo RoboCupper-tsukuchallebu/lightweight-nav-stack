@@ -207,3 +207,30 @@ TEST(PoseGraph, GpsAltitudeDoesNotChangeHeightOrTilt) {
   EXPECT_NEAR(estimate->translation().z(), 3.0, 1e-9);
   EXPECT_NEAR(Eigen::AngleAxisd(initial.rotation().transpose() * estimate->rotation()).angle(), 0.0, 1e-9);
 }
+
+TEST(PoseGraph, WheelKernelChoicesLetLidarOverrideYawSlip) {
+  for (const std::string kernel : {"huber", "cauchy"}) {
+    PoseGraphParameters parameters;
+    EXPECT_DOUBLE_EQ(parameters.wheel_sigma_yaw_floor_rad, 0.03);
+    EXPECT_EQ(parameters.wheel_robust_kernel, "huber");
+    EXPECT_DOUBLE_EQ(parameters.wheel_robust_k, 8.0);
+    parameters.wheel_robust_kernel = kernel;
+    PoseGraph graph(parameters);
+    graph.add_first_node(0.0, Eigen::Isometry3d::Identity(), 0.05, 0.01);
+    ASSERT_TRUE(graph.optimize());
+    const auto wheel = yaw_translation(0.0, 0.0, 0.0);
+    const auto lidar = yaw_translation(0.0, 0.0, 0.3);
+    const int index = graph.add_node_with_wheel_factor(1.0, wheel, wheel);
+    graph.add_lidar_odometry_factor(0, index, lidar, diagonal_information(0.02, 0.005));
+    ASSERT_TRUE(graph.optimize());
+    const auto estimate = graph.pose(index);
+    ASSERT_TRUE(estimate);
+    EXPECT_NEAR(std::atan2(estimate->rotation()(1, 0), estimate->rotation()(0, 0)), 0.3, 0.02) << kernel;
+  }
+}
+
+TEST(PoseGraph, RejectsUnknownWheelKernel) {
+  PoseGraphParameters parameters;
+  parameters.wheel_robust_kernel = "unknown";
+  EXPECT_THROW(PoseGraph graph(parameters), std::invalid_argument);
+}

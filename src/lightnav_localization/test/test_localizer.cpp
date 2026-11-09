@@ -116,6 +116,9 @@ struct Scenario {
   double wheel_gap_begin_sec = -1.0;
   double wheel_gap_end_sec = -1.0;
   bool reinitialize_after_gap = false;  // set_initial_pose with the truth when the input resumes
+  double correction_slew_rps = CorrectorParameters{}.slew_rps;
+  double slip_begin_sec = -1.0;
+  double slip_end_sec = -1.0;
   double stop_sec = -1.0;  // ends the run early
 };
 
@@ -142,6 +145,7 @@ struct Report {
   bool saw_tracking_after_hole = false;
   bool saw_gps_only = false;
   bool saw_odom_only = false;
+  bool saw_odom_only_during_slip = false;
   bool saw_conflict = false;
   bool saw_lost = false;
   bool published_after_lost = false;
@@ -198,6 +202,7 @@ Report run(const Scenario& scenario) {
   parameters.state.odom_only_max_distance_m = scenario.odom_only_max_distance_m;
   parameters.map_submap_rebuild_distance_m = scenario.map_rebuild_distance_m;
   parameters.corrector.large_correction_threshold_m = scenario.large_correction_threshold_m;
+  parameters.corrector.slew_rps = scenario.correction_slew_rps;
   Localizer* localizer_pointer = nullptr;
   PointList map = scenario.has_map ? full_map : PointList{};
   if (scenario.has_real_map_hole) {
@@ -278,6 +283,9 @@ Report run(const Scenario& scenario) {
                                                distance * (0.5 * M_PI / 180.0 / 10.0),
                                            Eigen::Vector3d::UnitZ())
                              .toRotationMatrix();     // 0.5 deg / 10 m yaw drift
+      if (time_sec >= scenario.slip_begin_sec && time_sec < scenario.slip_end_sec) {
+        drifted.linear() = Eigen::Matrix3d::Identity();
+      }
       odom = odom * drifted;
       wheel_only = wheel_only * drifted;
     }
@@ -378,6 +386,9 @@ Report run(const Scenario& scenario) {
     if (is_hole) report.max_error_in_hole_m = std::max(report.max_error_in_hole_m, position_error);
     report.saw_gps_only |= output->state == LocalizationState::kGpsOnly && is_hole;
     report.saw_odom_only |= output->state == LocalizationState::kOdomOnly;
+    if (time_sec >= scenario.slip_begin_sec && time_sec <= scenario.slip_end_sec) {
+      report.saw_odom_only_during_slip |= output->state == LocalizationState::kOdomOnly;
+    }
     report.saw_conflict |= output->is_gps_conflict;
     if (time_sec > scenario.map_hole_end_sec && output->state == LocalizationState::kTracking) report.saw_tracking_after_hole = true;
     report.is_tracking_at_end = output->state == LocalizationState::kTracking;
@@ -903,4 +914,21 @@ TEST(Localizer, DegenerateCorridorWithoutGpsDoesNotBecomeLostOver150Meters) {
   ASSERT_FALSE(report.samples.empty());
   EXPECT_GT(report.samples.back().time_sec, 249.0);
   EXPECT_GT(report.samples.back().position_std_m, 2.0);
+}
+
+TEST(Localizer, WheelYawSlipDuringTurnKeepsTrackingAndYawCloseToTruth) {
+  Scenario scenario;
+  scenario.has_pillars = true;
+  scenario.degeneracy_ratio = 0.0;
+  scenario.scan_period_sec = 0.8;
+  scenario.correction_slew_rps = 2.0;
+  scenario.is_gps_enabled = false;
+  scenario.wheel_scale = 1.0;
+  scenario.slip_begin_sec = 20.0 / kSpeed + 0.5;
+  scenario.slip_end_sec = scenario.slip_begin_sec + 0.8;
+  scenario.stop_sec = scenario.slip_end_sec + 2.0;
+  const Report report = run(scenario);
+  EXPECT_FALSE(report.saw_odom_only_during_slip);
+  EXPECT_TRUE(report.is_tracking_at_end);
+  EXPECT_LT(report.max_yaw_error_deg, 12.0);
 }

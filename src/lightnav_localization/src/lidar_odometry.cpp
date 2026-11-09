@@ -56,7 +56,7 @@ MatchResult LidarOdometry::match(const PointList& scan_in_base, const Eigen::Iso
   MatchResult result = match_scan(submap_, scan_in_base, prediction, matcher);
   const Eigen::Matrix3d difference = prediction.rotation().transpose() * result.target_to_source.rotation();
   const double yaw_difference = std::abs(std::atan2(difference(1, 0), difference(0, 0)));
-  result.is_accepted = result.is_accepted && yaw_difference <= parameters_.gate_yaw_rad;
+  result.is_accepted = result.is_accepted && yaw_difference <= std::max(parameters_.gate_yaw_rad, parameters_.slip_gate_yaw_rad);
   return result;
 }
 

@@ -112,6 +112,9 @@ params ファイル `docker/config/localization_indoor.yaml` で切り替える
 | `init_gps_max_std_m` / `init_scan_count` / `init_yaw_step_deg` | 3.0 / 3 / 15 | 初期位置合わせ |
 | `init_coarse_corr_m` / `init_fine_corr_m` / `init_inlier_ratio_min` | 2.0 / 0.5 / 0.6 | 初期 yaw 照合 |
 | `publish_tf` / `status_rate_hz` | true / 2.0 | |
+| `wheel_sigma_yaw_floor_rad` / `wheel_sigma_yaw_per_rad` / `wheel_sigma_yaw_per_m` | 0.03 / 0.1 / 0.01 | 車輪 yaw の標準偏差は下限に回転量と距離に比例する項を加える。スリップ中の yaw 0 を強く拘束しない。並進の雑音は従来どおり |
+| `wheel_robust_kernel` / `wheel_robust_k` | huber / 8.0 | 車輪因子の白色化残差に適用する Huber または cauchy。地図・GPS の `huber_k` とは独立 |
+| `lidar_odom_slip_gate_yaw_rad` | 0.35 | LiDAR の yaw ゲートは既存の `lidar_odom_gate_yaw_rad` とこの値の大きい方。車輪の一過性スリップを許すが、照合の収束・inlier・並進ゲートは引き続き必要 |
 | `window_s` / `huber_k` | 30.0 / 1.0 | 姿勢グラフ |
 | `voxel_size_m` / `keyframe_distance_m` / `keyframe_time_s` | 0.5 / 1.0 / 1.0 | LiDAR オドメトリ |
 | `map_inlier_ratio_min` / `map_gate_translation_m` / `map_gate_rotation_rad` | 0.5 / 1.0 / 0.2 | 事前地図照合 |
