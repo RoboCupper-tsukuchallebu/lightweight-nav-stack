@@ -13,6 +13,7 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from lifecycle_msgs.msg import State, Transition
 from lifecycle_msgs.srv import ChangeState, GetState
 from rclpy.action import ActionClient
+from visualization_msgs.msg import MarkerArray
 
 from lightnav_msgs.action import FollowWaypoints
 from lightnav_msgs.msg import FollowStatus, ObstacleStatus, Waypoint
@@ -42,10 +43,28 @@ class ClosedLoopTest(unittest.TestCase):
         cls.commands = []
         cls.lifecycle_recoveries = []
         cls.node.create_subscription(PoseStamped, "/lightnav/pose", cls.poses.append, 10)
-        cls.node.create_subscription(FollowStatus, "/lightnav/follow_status", cls.status.append, 10)
+        cls.node.create_subscription(FollowStatus, "/lightnav/follow_status", cls.record_status, 10)
+        cls.node.create_subscription(MarkerArray, "/lightnav/controller/arc_candidates", cls.record_arcs, 10)
         cls.node.create_subscription(ObstacleStatus, "/lightnav/obstacle_status", cls.record_obstacle, 10)
         cls.node.create_subscription(Twist, "/cmd_vel", cls.record_command, 10)
         cls.action = ActionClient(cls.node, FollowWaypoints, "/lightnav/mission/follow_waypoints")
+
+    @classmethod
+    def record_status(cls, message):
+        cls.status.append(message)
+        if cls.poses:
+            pose = cls.poses[-1].pose
+            with open("/tmp/lightnav-closed-loop-trace.log", "a") as trace:
+                trace.write(f"status {time.monotonic():.3f} {pose.position.x:.4f} {pose.position.y:.4f} "
+                            f"{pose.orientation.z:.4f} {pose.orientation.w:.4f} {message.state} "
+                            f"{message.active_layer} {message.closest_index} {message.path_deviation_m:.4f}\n")
+
+    @classmethod
+    def record_arcs(cls, message):
+        selected = [marker.id for marker in message.markers if marker.ns == "feasible" and marker.scale.x > 0.05]
+        state = [marker.text for marker in message.markers if marker.ns == "state"]
+        with open("/tmp/lightnav-closed-loop-trace.log", "a") as trace:
+            trace.write(f"arcs {time.monotonic():.3f} selected={selected} state={state}\n")
 
     @classmethod
     def record_obstacle(cls, message):
@@ -148,6 +167,9 @@ class ClosedLoopTest(unittest.TestCase):
         This does not enforce the 60-second limit in scenario A.
         """
         result = self.start_mission()
+        # BLOCKED is already a failure for H; stop waiting as soon as it occurs.
+        self.wait_for(lambda: result.done() or any(item.state == FollowStatus.BLOCKED for item in self.status))
+        self.assertFalse(any(item.state == FollowStatus.BLOCKED for item in self.status))
         self.assert_success(result)
         self.assertTrue(any(item.active_layer == FollowStatus.LAYER_AVOID for item in self.feedback))
         self.assertTrue(self.status)

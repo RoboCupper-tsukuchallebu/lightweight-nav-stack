@@ -38,11 +38,6 @@ double yawFromQuaternion(const geometry_msgs::msg::Quaternion& quaternion) {
 }  // namespace
 
 class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
-  double configuredStopZoneMargin() const {
-    return stopZoneMargin(get_parameter("stop_zone_x_m").as_double(),
-                          get_parameter("stop_zone_y_half_m").as_double(),
-                          get_parameter("inflation_radius_m").as_double());
-  }
  public:
   explicit ControllerNode(const rclcpp::NodeOptions& options = rclcpp::NodeOptions())
       : rclcpp_lifecycle::LifecycleNode("controller_node", options) {
@@ -53,7 +48,7 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
     declare_parameter("control_hz", 20.0, structural);
     declare_parameter("stop_zone_x_m", 1.0, structural);
     declare_parameter("stop_zone_y_half_m", 0.4, structural);
-    declare_parameter("inflation_radius_m", 0.5, structural);
+    declare_parameter("inflation_radius_m", 0.3, structural);
     declare_parameter("arc_markers_rate_hz", 2.0, structural);
     declare_parameter("lookahead_m", 1.0);
     declare_parameter("search_window_m", 5.0);
@@ -150,7 +145,8 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
 
     follow_layer_ = std::make_unique<FollowLayer>(follow_parameters);
     AvoidParameters avoid_parameters;
-    avoid_parameters.stop_zone_margin_m = configuredStopZoneMargin();
+    avoid_parameters.stop_zone_x_m = get_parameter("stop_zone_x_m").as_double();
+    avoid_parameters.stop_zone_y_half_m = get_parameter("stop_zone_y_half_m").as_double();
     avoid_parameters.v_avoid_mps = get_parameter("v_avoid").as_double();
     avoid_parameters.w_max_rps = follow_parameters.w_max_rps;
     avoid_parameters.arc_candidate_count = static_cast<int>(get_parameter("arc_candidate_count").as_int());
@@ -313,7 +309,8 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
       follow.goal_tolerance_m = get_parameter("goal_tolerance_m").as_double();
       follow.rotate_in_place_heading_rad = get_parameter("rotate_in_place_heading_rad").as_double();
       AvoidParameters avoid;
-      avoid.stop_zone_margin_m = configuredStopZoneMargin();
+      avoid.stop_zone_x_m = get_parameter("stop_zone_x_m").as_double();
+      avoid.stop_zone_y_half_m = get_parameter("stop_zone_y_half_m").as_double();
       avoid.v_avoid_mps = get_parameter("v_avoid").as_double();
       avoid.w_max_rps = follow.w_max_rps;
       avoid.arc_candidate_count = static_cast<int>(get_parameter("arc_candidate_count").as_int());

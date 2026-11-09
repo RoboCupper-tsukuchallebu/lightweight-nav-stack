@@ -90,10 +90,25 @@ TEST(EvaluateArcCandidates, RejectsOccupiedGridBesideArcWithinStopZoneMargin) {
   fillRectangle(grid, 1.0, 1.1, 0.15, 0.19);
   AvoidParameters parameters = makeAvoidParameters();
   EXPECT_TRUE(evaluateArcCandidates(grid, kOrigin, makeStraightPath(), 0, 0.0, parameters)[7].is_feasible);
-  parameters.stop_zone_margin_m = stopZoneMargin(0.3, 0.2, 0.3);
+  parameters.stop_zone_y_half_m = 0.05;
   EXPECT_TRUE(evaluateArcCandidates(grid, kOrigin, makeStraightPath(), 0, 0.0, parameters)[7].is_feasible);
-  parameters.stop_zone_margin_m = stopZoneMargin(0.3, 0.6, 0.3);
+  parameters.stop_zone_y_half_m = 0.2;
   EXPECT_FALSE(evaluateArcCandidates(grid, kOrigin, makeStraightPath(), 0, 0.0, parameters)[7].is_feasible);
+}
+
+TEST(EvaluateArcCandidates, StopZoneDoesNotBlockPointsBehindOrOutsideItsWidth) {
+  AvoidParameters parameters = makeAvoidParameters();
+  parameters.arc_candidate_count = 1;
+  parameters.arc_length_m = 0.1;
+  parameters.arc_step_m = 0.1;
+  parameters.stop_zone_x_m = 0.3;
+  parameters.stop_zone_y_half_m = 0.2;
+  LocalGrid grid = makeEmptyGrid();
+  fillRectangle(grid, -0.5, -0.5, 0.0, 0.0);
+  fillRectangle(grid, 0.2, 0.2, 0.5, 0.5);
+  EXPECT_TRUE(evaluateArcCandidates(grid, kOrigin, makeStraightPath(), 0, 0.0, parameters)[0].is_feasible);
+  fillRectangle(grid, 0.2, 0.2, 0.1, 0.1);
+  EXPECT_FALSE(evaluateArcCandidates(grid, kOrigin, makeStraightPath(), 0, 0.0, parameters)[0].is_feasible);
 }
 
 TEST(EvaluateArcCandidates, ArcsEndingBeyondMaxPathDeviationAreRejected) {

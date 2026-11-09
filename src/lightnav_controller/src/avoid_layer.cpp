@@ -143,6 +143,9 @@ std::vector<ArcCandidate> evaluateArcCandidates(const LocalGrid& grid, const Pos
       path_points, first_index, parameters.arc_length_m + 2.0 * parameters.max_path_deviation_m);
   const Point2D target = pathPointAhead(path_points, closest_index, parameters.arc_length_m);
   candidates.reserve(static_cast<std::size_t>(parameters.arc_candidate_count));
+  const double spacing_m = grid.resolution_m / 2.0;
+  const int forward_steps = static_cast<int>(std::ceil(parameters.stop_zone_x_m / spacing_m));
+  const int lateral_steps = static_cast<int>(std::ceil(parameters.stop_zone_y_half_m / spacing_m));
 
   for (int candidate_index = 0; candidate_index < parameters.arc_candidate_count; ++candidate_index) {
     const double ratio = parameters.arc_candidate_count == 1
@@ -157,17 +160,18 @@ std::vector<ArcCandidate> evaluateArcCandidates(const LocalGrid& grid, const Pos
          travelled_m <= parameters.arc_length_m + 1e-9; travelled_m += parameters.arc_step_m) {
       const Point2D sample = arcPointInBody(candidate.curvature_per_m, travelled_m);
       bool occupied = false;
-      // Check the inflated grid around each arc point for the remaining
-      // distance to the furthest corner of the rectangular stop zone.
-      const double spacing_m = grid.resolution_m / 2.0;
-      const int steps = static_cast<int>(std::ceil(parameters.stop_zone_margin_m / spacing_m));
-      for (int x_index = -steps; x_index <= steps && !occupied; ++x_index) {
-        for (int y_index = -steps; y_index <= steps && !occupied; ++y_index) {
-          const double dx = x_index * spacing_m;
-          const double dy = y_index * spacing_m;
-          if (std::hypot(dx, dy) <= parameters.stop_zone_margin_m + 1e-9) {
-            occupied = grid.isOccupiedInBody(sample.x_m + dx, sample.y_m + dy);
-          }
+      // Scan the forward rectangular stop zone in the orientation of this arc.
+      // Half-cell spacing avoids gaps when the rectangle is rotated.
+      const double heading_rad = candidate.curvature_per_m * travelled_m;
+      const double cosine = std::cos(heading_rad);
+      const double sine = std::sin(heading_rad);
+      for (int forward_index = 0; forward_index <= forward_steps && !occupied; ++forward_index) {
+        const double forward_m = std::min(parameters.stop_zone_x_m, forward_index * spacing_m);
+        for (int lateral_index = -lateral_steps; lateral_index <= lateral_steps && !occupied; ++lateral_index) {
+          const double lateral_m = std::clamp(lateral_index * spacing_m,
+                                               -parameters.stop_zone_y_half_m, parameters.stop_zone_y_half_m);
+          occupied = grid.isOccupiedInBody(sample.x_m + cosine * forward_m - sine * lateral_m,
+                                           sample.y_m + sine * forward_m + cosine * lateral_m);
         }
       }
       if (occupied) {

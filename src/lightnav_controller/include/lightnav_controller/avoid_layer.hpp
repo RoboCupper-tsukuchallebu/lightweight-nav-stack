@@ -27,12 +27,9 @@ struct LocalGrid {
   bool isOccupiedInBody(double body_x_m, double body_y_m) const;
 };
 
-inline double stopZoneMargin(double forward_m, double half_width_m, double inflation_m) {
-  return std::max(0.0, std::hypot(forward_m, half_width_m) - inflation_m);
-}
-
 struct AvoidParameters {
-  double stop_zone_margin_m{0.0};
+  double stop_zone_x_m{0.0};
+  double stop_zone_y_half_m{0.0};
   double v_avoid_mps{0.25};
   double w_max_rps{0.4};
   int arc_candidate_count{15};

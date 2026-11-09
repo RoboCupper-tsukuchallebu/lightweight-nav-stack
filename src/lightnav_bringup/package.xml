@@ -28,6 +28,7 @@
   <test_depend>tf2_ros</test_depend>
   <test_depend>lightnav_msgs</test_depend>
   <test_depend>geometry_msgs</test_depend>
+  <test_depend>visualization_msgs</test_depend>
   <test_depend>std_srvs</test_depend>
 
   <export>

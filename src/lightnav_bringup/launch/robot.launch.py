@@ -67,9 +67,9 @@ def build_lifecycle_entities(package, executable, node_name, robot_config):
 
 
 def controller_obstacle_parameters(monitor_parameters):
-    # Keep defaults in sync with obstacle_grid.hpp when the YAML omits them.
-    return {name: float(monitor_parameters.get(name, default)) for name, default in (
-        ("stop_zone_x_m", 1.0), ("stop_zone_y_half_m", 0.4), ("inflation_radius_m", 0.5))}
+    # Pass only explicit monitor configuration; the controller owns fallback values.
+    return {name: float(monitor_parameters[name]) for name in (
+        "stop_zone_x_m", "stop_zone_y_half_m", "inflation_radius_m") if name in monitor_parameters}
 
 
 def launch_setup(context, *args, **kwargs):
