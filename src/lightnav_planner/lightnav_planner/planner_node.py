@@ -4,6 +4,7 @@ import math
 
 import rclpy
 from geometry_msgs.msg import PoseStamped
+from rcl_interfaces.msg import ParameterDescriptor, SetParametersResult
 from nav_msgs.msg import Path
 from rclpy.lifecycle import Node, State, TransitionCallbackReturn
 
@@ -18,15 +19,24 @@ SERVICE_NAME = "/lightnav/planner/plan_path"
 
 
 class PlannerNode(Node):
-    def __init__(self):
-        super().__init__("planner_node")
-        self.declare_parameter("resolution_m", 0.2)
-        self.declare_parameter("global_frame", "map")
-        self.declare_parameter("max_path_points", DEFAULT_MAX_PATH_POINTS)
+    def __init__(self, **kwargs):
+        super().__init__("planner_node", **kwargs)
+        self.declare_parameter("resolution_m", 0.2, descriptor=ParameterDescriptor(read_only=True))
+        self.declare_parameter("global_frame", "map", descriptor=ParameterDescriptor(read_only=True))
+        self.declare_parameter("max_path_points", DEFAULT_MAX_PATH_POINTS, descriptor=ParameterDescriptor(read_only=True))
+        self.add_on_set_parameters_callback(self._reject_use_sim_time)
         self._service = None
         self._resolution_m = 0.0
         self._global_frame = ""
         self._max_path_points = DEFAULT_MAX_PATH_POINTS
+
+    def _reject_use_sim_time(self, parameters):
+        for parameter in parameters:
+            if parameter.name == "use_sim_time":
+                reason = "use_sim_time is read-only after construction"
+                self.get_logger().warn(reason)
+                return SetParametersResult(successful=False, reason=reason)
+        return SetParametersResult(successful=True)
 
     def on_configure(self, state: State) -> TransitionCallbackReturn:
         resolution_m = self.get_parameter("resolution_m").value

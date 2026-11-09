@@ -3,6 +3,7 @@ import math
 
 import rclpy
 from geometry_msgs.msg import PoseStamped
+from rcl_interfaces.msg import ParameterDescriptor, SetParametersResult
 from nav_msgs.msg import Odometry
 from rclpy.lifecycle import Node, State, TransitionCallbackReturn
 from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
@@ -17,14 +18,23 @@ QUEUE_DEPTH = 10
 class PoseAdapterNode(Node):
     def __init__(self, node_name: str = "pose_adapter_node", **kwargs) -> None:
         super().__init__(node_name, **kwargs)
-        self.declare_parameter("odom_topic", "/lightnav/localization/odom")
-        self.declare_parameter("output_topic", "/lightnav/pose")
-        self.declare_parameter("expected_frame_id", GLOBAL_FRAME_ID)
-        self.declare_parameter("body_to_base_xyz_rpy", [0.0] * 6)
-        self.declare_parameter("map_from_odom_xy_yaw", [0.0] * 3)
-        self.declare_parameter("max_position_variance_m2", 4.0)
+        self.declare_parameter("odom_topic", "/lightnav/localization/odom", descriptor=ParameterDescriptor(read_only=True))
+        self.declare_parameter("output_topic", "/lightnav/pose", descriptor=ParameterDescriptor(read_only=True))
+        self.declare_parameter("expected_frame_id", GLOBAL_FRAME_ID, descriptor=ParameterDescriptor(read_only=True))
+        self.declare_parameter("body_to_base_xyz_rpy", [0.0] * 6, descriptor=ParameterDescriptor(read_only=True))
+        self.declare_parameter("map_from_odom_xy_yaw", [0.0] * 3, descriptor=ParameterDescriptor(read_only=True))
+        self.declare_parameter("max_position_variance_m2", 4.0, descriptor=ParameterDescriptor(read_only=True))
+        self.add_on_set_parameters_callback(self._reject_use_sim_time)
         self._subscription = None
         self._publisher = None
+
+    def _reject_use_sim_time(self, parameters):
+        for parameter in parameters:
+            if parameter.name == "use_sim_time":
+                reason = "use_sim_time is read-only after construction"
+                self.get_logger().warn(reason)
+                return SetParametersResult(successful=False, reason=reason)
+        return SetParametersResult(successful=True)
 
     def on_configure(self, previous_state: State) -> TransitionCallbackReturn:
         body_to_base_xyz_rpy = list(self.get_parameter("body_to_base_xyz_rpy").value)

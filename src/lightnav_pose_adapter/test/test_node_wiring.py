@@ -157,3 +157,29 @@ def test_invalid_parameter_fails_configure(make_harness):
     result = harness.adapter.trigger_configure()
     assert result == TransitionCallbackReturn.FAILURE
     assert harness.adapter._publisher is None
+
+
+@pytest.mark.parametrize("name,value", [
+    ("odom_topic", "/other_odom"), ("output_topic", "/other_pose"),
+    ("expected_frame_id", "odom"), ("body_to_base_xyz_rpy", [1.0] * 6),
+    ("map_from_odom_xy_yaw", [1.0] * 3), ("max_position_variance_m2", 2.0),
+])
+def test_configuration_parameters_are_read_only(make_harness, name, value):
+    from rclpy.exceptions import ParameterImmutableException
+
+    node = make_harness().adapter
+    original = node.get_parameter(name).value
+    with pytest.raises(ParameterImmutableException, match="read.only"):
+        node.set_parameters([Parameter(name, value=value)])
+    assert node.get_parameter(name).value == original
+
+
+def test_use_sim_time_is_rejected_in_every_lifecycle_state(make_harness):
+    node = make_harness().adapter
+    for transition in (None, node.trigger_configure, node.trigger_activate):
+        if transition is not None:
+            assert transition() == TransitionCallbackReturn.SUCCESS
+        result = node.set_parameters([Parameter("use_sim_time", value=True)])[0]
+        assert not result.successful
+        assert "use_sim_time" in result.reason and "read-only" in result.reason
+        assert node.get_parameter("use_sim_time").value is False
