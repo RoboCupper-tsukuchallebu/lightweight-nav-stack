@@ -10,6 +10,9 @@ obstacle_monitor:
   ros__parameters:
     # TF comes from the description container (base_footprint); the code default is base_link.
     base_frame: base_footprint
+    # Issue #1, user decision 2026-11-09: stop 0.5 m ahead of base_footprint (the body front is about 0.2 m ahead, so
+    # about 0.3 m from the front). The code default is 1.0 m. stop_zone_y_half_m and the slow zone keep their defaults.
+    stop_zone_x_m: 0.5
 
 controller_node:
   ros__parameters:
