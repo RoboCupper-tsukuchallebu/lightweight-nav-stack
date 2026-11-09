@@ -21,7 +21,7 @@ TEST(ArcMarkers, ReflectsSyntheticGridEvaluationAndSelection) {
   const auto candidates = evaluateArcCandidates(grid, {}, {{0.0, 0.0}, {2.0, 0.0}}, 0, 0.0, parameters);
   const auto best = selectBestCandidate(candidates);
   ASSERT_TRUE(best);
-  const auto markers = makeArcMarkers(candidates, best, 1.0, 0.1, "base_footprint", rclcpp::Time(0), true, StopReason::kOk);
+  const auto markers = makeArcMarkers(candidates, best, 1.0, 0.1, "base_footprint", rclcpp::Time(0), true, StopReason::kOk, 2.0);
   ASSERT_EQ(markers.markers.size(), candidates.size() + 2);
   bool rejected = false;
   bool selected = false;
@@ -35,7 +35,7 @@ TEST(ArcMarkers, ReflectsSyntheticGridEvaluationAndSelection) {
   EXPECT_TRUE(rejected);
   EXPECT_TRUE(selected);
   EXPECT_EQ(markers.markers.back().text, "OK");
-  EXPECT_EQ(makeArcMarkers({}, {}, 1.0, 0.1, "base_footprint", rclcpp::Time(0), false, StopReason::kOk).markers.front().action,
+  EXPECT_EQ(makeArcMarkers({}, {}, 1.0, 0.1, "base_footprint", rclcpp::Time(0), false, StopReason::kOk, 2.0).markers.front().action,
             visualization_msgs::msg::Marker::DELETEALL);
 }
 
@@ -46,4 +46,15 @@ TEST(ArcMarkers, RateCapAndDisabled) {
   EXPECT_TRUE(rate.ready(0.0, 2.0, true));
   EXPECT_FALSE(rate.ready(0.49, 2.0, true));
   EXPECT_TRUE(rate.ready(0.5, 2.0, true));
+}
+
+TEST(ArcMarkers, EveryMarkerHasFiniteLifetime) {
+  const std::vector<ArcCandidate> candidates{{0.0, true, 0.0, ""}};
+  for (const auto rate : {0.5, 2.0, 10.0}) {
+    const auto markers = makeArcMarkers(candidates, candidates.front(), 1.0, 0.1,
+        "base_footprint", rclcpp::Time(0), true, StopReason::kOk, rate);
+    for (const auto& marker : markers.markers) {
+      EXPECT_DOUBLE_EQ(rclcpp::Duration(marker.lifetime).seconds(), std::max(1.0, 2.0 / rate));
+    }
+  }
 }

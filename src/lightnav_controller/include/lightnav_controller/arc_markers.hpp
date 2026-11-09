@@ -1,6 +1,8 @@
 #pragma once
 
+#include <algorithm>
 #include <cmath>
+#include <limits>
 #include <optional>
 #include <string>
 #include <vector>
@@ -8,6 +10,7 @@
 #include "lightnav_controller/avoid_layer.hpp"
 #include "visualization_msgs/msg/marker_array.hpp"
 #include "rclcpp/time.hpp"
+#include "rclcpp/duration.hpp"
 
 namespace lightnav_controller {
 
@@ -26,19 +29,23 @@ class ArcMarkerRate {
 inline visualization_msgs::msg::MarkerArray makeArcMarkers(
     const std::vector<ArcCandidate>& candidates, const std::optional<ArcCandidate>& selected,
     double length_m, double step_m, const std::string& frame, const rclcpp::Time& stamp,
-    bool active, StopReason reason) {
+    bool active, StopReason reason, double rate_hz) {
   using Marker = visualization_msgs::msg::Marker;
   visualization_msgs::msg::MarkerArray array;
   Marker clear;
   clear.header.frame_id = frame;
   clear.header.stamp = stamp;
   clear.action = Marker::DELETEALL;
+  const double lifetime_s = std::max(1.0, std::min(2.0 / rate_hz,
+      static_cast<double>(std::numeric_limits<int32_t>::max())));
+  clear.lifetime = rclcpp::Duration::from_seconds(lifetime_s);
   array.markers.push_back(clear);
   if (!active) return array;
   for (std::size_t index = 0; index < candidates.size(); ++index) {
     const auto& candidate = candidates[index];
     Marker marker;
     marker.header = clear.header;
+    marker.lifetime = clear.lifetime;
     marker.ns = candidate.is_feasible ? "feasible" : candidate.rejection_reason;
     marker.id = static_cast<int>(index);
     marker.type = Marker::LINE_STRIP;
@@ -65,6 +72,7 @@ inline visualization_msgs::msg::MarkerArray makeArcMarkers(
   }
   Marker text;
   text.header = clear.header;
+  text.lifetime = clear.lifetime;
   text.ns = "state";
   text.type = Marker::TEXT_VIEW_FACING;
   text.action = Marker::ADD;

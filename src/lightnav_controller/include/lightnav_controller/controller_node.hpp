@@ -198,10 +198,6 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
 
   CallbackReturn on_deactivate(const rclcpp_lifecycle::State& state) override {
     timer_.reset();
-    if (marker_publisher_ && marker_publisher_->get_subscription_count() > 0 &&
-        get_parameter("arc_markers_rate_hz").as_double() > 0.0) {
-      marker_publisher_->publish(makeArcMarkers({}, {}, 0.0, 1.0, grid_frame_, now(), false, StopReason::kOk));
-    }
     LifecycleNode::on_deactivate(state);
     return CallbackReturn::SUCCESS;
   }
@@ -449,7 +445,8 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
         get_parameter("arc_markers_rate_hz").as_double(), marker_publisher_->get_subscription_count() > 0)) {
       marker_publisher_->publish(makeArcMarkers(avoid_layer_->candidates(), avoid_layer_->selectedCandidate(),
           get_parameter("arc_length_m").as_double(), get_parameter("arc_step_m").as_double(),
-          grid_frame_, current_time, marker_active, arbitration_input.avoid.reason));
+          grid_frame_, current_time, marker_active, arbitration_input.avoid.reason,
+          get_parameter("arc_markers_rate_hz").as_double()));
     }
     const ArbitrationResult result = arbitrate(arbitration_input);
     publish(result, follow_result);
