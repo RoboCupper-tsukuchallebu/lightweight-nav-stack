@@ -13,6 +13,7 @@
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "nav_msgs/msg/occupancy_grid.hpp"
 #include "lightnav_controller/arbitrate.hpp"
+#include "lightnav_controller/arc_markers.hpp"
 #include "lightnav_controller/avoid_layer.hpp"
 #include "lightnav_controller/follow_layer.hpp"
 #include "lightnav_controller/freshness.hpp"
@@ -45,6 +46,7 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
     structural.description = "Structural parameter fixed at construction";
     declare_parameter("grid_frame", "base_link", structural);
     declare_parameter("control_hz", 20.0, structural);
+    declare_parameter("arc_markers_rate_hz", 2.0, structural);
     declare_parameter("lookahead_m", 1.0);
     declare_parameter("search_window_m", 5.0);
     declare_parameter("v_max", 0.6);
@@ -91,6 +93,11 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
       RCLCPP_ERROR(get_logger(),
                    "Specify max_path_deviation_m in the course-specific yaml; "
                    "the value must be finite and positive (got %f)", max_path_deviation_m);
+      return CallbackReturn::FAILURE;
+    }
+    arc_markers_rate_hz_ = get_parameter("arc_markers_rate_hz").as_double();
+    if (!std::isfinite(arc_markers_rate_hz_) || arc_markers_rate_hz_ < 0.0) {
+      RCLCPP_ERROR(get_logger(), "arc_markers_rate_hz must be finite and nonnegative");
       return CallbackReturn::FAILURE;
     }
     grid_frame_ = get_parameter("grid_frame").as_string();
@@ -156,6 +163,8 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
     last_pose_.reset();
     last_obstacle_status_.reset();
 
+    marker_publisher_ = create_publisher<visualization_msgs::msg::MarkerArray>(
+        "/lightnav/controller/arc_candidates", rclcpp::QoS(1).reliable());
     command_publisher_ = create_publisher<lightnav_msgs::msg::VelocityCommand>(
         "/lightnav/cmd_vel_raw", rclcpp::QoS(10).reliable());
     status_publisher_ = create_publisher<lightnav_msgs::msg::FollowStatus>(
@@ -243,7 +252,7 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
     Values changes;
     for (const auto& parameter : parameters) {
       const auto& name = parameter.get_name();
-      if (name == "use_sim_time" || name == "grid_frame" || name == "control_hz") {
+      if (name == "use_sim_time" || name == "grid_frame" || name == "control_hz" || name == "arc_markers_rate_hz") {
         result.reason = name + ": read-only after construction";
         break;
       }
@@ -326,6 +335,7 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
     pose_subscription_.reset();
     obstacle_subscription_.reset();
     grid_subscription_.reset();
+    marker_publisher_.reset();
     command_publisher_.reset();
     status_publisher_.reset();
     follow_layer_.reset();
@@ -428,6 +438,16 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
           follow_result.remaining_distance_m, follow_inputs.is_stop_zone_occupied,
           follow_inputs.is_obstacle_status_fresh});
     }
+    const bool marker_active = arcMarkersActive(is_pose_fresh, arbitration_input.avoid.is_asserted);
+    const auto marker_time = std::chrono::steady_clock::now().time_since_epoch();
+    if (marker_publisher_ && marker_rate_.ready(
+        std::chrono::duration<double>(marker_time).count(),
+        arc_markers_rate_hz_, marker_publisher_->get_subscription_count() > 0)) {
+      marker_publisher_->publish(makeArcMarkers(avoid_layer_->candidates(), avoid_layer_->selectedCandidate(),
+          get_parameter("arc_length_m").as_double(), get_parameter("arc_step_m").as_double(),
+          grid_frame_, current_time, marker_active, arbitration_input.avoid.reason,
+          arc_markers_rate_hz_));
+    }
     const ArbitrationResult result = arbitrate(arbitration_input);
     publish(result, follow_result);
   }
@@ -481,6 +501,9 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
   std::optional<ReceivedGrid> last_grid_;
   std::optional<ReceivedPose> last_pose_;
   std::optional<ReceivedObstacleStatus> last_obstacle_status_;
+  double arc_markers_rate_hz_{0.0};
+  ArcMarkerRate marker_rate_;
+  rclcpp_lifecycle::LifecyclePublisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_publisher_;
   rclcpp::TimerBase::SharedPtr timer_;
   rclcpp::Subscription<lightnav_msgs::msg::PathWithId>::SharedPtr path_subscription_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr pose_subscription_;

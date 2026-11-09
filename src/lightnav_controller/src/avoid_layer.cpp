@@ -6,10 +6,18 @@
 
 namespace lightnav_controller {
 
+// Position on an arc of the given curvature after travelling arc_length_m.
+Point2D arcPointInBody(double curvature_per_m, double arc_length_m) {
+  if (std::fabs(curvature_per_m) < 1e-6) {
+    return Point2D{arc_length_m, 0.0};
+  }
+  return Point2D{std::sin(curvature_per_m * arc_length_m) / curvature_per_m,
+                 (1.0 - std::cos(curvature_per_m * arc_length_m)) / curvature_per_m};
+}
+
 namespace {
 
 constexpr std::int8_t kOccupiedThreshold = 50;
-constexpr double kStraightCurvature = 1e-6;
 
 double distanceBetween(const Point2D& first, const Point2D& second) {
   return std::hypot(first.x_m - second.x_m, first.y_m - second.y_m);
@@ -28,15 +36,6 @@ Point2D toWorld(const Pose2D& pose, const Point2D& body_point) {
   return Point2D{
       pose.x_m + std::cos(pose.yaw_rad) * body_point.x_m - std::sin(pose.yaw_rad) * body_point.y_m,
       pose.y_m + std::sin(pose.yaw_rad) * body_point.x_m + std::cos(pose.yaw_rad) * body_point.y_m};
-}
-
-// Position on an arc of the given curvature after travelling arc_length_m.
-Point2D arcPointInBody(double curvature_per_m, double arc_length_m) {
-  if (std::fabs(curvature_per_m) < kStraightCurvature) {
-    return Point2D{arc_length_m, 0.0};
-  }
-  return Point2D{std::sin(curvature_per_m * arc_length_m) / curvature_per_m,
-                 (1.0 - std::cos(curvature_per_m * arc_length_m)) / curvature_per_m};
 }
 
 double distanceToSegment(const Point2D& point, const Point2D& start, const Point2D& end) {
@@ -156,10 +155,15 @@ std::vector<ArcCandidate> evaluateArcCandidates(const LocalGrid& grid, const Pos
     for (double travelled_m = parameters.arc_step_m;
          travelled_m <= parameters.arc_length_m + 1e-9; travelled_m += parameters.arc_step_m) {
       const Point2D sample = arcPointInBody(candidate.curvature_per_m, travelled_m);
-      if (grid.isOccupiedInBody(sample.x_m, sample.y_m) ||
-          distanceToPath(toWorld(pose, sample), path_points, first_index, last_index) >
-              parameters.max_path_deviation_m) {
+      if (grid.isOccupiedInBody(sample.x_m, sample.y_m)) {
         candidate.is_feasible = false;
+        candidate.rejection_reason = "collision";
+        break;
+      }
+      if (distanceToPath(toWorld(pose, sample), path_points, first_index, last_index) >
+          parameters.max_path_deviation_m) {
+        candidate.is_feasible = false;
+        candidate.rejection_reason = "deviation";
         break;
       }
     }
@@ -206,6 +210,8 @@ void ArcAvoidLayer::reset() {
 }
 
 LayerOutput ArcAvoidLayer::compute(const AvoidContext& context) {
+  candidates_.clear();
+  selected_candidate_.reset();
   if (!context.is_grid_fresh || context.grid == nullptr || context.path_points.empty()) {
     reset();
     return LayerOutput{};
@@ -247,9 +253,11 @@ LayerOutput ArcAvoidLayer::compute(const AvoidContext& context) {
                                           : StopReason::kObstacleStale);
   }
 
-  const auto best = selectBestCandidate(evaluateArcCandidates(
+  candidates_ = evaluateArcCandidates(
       grid, context.pose, context.path_points, context.closest_index, previous_curvature_per_m_,
-      parameters_));
+      parameters_);
+  const auto best = selectBestCandidate(candidates_);
+  selected_candidate_ = best;
   LayerOutput output;
   output.is_asserted = true;
   if (best.has_value()) {
