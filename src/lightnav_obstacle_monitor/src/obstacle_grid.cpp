@@ -6,6 +6,10 @@
 
 namespace lightnav
 {
+namespace {
+// Ground returns within this height of the base-frame ground plane.
+constexpr double kGroundHeightToleranceMeters = 0.1;
+}
 
 GridGeometry GridGeometry::fromParameters(const ObstacleMonitorParameters & parameters)
 {
@@ -62,7 +66,7 @@ void ObstacleGrid::addPoint3d(double xMeters, double yMeters, double zMeters)
   if (!index) {
     return;
   }
-  if (std::abs(zMeters) <= 0.1 && groundCounts_[*index] < std::numeric_limits<std::uint16_t>::max()) {
+  if (std::abs(zMeters) <= kGroundHeightToleranceMeters && groundCounts_[*index] < std::numeric_limits<std::uint16_t>::max()) {
     ++groundCounts_[*index];
   }
   const float height = static_cast<float>(zMeters);

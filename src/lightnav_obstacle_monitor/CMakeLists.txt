@@ -11,7 +11,6 @@ find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
 find_package(sensor_msgs REQUIRED)
-find_package(diagnostic_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
@@ -47,7 +46,6 @@ target_link_libraries(obstacle_monitor_node_lib PUBLIC
   rclcpp_lifecycle::rclcpp_lifecycle
   tf2_ros::tf2_ros
   tf2_eigen::tf2_eigen
-  diagnostic_msgs::diagnostic_msgs__rosidl_typesupport_cpp
   sensor_msgs::sensor_msgs__rosidl_typesupport_cpp
   nav_msgs::nav_msgs__rosidl_typesupport_cpp
   lightnav_msgs::lightnav_msgs__rosidl_typesupport_cpp)

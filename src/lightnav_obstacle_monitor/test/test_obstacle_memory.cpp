@@ -101,7 +101,7 @@ TEST(ObstacleMemoryTest, JumpClearsAndAgeBoundsMemory)
   EXPECT_TRUE(memory.update(empty, empty, pose(2), Eigen::Vector3d::Zero(), 1));
   EXPECT_EQ(memory.size(), 0U);
   memory.update(occupied, empty, pose(2), Eigen::Vector3d::Zero(), 2);
-  memory.cells(pose(2), 32);
+  memory.update(empty, empty, pose(13), Eigen::Vector3d::Zero(), 32);
   EXPECT_EQ(memory.size(), 0U);
 }
 TEST(ObstacleMemoryTest, UnobservedAndBlindGroundDoNotClear)
@@ -120,7 +120,7 @@ TEST(ObstacleMemoryTest, UnobservedAndBlindGroundDoNotClear)
   memory.update(occupied, ground, pose(0), Eigen::Vector3d::Zero(), 2);
   EXPECT_EQ(memory.size(), 1U);
   memory.cells(pose(0), 30);
-  EXPECT_EQ(memory.size(), 0U);
+  EXPECT_EQ(memory.size(), 1U);
 }
 TEST(ObstacleMemoryTest, RotationJumpClears)
 {

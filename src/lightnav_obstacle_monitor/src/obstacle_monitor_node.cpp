@@ -34,7 +34,11 @@ ObstacleMonitorNode::ObstacleMonitorNode(const rclcpp::NodeOptions & options)
   declare_parameter("base_frame", "base_link");
   declare_parameter("memory_frame", "odom");
   declare_parameter("blind_radius_m", 0.6);
+  // Age applies only when a cell is currently observable.
   declare_parameter("memory_max_age_s", 30.0);
+  declare_parameter("memory_max_range_m", 10.0);
+  declare_parameter("tf_max_age_s", 0.5);
+  declare_parameter("memory_reset_report_s", 2.0);
   declare_parameter("memory_jump_distance_m", 1.0);
   declare_parameter("memory_jump_angle_rad", 0.7853981634);
   declare_parameter("points_timeout_s", 0.5);
@@ -83,6 +87,9 @@ ObstacleMonitorNode::CallbackReturn ObstacleMonitorNode::on_configure(const rclc
   memoryFrame_ = get_parameter("memory_frame").as_string();
   blindRadiusMeters_ = get_parameter("blind_radius_m").as_double();
   memoryMaxAgeSeconds_ = get_parameter("memory_max_age_s").as_double();
+  memoryMaxRangeMeters_ = get_parameter("memory_max_range_m").as_double();
+  tfMaxAgeSeconds_ = get_parameter("tf_max_age_s").as_double();
+  memoryResetReportSeconds_ = get_parameter("memory_reset_report_s").as_double();
   jumpDistanceMeters_ = get_parameter("memory_jump_distance_m").as_double();
   jumpAngleRadians_ = get_parameter("memory_jump_angle_rad").as_double();
   pointsTopic_ = get_parameter("points_topic").as_string();
@@ -112,16 +119,21 @@ ObstacleMonitorNode::CallbackReturn ObstacleMonitorNode::on_configure(const rclc
     (!pointsTopic_.empty() || !scanTopic_.empty()) && !memoryFrame_.empty() &&
     std::isfinite(blindRadiusMeters_) && blindRadiusMeters_ >= 0.0 &&
     std::isfinite(memoryMaxAgeSeconds_) && memoryMaxAgeSeconds_ > 0.0 &&
+    std::isfinite(memoryMaxRangeMeters_) && memoryMaxRangeMeters_ > 0.0 &&
+    std::isfinite(tfMaxAgeSeconds_) && tfMaxAgeSeconds_ > 0.0 &&
+    std::isfinite(memoryResetReportSeconds_) && memoryResetReportSeconds_ > 0.0 &&
     std::isfinite(jumpDistanceMeters_) && jumpDistanceMeters_ > 0.0 &&
     std::isfinite(jumpAngleRadians_) && jumpAngleRadians_ > 0.0;
   if (!isValid) {
-    RCLCPP_ERROR(get_logger(), "invalid parameters: sizes and watchdog_hz must be positive, step_neighbor_radius_m must be finite and nonnegative, and at least one input topic is needed");
+    RCLCPP_ERROR(get_logger(), "invalid parameters: sizes and watchdog_hz must be positive, step_neighbor_radius_m must be finite and nonnegative, at least one input topic and memory_frame are needed; blind_radius_m must be finite and nonnegative; memory_max_age_s, memory_max_range_m, tf_max_age_s, memory_reset_report_s, memory_jump_distance_m and memory_jump_angle_rad must be finite and positive");
     return CallbackReturn::FAILURE;
   }
   geometry_ = GridGeometry::fromParameters(parameters_);
-  memory_.emplace(geometry_, blindRadiusMeters_, memoryMaxAgeSeconds_, jumpDistanceMeters_, jumpAngleRadians_);
+  memory_.emplace(geometry_, blindRadiusMeters_, memoryMaxAgeSeconds_, jumpDistanceMeters_, jumpAngleRadians_, memoryMaxRangeMeters_);
   worldFromBase_.reset();
-  jumpCount_ = 0;
+  memoryTfStale_ = true;
+  poseUpdate_.reset();
+  memoryReset_.reset();
   stopHysteresis_.emplace(
     parameters_.minCellCount, parameters_.occupiedMinFrames, parameters_.clearHoldSeconds);
   slowHysteresis_.emplace(
@@ -136,8 +148,6 @@ ObstacleMonitorNode::CallbackReturn ObstacleMonitorNode::on_configure(const rclc
     "/lightnav/obstacle_status", rclcpp::QoS(10).reliable().durability_volatile());
   gridPublisher_ = create_publisher<nav_msgs::msg::OccupancyGrid>(
     "/lightnav/local_grid", rclcpp::QoS(1).reliable().durability_volatile());
-  diagnosticPublisher_ = create_publisher<diagnostic_msgs::msg::DiagnosticArray>(
-    "/diagnostics", rclcpp::QoS(10));
   if (!pointsTopic_.empty()) {
     pointsSubscription_ = create_subscription<sensor_msgs::msg::PointCloud2>(
       pointsTopic_, pointsQos,
@@ -155,7 +165,6 @@ ObstacleMonitorNode::CallbackReturn ObstacleMonitorNode::on_activate(const rclcp
 {
   statusPublisher_->on_activate();
   gridPublisher_->on_activate();
-  diagnosticPublisher_->on_activate();
   watchdogTimer_ = create_wall_timer(
     std::chrono::duration_cast<std::chrono::nanoseconds>(
       std::chrono::duration<double>(1.0 / watchdogHz_)),
@@ -172,7 +181,6 @@ void ObstacleMonitorNode::releaseActiveResources()
   if (gridPublisher_) {
     gridPublisher_->on_deactivate();
   }
-  if (diagnosticPublisher_) {diagnosticPublisher_->on_deactivate();}
 }
 
 ObstacleMonitorNode::CallbackReturn ObstacleMonitorNode::on_deactivate(const rclcpp_lifecycle::State &)
@@ -187,7 +195,6 @@ ObstacleMonitorNode::CallbackReturn ObstacleMonitorNode::on_cleanup(const rclcpp
   scanSubscription_.reset();
   statusPublisher_.reset();
   gridPublisher_.reset();
-  diagnosticPublisher_.reset();
   memory_.reset();
   worldFromBase_.reset();
   tfListener_.reset();
@@ -222,24 +229,37 @@ std::optional<Eigen::Isometry3d> ObstacleMonitorNode::lookupBaseFromSensor(
 }
 
 bool ObstacleMonitorNode::updateMemory(const ObstacleGrid & grid,
-  const Eigen::Isometry3d & baseFromSensor, SensorState & state)
+  const Eigen::Isometry3d & baseFromSensor, SensorState & state,
+  const builtin_interfaces::msg::Time & stamp)
 {
+  (void)state;
   try {
-    const auto transform = tfBuffer_->lookupTransform(memoryFrame_, baseFrame_, tf2::TimePointZero);
+    const rclcpp::Time frameTime(stamp, get_clock()->get_clock_type());
+    if (frameTime.nanoseconds() == 0 || std::abs((get_clock()->now() - frameTime).seconds()) > tfMaxAgeSeconds_) {
+      throw tf2::TransformException("sensor timestamp is stale");
+    }
+    const auto transform = tfBuffer_->lookupTransform(memoryFrame_, baseFrame_, frameTime,
+      rclcpp::Duration::from_seconds(tfTimeoutSeconds_));
+    const rclcpp::Time transformTime(transform.header.stamp, get_clock()->get_clock_type());
+    if (transformTime.nanoseconds() != 0 &&
+      std::abs((get_clock()->now() - transformTime).seconds()) > tfMaxAgeSeconds_) {
+      throw tf2::TransformException("memory transform is stale");
+    }
     worldFromBase_ = tf2::transformToEigen(transform);
+    poseUpdate_ = SteadyClock::now();
+    memoryTfStale_ = false;
   } catch (const tf2::TransformException & exception) {
-    state.hasLastTransformFailed = true;
-    state.sensorFrame = memoryFrame_;
+    memoryTfStale_ = true;
     RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "memory TF unavailable: %s", exception.what());
     return false;
   }
   const double nowSeconds = std::chrono::duration<double>(SteadyClock::now().time_since_epoch()).count();
   if (memory_->update(grid.occupiedCells(), grid.groundCells(), *worldFromBase_,
       baseFromSensor.translation(), nowSeconds)) {
-    ++jumpCount_;
+    memoryReset_ = SteadyClock::now();
     pointsState_.occupiedCells.clear();
     scanState_.occupiedCells.clear();
-    RCLCPP_WARN(get_logger(), "memory cleared after TF jump");
+    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "memory cleared after TF jump");
   }
   return true;
 }
@@ -260,7 +280,7 @@ void ObstacleMonitorNode::handlePointCloud(const sensor_msgs::msg::PointCloud2::
     publishResult(frameStart, false);
     return;
   }
-  if (!updateMemory(grid, *baseFromSensor, pointsState_)) {
+  if (!updateMemory(grid, *baseFromSensor, pointsState_, cloud->header.stamp)) {
     publishResult(frameStart, false);
     return;
   }
@@ -278,7 +298,7 @@ void ObstacleMonitorNode::handleLaserScan(const sensor_msgs::msg::LaserScan::Sha
   }
   ObstacleGrid grid(geometry_, parameters_);
   projectLaserScan(*scan, *baseFromSensor, parameters_.scanMaxUseRangeMeters, grid);
-  if (!updateMemory(grid, *baseFromSensor, scanState_)) {
+  if (!updateMemory(grid, *baseFromSensor, scanState_, scan->header.stamp)) {
     publishResult(frameStart, false);
     return;
   }
@@ -329,6 +349,12 @@ void ObstacleMonitorNode::publishResult(
     };
   collect("points", pointsTopic_, pointsState_, pointsTimeoutSeconds_);
   collect("scan", scanTopic_, scanState_, scanTimeoutSeconds_);
+  if (memoryTfStale_ || !poseUpdate_ || secondsSince(*poseUpdate_, now) > tfMaxAgeSeconds_) {
+    status.stale_sources.push_back("tf:" + memoryFrame_);
+  }
+  if (memoryReset_ && secondsSince(*memoryReset_, now) < memoryResetReportSeconds_) {
+    status.stale_sources.push_back("obstacle_memory_reset");
+  }
   status.is_input_stale = !status.stale_sources.empty();
   status.header.stamp = get_clock()->now();
   status.header.frame_id = baseFrame_;
@@ -354,23 +380,6 @@ void ObstacleMonitorNode::publishResult(
   status.processing_time_ms =
     std::chrono::duration<float, std::milli>(SteadyClock::now() - frameStart).count();
   statusPublisher_->publish(status);
-  diagnostic_msgs::msg::DiagnosticArray diagnostics;
-  diagnostics.header.stamp = status.header.stamp;
-  diagnostic_msgs::msg::DiagnosticStatus diagnostic;
-  diagnostic.name = "obstacle_monitor/memory";
-  diagnostic.hardware_id = memoryFrame_;
-  diagnostic.level = status.is_input_stale ? diagnostic_msgs::msg::DiagnosticStatus::WARN :
-    diagnostic_msgs::msg::DiagnosticStatus::OK;
-  diagnostic.message = jumpCount_ ? "TF jump cleared memory (see jump_count)" : "memory active";
-  diagnostic_msgs::msg::KeyValue count;
-  count.key = "remembered_cell_count";
-  count.value = std::to_string(memory_->size());
-  diagnostic.values.push_back(count);
-  count.key = "jump_count";
-  count.value = std::to_string(jumpCount_);
-  diagnostic.values.push_back(count);
-  diagnostics.status.push_back(diagnostic);
-  diagnosticPublisher_->publish(diagnostics);
   lastPublish_ = now;
 }
 

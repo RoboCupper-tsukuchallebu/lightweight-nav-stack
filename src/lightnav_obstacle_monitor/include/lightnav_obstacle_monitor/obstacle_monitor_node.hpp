@@ -8,7 +8,6 @@
 #include <string>
 #include <vector>
 
-#include <diagnostic_msgs/msg/diagnostic_array.hpp>
 #include <lightnav_msgs/msg/obstacle_status.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <rclcpp/rclcpp.hpp>
@@ -54,7 +53,7 @@ private:
   std::optional<Eigen::Isometry3d> lookupBaseFromSensor(
     const std::string & sensorFrame, SensorState & state);
   bool updateMemory(const ObstacleGrid & grid, const Eigen::Isometry3d & baseFromSensor,
-    SensorState & state);
+    SensorState & state, const builtin_interfaces::msg::Time & stamp);
   void publishResult(SteadyClock::time_point frameStart, bool shouldUpdateHysteresis);
   void releaseActiveResources();
 
@@ -62,10 +61,11 @@ private:
   GridGeometry geometry_{};
   std::string baseFrame_;
   std::string memoryFrame_;
-  double blindRadiusMeters_, memoryMaxAgeSeconds_, jumpDistanceMeters_, jumpAngleRadians_;
+  double blindRadiusMeters_, memoryMaxAgeSeconds_, jumpDistanceMeters_, jumpAngleRadians_, memoryMaxRangeMeters_, tfMaxAgeSeconds_, memoryResetReportSeconds_;
   std::optional<ObstacleMemory> memory_;
   std::optional<Eigen::Isometry3d> worldFromBase_;
-  std::size_t jumpCount_ = 0;
+  bool memoryTfStale_ = true;
+  std::optional<SteadyClock::time_point> poseUpdate_, memoryReset_;
   std::string pointsTopic_;
   std::string scanTopic_;
   double pointsTimeoutSeconds_ = 0.5;
@@ -86,7 +86,6 @@ private:
   rclcpp_lifecycle::LifecyclePublisher<lightnav_msgs::msg::ObstacleStatus>::SharedPtr
     statusPublisher_;
   rclcpp_lifecycle::LifecyclePublisher<nav_msgs::msg::OccupancyGrid>::SharedPtr gridPublisher_;
-  rclcpp_lifecycle::LifecyclePublisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr diagnosticPublisher_;
   rclcpp::TimerBase::SharedPtr watchdogTimer_;
 };
 

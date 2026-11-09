@@ -5,9 +5,9 @@
 namespace lightnav
 {
 ObstacleMemory::ObstacleMemory(const GridGeometry & geometry, double blindRadiusMeters,
-  double maxAgeSeconds, double jumpDistanceMeters, double jumpAngleRadians)
+  double maxAgeSeconds, double jumpDistanceMeters, double jumpAngleRadians, double maxRangeMeters)
 : geometry_(geometry), blindRadiusMeters_(blindRadiusMeters), maxAgeSeconds_(maxAgeSeconds),
-  jumpDistanceMeters_(jumpDistanceMeters), jumpAngleRadians_(jumpAngleRadians) {}
+  jumpDistanceMeters_(jumpDistanceMeters), jumpAngleRadians_(jumpAngleRadians), maxRangeMeters_(maxRangeMeters) {}
 
 ObstacleMemory::Key ObstacleMemory::key(double x, double y) const
 {
@@ -36,7 +36,10 @@ bool ObstacleMemory::update(const std::vector<std::uint8_t> & occupied,
     const double distance = std::hypot(base.x() - sensorInBase.x(), base.y() - sensorInBase.y());
     const bool observedFree = index && *index < ground.size() && ground[*index] &&
       !occupied[*index] && distance >= blindRadiusMeters_;
-    if (nowSeconds - iterator->second >= maxAgeSeconds_ || nowSeconds < iterator->second || observedFree) {
+    const bool observable = index && *index < ground.size() && distance >= blindRadiusMeters_ &&
+      (ground[*index] || occupied[*index]);
+    const bool expired = observable && (nowSeconds - iterator->second >= maxAgeSeconds_ || nowSeconds < iterator->second);
+    if (std::hypot(base.x(), base.y()) > maxRangeMeters_ || expired || observedFree) {
       iterator = cells_.erase(iterator);
     } else {++iterator;}
   }
@@ -44,20 +47,19 @@ bool ObstacleMemory::update(const std::vector<std::uint8_t> & occupied,
     if (!occupied[index]) {continue;}
     const Eigen::Vector3d world = worldFromBase * Eigen::Vector3d(
       geometry_.cellCenterX(index), geometry_.cellCenterY(index), 0.0);
-    cells_[key(world.x(), world.y())] = nowSeconds;
+    if (std::hypot(geometry_.cellCenterX(index), geometry_.cellCenterY(index)) <= maxRangeMeters_) {
+      cells_[key(world.x(), world.y())] = nowSeconds;
+    }
   }
   return jumped;
 }
 
 std::vector<std::uint8_t> ObstacleMemory::cells(const Eigen::Isometry3d & worldFromBase, double nowSeconds)
 {
+  (void)nowSeconds;  // Expiry requires current observation and is performed in update().
   std::vector<std::uint8_t> result(geometry_.cellCount(), 0);
   const auto baseFromWorld = worldFromBase.inverse();
   for (auto iterator = cells_.begin(); iterator != cells_.end();) {
-    if (nowSeconds - iterator->second >= maxAgeSeconds_ || nowSeconds < iterator->second) {
-      iterator = cells_.erase(iterator);
-      continue;
-    }
     const Eigen::Vector3d world((iterator->first.first + 0.5) * geometry_.cellSizeMeters,
       (iterator->first.second + 0.5) * geometry_.cellSizeMeters, 0.0);
     const auto base = baseFromWorld * world;
