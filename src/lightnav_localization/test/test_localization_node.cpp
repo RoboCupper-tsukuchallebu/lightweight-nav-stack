@@ -1217,6 +1217,26 @@ TEST_F(LocalizationNodeTest, ConfigureFailsWithInvalidGnssInputParameters) {
   EXPECT_EQ(node_->configure().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED);
 }
 
+TEST_F(LocalizationNodeTest, ConfigureFailsWithInvalidWheelSlipParameters) {
+  const std::vector<rclcpp::Parameter> invalid_parameters = {
+      rclcpp::Parameter("lidar_odom_slip_wheel_rate_window_s", 0.0),
+      rclcpp::Parameter("lidar_odom_slip_wheel_rate_window_s", std::numeric_limits<double>::infinity()),
+      rclcpp::Parameter("lidar_odom_slip_wheel_rate_window_s", std::numeric_limits<double>::quiet_NaN()),
+      rclcpp::Parameter("wheel_yaw_slip_threshold_rad", 0.0),
+      rclcpp::Parameter("wheel_yaw_slip_threshold_rad", std::numeric_limits<double>::infinity()),
+      rclcpp::Parameter("wheel_yaw_slip_threshold_rad", std::numeric_limits<double>::quiet_NaN()),
+      rclcpp::Parameter("wheel_robust_kernel", "unknown"),
+  };
+  for (const auto& parameter : invalid_parameters) {
+    SCOPED_TRACE(parameter.get_name());
+    rclcpp::NodeOptions options = make_options(map_file_.string(), map_yaml_.string());
+    options.append_parameter_override(parameter.get_name(), parameter.get_parameter_value());
+    create_node(options);
+    EXPECT_EQ(node_->configure().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED);
+    close_node();
+  }
+}
+
 TEST_F(LocalizationNodeTest, DiagnosticsCountAcceptedGateAndTimeGapFixes) {
   create_node(make_gnss_options(-1, 0.0));
   bring_up();
