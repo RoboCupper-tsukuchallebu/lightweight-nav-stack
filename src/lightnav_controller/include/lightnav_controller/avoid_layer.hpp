@@ -97,6 +97,7 @@ class NullAvoidLayer final : public AvoidLayer {
 class ArcAvoidLayer final : public AvoidLayer {
  public:
   explicit ArcAvoidLayer(const AvoidParameters& parameters);
+  void updateParameters(const AvoidParameters& parameters) { parameters_ = parameters; }
 
   LayerOutput compute(const AvoidContext& context) override;
 

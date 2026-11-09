@@ -17,8 +17,8 @@ class ControllerNodeLifecycle : public ::testing::Test {
   static void TearDownTestSuite() { rclcpp::shutdown(); }
 
   void SetUp() override {
-    node_ = std::make_shared<lightnav_controller::ControllerNode>();
-    node_->set_parameter(rclcpp::Parameter("max_path_deviation_m", 2.5));
+    node_ = std::make_shared<lightnav_controller::ControllerNode>(rclcpp::NodeOptions().parameter_overrides({
+        rclcpp::Parameter("max_path_deviation_m", 2.5), rclcpp::Parameter("grid_frame", "base_footprint")}));
   }
 
   void configureAndActivate() {
@@ -62,7 +62,7 @@ TEST_F(ControllerNodeLifecycle, CleanupReleasesOutputs) {
 }
 
 TEST_F(ControllerNodeLifecycle, ConfigureFailsOnNonPositiveParameter) {
-  node_->set_parameter(rclcpp::Parameter("v_max", -1.0));
+  node_ = std::make_shared<lightnav_controller::ControllerNode>(rclcpp::NodeOptions().parameter_overrides({rclcpp::Parameter("max_path_deviation_m", 2.5), rclcpp::Parameter("v_max", -1.0)}));
   EXPECT_EQ(node_->configure().label(), "unconfigured");
 }
 
@@ -80,13 +80,13 @@ TEST_F(ControllerNodeLifecycle, ConfigureFailsWithInvalidMaxPathDeviation) {
        {0.0, -1.0, std::numeric_limits<double>::quiet_NaN(),
         std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity()}) {
     SCOPED_TRACE(max_path_deviation_m);
-    node_->set_parameter(rclcpp::Parameter("max_path_deviation_m", max_path_deviation_m));
+    node_ = std::make_shared<lightnav_controller::ControllerNode>(rclcpp::NodeOptions().parameter_overrides({rclcpp::Parameter("max_path_deviation_m", max_path_deviation_m)}));
     EXPECT_EQ(node_->configure().label(), "unconfigured");
   }
 }
 
 TEST_F(ControllerNodeLifecycle, ConfigureFailsWithEmptyGridFrame) {
-  node_->set_parameter(rclcpp::Parameter("grid_frame", ""));
+  node_ = std::make_shared<lightnav_controller::ControllerNode>(rclcpp::NodeOptions().parameter_overrides({rclcpp::Parameter("max_path_deviation_m", 2.5), rclcpp::Parameter("grid_frame", "")}));
   EXPECT_EQ(node_->configure().label(), "unconfigured");
 }
 
@@ -98,7 +98,7 @@ class ControllerNodeAvoidWiring : public ControllerNodeLifecycle {
   void SetUp() override {
     ControllerNodeLifecycle::SetUp();
     node_->set_parameter(rclcpp::Parameter("grid_timeout_s", 0.3));
-    node_->set_parameter(rclcpp::Parameter("grid_frame", configured_grid_frame_));
+    node_ = std::make_shared<lightnav_controller::ControllerNode>(rclcpp::NodeOptions().parameter_overrides({rclcpp::Parameter("max_path_deviation_m", 2.5), rclcpp::Parameter("grid_timeout_s", 0.3), rclcpp::Parameter("grid_frame", configured_grid_frame_)}));
     configureAndActivate();
     helper_ = std::make_shared<rclcpp::Node>("controller_node_test_helper");
     path_publisher_ = helper_->create_publisher<lightnav_msgs::msg::PathWithId>(
@@ -220,4 +220,32 @@ TEST_F(ControllerNodeAvoidWiringInFootprintFrame, GridInDefaultFrameIsDroppedWhe
   spinFor(std::chrono::milliseconds(500), true);
   ASSERT_TRUE(last_status_.has_value());
   EXPECT_NE(last_status_->active_layer, lightnav_msgs::msg::FollowStatus::LAYER_AVOID);
+}
+
+TEST_F(ControllerNodeLifecycle, RuntimeClassesAndStartupBaseline) {
+  configureAndActivate();
+  for (double value : {0.8, 0.4}) EXPECT_TRUE(node_->set_parameter(rclcpp::Parameter("v_max", value)).successful);
+  for (double value : {0.05, 0.1}) EXPECT_TRUE(node_->set_parameter(rclcpp::Parameter("arc_step_m", value)).successful);
+  for (double value : {0.2, std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN()}) {
+    const auto result = node_->set_parameter(rclcpp::Parameter("arc_step_m", value));
+    EXPECT_FALSE(result.successful); EXPECT_FALSE(result.reason.empty());
+  }
+  EXPECT_FALSE(node_->set_parameter(rclcpp::Parameter("use_sim_time", true)).successful);
+  EXPECT_THROW(node_->set_parameter(rclcpp::Parameter("grid_frame", "map")), rclcpp::exceptions::ParameterImmutableException);
+  node_->deactivate(); node_->cleanup();
+  EXPECT_FALSE(node_->set_parameter(rclcpp::Parameter("arc_step_m", 0.2)).successful);
+  EXPECT_EQ(node_->configure().label(), "inactive");
+}
+
+TEST_F(ControllerNodeLifecycle, RejectsInvalidCombinedConstraints) {
+  EXPECT_FALSE(node_->set_parameter(rclcpp::Parameter("v_slow", 0.9)).successful);
+  EXPECT_FALSE(node_->set_parameter(rclcpp::Parameter("avoid_trigger_m", 3.0)).successful);
+  auto result = node_->set_parameters_atomically({rclcpp::Parameter("v_max", 0.9), rclcpp::Parameter("v_slow", 0.8)});
+  EXPECT_TRUE(result.successful);
+}
+
+TEST_F(ControllerNodeLifecycle, NonfiniteStartupBaselineCannotBeChanged) {
+  node_ = std::make_shared<lightnav_controller::ControllerNode>();
+  const auto result = node_->set_parameter(rclcpp::Parameter("max_path_deviation_m", 2.5));
+  EXPECT_FALSE(result.successful); EXPECT_FALSE(result.reason.empty());
 }
