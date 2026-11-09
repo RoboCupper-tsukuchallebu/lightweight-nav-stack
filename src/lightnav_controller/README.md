@@ -40,6 +40,8 @@ Runtime parameters are applied between control cycles without resetting the held
 
 All numeric values must be finite and positive; `arc_candidate_count` must be a positive integer. Safety values require a finite startup baseline and may return to that baseline. Set related parameters in an order that preserves the constraints: the `set_parameters` service validates each value separately.
 
+During avoidance, if path progress is less than 0.1 m over `stuck_timeout_s`, the controller stops and enters BLOCKED even when an arc is feasible. It reports STUCK after another `stuck_timeout_s` without progress. When remaining path distance is unavailable, displacement is used instead.
+
 In-place rotation starts when heading error exceeds `rotate_in_place_heading_threshold_rad` (default 1.2 rad), and ends below 80% of that threshold. After `stuck_timeout_s` in BLOCKED, STUCK persists for `stuck_rotate_after_s` (default 2.0 s) before rotation; each cycle re-evaluates arcs. Direction alternates between recovery episodes. `w_rotate` bounds angular speed; the safety gate and drive enable remain authoritative. `FollowStatus` reports the selected layer, STUCK state and commanded linear and angular speeds.
 
 The user decision in Issue #1 (2026-11-09) permits rotation without checking the footprint, obstacles or stop zone and without an angle or attempt limit. People or objects beside or behind the robot can be struck; a person must be ready to use emergency stop. Stale pose or obstacle status still stops the controller.

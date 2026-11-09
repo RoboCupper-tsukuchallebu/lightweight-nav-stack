@@ -7,24 +7,16 @@ Launch arguments:
                 following waypoints.
 """
 
-import time
-
 import yaml
 
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
-    EmitEvent,
     OpaqueFunction,
-    RegisterEventHandler,
 )
-from launch.events import matches_action
 from launch.substitutions import LaunchConfiguration
-from launch_ros.actions import LifecycleNode
+from launch_ros.actions import LifecycleNode, Node
 from launch_ros.descriptions import ParameterFile
-from launch_ros.event_handlers import OnStateTransition
-from launch_ros.events.lifecycle import ChangeState
-from lifecycle_msgs.msg import Transition
 
 # (package, executable, node name). The node name is the key in robot.yaml and what `ros2 lifecycle` uses.
 NAV_NODES = (
@@ -37,15 +29,7 @@ NAV_NODES = (
 SAFETY_GATE_NODE = ("lightnav_safety_gate", "safety_gate_node", "safety_gate_node")
 
 
-def lifecycle_request(node, node_name, transition_id, label):
-    def emit(context):
-        print(f"LIFECYCLE_REQUEST {time.monotonic():.6f} {node_name} {label}", flush=True)
-        return [EmitEvent(event=ChangeState(lifecycle_node_matcher=matches_action(node),
-                                           transition_id=transition_id))]
-    return OpaqueFunction(function=emit)
-
-
-def build_lifecycle_entities(package, executable, node_name, robot_config):
+def build_lifecycle_entities(package, executable, node_name, robot_config, trace=False):
     node = LifecycleNode(
         package=package,
         executable=executable,
@@ -54,17 +38,10 @@ def build_lifecycle_entities(package, executable, node_name, robot_config):
         output="screen",
         parameters=robot_config if isinstance(robot_config, list) else [robot_config],
     )
-    activate_after_configure = RegisterEventHandler(
-        OnStateTransition(
-            target_lifecycle_node=node,
-            goal_state="inactive",
-            entities=[
-                lifecycle_request(node, node_name, Transition.TRANSITION_ACTIVATE, "activate")
-            ],
-        )
-    )
-    configure = lifecycle_request(node, node_name, Transition.TRANSITION_CONFIGURE, "configure")
-    return [node, activate_after_configure, configure]
+    starter = Node(package="lightnav_bringup", executable="lifecycle_start",
+                   name=f"{node_name}_lifecycle_start", output="screen",
+                   parameters=[{"target": node_name, "trace": trace}])
+    return [node, starter]
 
 
 def controller_obstacle_parameters(monitor_parameters):

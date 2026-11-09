@@ -225,7 +225,7 @@ ArcAvoidLayer::ArcAvoidLayer(const AvoidParameters& parameters) : parameters_(pa
 void ArcAvoidLayer::reset() {
   is_avoiding_ = false;
   release_since_s_.reset();
-  waiting_since_s_.reset();
+  resetWaiting();
   previous_curvature_per_m_ = 0.0;
 }
 
@@ -268,13 +268,15 @@ LayerOutput ArcAvoidLayer::compute(const AvoidContext& context) {
     return LayerOutput{};
   }
   if (!context.is_obstacle_status_fresh) {
-    waiting_since_s_.reset();
+    resetWaiting();
     LayerOutput output;
     output.is_asserted = true;
     output.reason = StopReason::kObstacleStale;
     return output;
   }
   if (context.is_stop_zone_occupied || is_at_path_end) {
+    progress_since_s_.reset();
+    progress_pose_.reset();
     return makeWaiting(context.now_s, context.is_obstacle_status_fresh
                                           ? StopReason::kBlocked
                                           : StopReason::kObstacleStale);
@@ -288,6 +290,26 @@ LayerOutput ArcAvoidLayer::compute(const AvoidContext& context) {
   LayerOutput output;
   output.is_asserted = true;
   if (best.has_value()) {
+    const Point2D current{context.pose.x_m, context.pose.y_m};
+    if (!progress_since_s_ || context.now_s < *progress_since_s_) {
+      progress_since_s_ = context.now_s;
+      progress_pose_ = current;
+      progress_remaining_m_ = context.remaining_distance_m;
+    }
+    constexpr double kProgressDistanceM = 0.1;
+    const bool path_progress = std::isfinite(progress_remaining_m_) &&
+        progress_remaining_m_ - context.remaining_distance_m >= kProgressDistanceM;
+    const bool position_progress = !std::isfinite(progress_remaining_m_) &&
+        distanceBetween(*progress_pose_, current) >= kProgressDistanceM;
+    if (path_progress || position_progress) {
+      progress_since_s_ = context.now_s;
+      progress_pose_ = current;
+      progress_remaining_m_ = context.remaining_distance_m;
+      waiting_since_s_.reset();
+    }
+    if (context.now_s - *progress_since_s_ >= parameters_.stuck_timeout_s) {
+      return makeWaiting(context.now_s, StopReason::kBlocked);
+    }
     waiting_since_s_.reset();
     previous_curvature_per_m_ = best->curvature_per_m;
     const double linear_mps = std::min(parameters_.v_avoid_mps,
@@ -296,6 +318,8 @@ LayerOutput ArcAvoidLayer::compute(const AvoidContext& context) {
     output.reason = StopReason::kOk;
     return output;
   }
+  progress_since_s_.reset();
+  progress_pose_.reset();
   return makeWaiting(context.now_s, StopReason::kBlocked);
 }
 

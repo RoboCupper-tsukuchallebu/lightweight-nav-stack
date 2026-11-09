@@ -470,13 +470,16 @@ TEST(ArcAvoidLayer, CycleWithFifteenArcsOnEightyByEightyGridIsFast) {
   const int iterations = 1000;
   const auto start = std::chrono::steady_clock::now();
   double sink = 0.0;
+  double max_ms = 0.0;
   for (int iteration = 0; iteration < iterations; ++iteration) {
+    const auto cycle_start = std::chrono::steady_clock::now();
     ArcAvoidLayer layer{parameters};
     sink += layer.compute(makeContext(path, &grid, 0.0)).twist.angular_rps;
+    max_ms = std::max(max_ms, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - cycle_start).count());
   }
   const double mean_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count() / iterations;
   RecordProperty("mean_ms", std::to_string(mean_ms));
-  std::cout << "avoid cycle mean_ms=" << mean_ms << " sink=" << sink << std::endl;
+  std::cout << "avoid cycle mean_ms=" << mean_ms << " max_ms=" << max_ms << " sink=" << sink << std::endl;
   EXPECT_LT(mean_ms, 10.0);
 }
 
@@ -487,12 +490,15 @@ TEST(EvaluateArcCandidates, RawFootprintCycleTiming) {
   const auto grid = makeEmptyGrid();
   const auto path = makeStraightPath();
   const auto start = std::chrono::steady_clock::now();
+  double max_ms = 0.0;
   for (int iteration = 0; iteration < 1000; ++iteration) {
+    const auto cycle_start = std::chrono::steady_clock::now();
     EXPECT_EQ(evaluateArcCandidates(grid, kOrigin, path, 0, 0.0, parameters, &grid).size(), 15U);
+    max_ms = std::max(max_ms, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - cycle_start).count());
   }
   const double mean_ms = std::chrono::duration<double, std::milli>(
       std::chrono::steady_clock::now() - start).count() / 1000;
-  std::cout << "raw footprint cycle mean_ms=" << mean_ms << std::endl;
+  std::cout << "raw footprint cycle mean_ms=" << mean_ms << " max_ms=" << max_ms << std::endl;
   EXPECT_LT(mean_ms, 10.0);
 }
 
@@ -515,18 +521,34 @@ TEST(ArcAvoidLayer, ConservativeUpdatePreservesAvoidanceAndReleaseTimer) {
   EXPECT_FALSE(layer.isAvoiding());
 }
 
-// A feasible arc resets the waiting timer even if repeated poses make no progress.
-// This characterizes the limitation; it does not establish the cause of a real trajectory.
-TEST(ArcAvoidLayer, FeasibleArcDoesNotDetectLackOfProgress) {
+TEST(ArcAvoidLayer, FeasibleArcWithoutProgressWaitsAndBecomesStuck) {
   ArcAvoidLayer layer{makeAvoidParameters()};
   const auto path = makeStraightPath();
   LocalGrid grid = makeEmptyGrid();
   fillRectangle(grid, 1.0, 1.4, -0.3, 0.3);
-  for (double now : {0.0, 10.0, 180.0}) {
-    const auto result = layer.compute(makeContext(path, &grid, now));
-    EXPECT_EQ(result.reason, StopReason::kOk);
-    EXPECT_DOUBLE_EQ(result.twist.linear_mps, 0.25);
-  }
+  EXPECT_EQ(layer.compute(makeContext(path, &grid, 0.0)).reason, StopReason::kOk);
+  const auto waiting = layer.compute(makeContext(path, &grid, 10.0));
+  EXPECT_EQ(waiting.reason, StopReason::kBlocked);
+  EXPECT_DOUBLE_EQ(waiting.twist.linear_mps, 0.0);
+  const auto stuck = layer.compute(makeContext(path, &grid, 20.0));
+  EXPECT_EQ(stuck.reason, StopReason::kStuck);
+  EXPECT_DOUBLE_EQ(stuck.twist.linear_mps, 0.0);
+}
+
+TEST(ArcAvoidLayer, PathProgressKeepsFeasibleArcMoving) {
+  ArcAvoidLayer layer{makeAvoidParameters()};
+  const auto path = makeStraightPath();
+  LocalGrid grid = makeEmptyGrid();
+  fillRectangle(grid, 1.0, 1.4, -0.3, 0.3);
+  auto context = makeContext(path, &grid, 0.0);
+  context.remaining_distance_m = 10.0;
+  EXPECT_EQ(layer.compute(context).reason, StopReason::kOk);
+  context.now_s = 9.0;
+  context.remaining_distance_m = 9.8;
+  EXPECT_EQ(layer.compute(context).reason, StopReason::kOk);
+  context.now_s = 18.0;
+  context.remaining_distance_m = 9.6;
+  EXPECT_EQ(layer.compute(context).reason, StopReason::kOk);
 }
 
 TEST(ArcAvoidLayer, RotatesAfterStuckDelayAndResumesWhenArcIsFeasible) {

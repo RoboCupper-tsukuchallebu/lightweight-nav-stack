@@ -29,19 +29,15 @@
 
 namespace lightnav_controller {
 
-namespace {
-
 using CallbackReturn = rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn;
 
-bool rawGridMatches(const LocalGrid& inflated, const LocalGrid& raw, bool stamp_matches,
+inline bool rawGridMatches(const LocalGrid& inflated, const LocalGrid& raw, bool stamp_matches,
                     double age_s, double timeout_s) {
   return stamp_matches && age_s >= 0.0 && age_s <= timeout_s &&
          raw.width_cells == inflated.width_cells && raw.height_cells == inflated.height_cells &&
          raw.resolution_m == inflated.resolution_m && raw.origin_x_m == inflated.origin_x_m &&
          raw.origin_y_m == inflated.origin_y_m;
 }
-
-}  // namespace
 
 struct ReceivedGrid {
   LocalGrid grid;
@@ -99,6 +95,7 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
     declare_parameter("stop_zone_x_m", 1.0, structural);
     declare_parameter("stop_zone_y_half_m", 0.4, structural);
     declare_parameter("arc_markers_rate_hz", 2.0, structural);
+    declare_parameter("grid_diagnostic_enabled", false, structural);
     declare_parameter("lookahead_m", 1.0);
     declare_parameter("search_window_m", 5.0);
     declare_parameter("v_max", 0.6);
@@ -221,7 +218,9 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
     last_pose_.reset();
     last_obstacle_status_.reset();
 
-    diagnostic_publisher_ = create_publisher<std_msgs::msg::String>("/lightnav/controller/grid_diagnostic", rclcpp::QoS(10));
+    if (get_parameter("grid_diagnostic_enabled").as_bool()) {
+      diagnostic_publisher_ = create_publisher<std_msgs::msg::String>("/lightnav/controller/grid_diagnostic", rclcpp::QoS(10));
+    }
     marker_publisher_ = create_publisher<visualization_msgs::msg::MarkerArray>(
         "/lightnav/controller/arc_candidates", rclcpp::QoS(1).reliable());
     command_publisher_ = create_publisher<lightnav_msgs::msg::VelocityCommand>(
@@ -509,7 +508,9 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
       const LocalGrid* raw_grid = nullptr;
       if (is_grid_fresh) {
         raw_grid = raw_grids_.match(*last_grid_, current_time, timeouts_.grid_timeout_s);
-        grid_reason = raw_grids_.reason(*last_grid_, current_time, timeouts_.grid_timeout_s);
+        if (diagnostic_publisher_ && diagnostic_publisher_->get_subscription_count() > 0) {
+          grid_reason = raw_grids_.reason(*last_grid_, current_time, timeouts_.grid_timeout_s);
+        }
         used_raw = raw_grid != nullptr;
       }
       arbitration_input.avoid = avoid_layer_->compute(AvoidContext{
