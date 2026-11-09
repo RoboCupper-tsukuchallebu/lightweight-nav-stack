@@ -55,8 +55,11 @@ jobs:
           cache: ${{ !(matrix.os == 'ubuntu-latest' && env.SELF_HOSTED == 'true') }}
           # Self-hosted runners share ~/.pixi between jobs: setup-pixi then fails with "Destination file path
           # ~/.pixi/bin/pixi already exists", or a cleanup deletes the binary under another job (2026-11-09). Each job
-          # downloads pixi into its own temporary directory instead; the package cache under ~/.cache stays shared.
+          # downloads pixi into its own temporary directory instead (runner.temp is emptied per job; GitHub-hosted VMs
+          # are discarded). post-cleanup is off: it would also delete ~/.rattler and ~/.cache/rattler, the package cache
+          # that every self-hosted job shares and may be reading at that moment.
           pixi-bin-path: ${{ runner.temp }}/pixi/bin/pixi
+          post-cleanup: false
       - run: pixi run lint
       - run: pixi run test
       # `pixi run test` stops before `colcon test-result` on failure, so print which tests failed.
