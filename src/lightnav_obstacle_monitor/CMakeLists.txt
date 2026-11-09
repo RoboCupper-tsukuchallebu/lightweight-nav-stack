@@ -19,6 +19,7 @@ find_package(Eigen3 REQUIRED)
 find_package(lightnav_msgs REQUIRED)
 
 add_library(obstacle_monitor_core
+  src/obstacle_memory.cpp
   src/obstacle_grid.cpp
   src/sensor_projection.cpp
   src/frame_processor.cpp
@@ -58,7 +59,7 @@ if(BUILD_TESTING)
   # ament_add_gtest rebuilds the vendored gtest, which fails against the conda gtest headers
   # in the pixi environment. Link the installed GTest directly instead.
   find_package(GTest REQUIRED)
-  foreach(test_name test_obstacle_grid test_frame_processor test_freshness)
+  foreach(test_name test_obstacle_grid test_frame_processor test_freshness test_obstacle_memory)
     add_executable(${test_name} test/${test_name}.cpp)
     target_link_libraries(${test_name} obstacle_monitor_core GTest::gtest GTest::gtest_main)
     add_test(NAME ${test_name}

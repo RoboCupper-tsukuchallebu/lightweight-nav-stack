@@ -19,3 +19,5 @@ LIGHTNAV_BUILD_HOST=... LIGHTNAV_ROBOT_HOST=... scripts/deploy.sh [git-ref]     
 ```
 
 ライセンス: Apache-2.0
+
+障害物監視の死角と記憶の設定は [lightnav_obstacle_monitor の README](src/lightnav_obstacle_monitor/README.md) を参照。LiDAR 高さ 0.66 m、最下段 −30.67° の地面の死角は約 1.12 m、ドライバの min_range は 0.9 m。

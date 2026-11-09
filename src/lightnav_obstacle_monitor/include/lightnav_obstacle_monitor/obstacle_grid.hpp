@@ -59,6 +59,7 @@ public:
 
   // 1 for sufficient 3D points with an internal height difference or neighbor step, or a scan hit.
   std::vector<std::uint8_t> occupiedCells() const;
+  std::vector<std::uint8_t> groundCells() const;
 
   const GridGeometry & geometry() const {return geometry_;}
 
@@ -70,6 +71,7 @@ private:
   std::vector<float> minHeights_;
   std::vector<float> maxHeights_;
   std::vector<std::uint16_t> pointCounts_;
+  std::vector<std::uint16_t> groundCounts_;
   std::vector<std::uint8_t> scanHits_;
 };
 
