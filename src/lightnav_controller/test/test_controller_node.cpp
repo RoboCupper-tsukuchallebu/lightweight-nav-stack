@@ -329,3 +329,21 @@ TEST_F(ControllerNodeAvoidWiring, RuntimeChangesPreserveAvoidanceAndPath) {
   spinFor(std::chrono::milliseconds(200), true);
   EXPECT_EQ(last_status_->active_layer, lightnav_msgs::msg::FollowStatus::LAYER_AVOID);
 }
+
+TEST_F(ControllerNodeAvoidWiring, ParameterServiceValidatesEachValueInOrder) {
+  auto client = std::make_shared<rclcpp::AsyncParametersClient>(helper_, "/controller_node");
+  ASSERT_TRUE(client->wait_for_service(std::chrono::seconds(5)));
+  auto future = client->set_parameters({rclcpp::Parameter("v_max", 0.9),
+                                        rclcpp::Parameter("v_slow", 0.8),
+                                        rclcpp::Parameter("arc_step_m", 1.0)});
+  ASSERT_EQ(executor_.spin_until_future_complete(future, std::chrono::seconds(5)),
+            rclcpp::FutureReturnCode::SUCCESS);
+  const auto results = future.get();
+  ASSERT_EQ(results.size(), 3u);
+  EXPECT_TRUE(results[0].successful);
+  EXPECT_TRUE(results[1].successful);
+  EXPECT_FALSE(results[2].successful);
+  EXPECT_FALSE(results[2].reason.empty());
+  EXPECT_DOUBLE_EQ(node_->get_parameter("v_max").as_double(), 0.9);
+  EXPECT_DOUBLE_EQ(node_->get_parameter("v_slow").as_double(), 0.8);
+}
