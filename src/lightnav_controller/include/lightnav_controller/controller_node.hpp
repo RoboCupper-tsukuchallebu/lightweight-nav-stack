@@ -170,6 +170,7 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
     avoid_parameters.k_end_per_s = follow_parameters.k_end_per_s;
     avoid_layer_ = std::make_unique<ArcAvoidLayer>(avoid_parameters);
     last_grid_.reset();
+    last_raw_grid_.reset();
     last_pose_.reset();
     last_obstacle_status_.reset();
 
@@ -192,6 +193,9 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
         [this](lightnav_msgs::msg::ObstacleStatus::ConstSharedPtr message) {
           last_obstacle_status_ = ReceivedObstacleStatus{*message, now()};
         });
+    raw_grid_subscription_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
+        "/lightnav/local_grid_raw", rclcpp::QoS(1).reliable(),
+        [this](nav_msgs::msg::OccupancyGrid::ConstSharedPtr message) { onGrid(*message, true); });
     grid_subscription_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
         "/lightnav/local_grid", rclcpp::QoS(1).reliable(),
         [this](nav_msgs::msg::OccupancyGrid::ConstSharedPtr message) { onGrid(*message); });
@@ -347,6 +351,7 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
     pose_subscription_.reset();
     obstacle_subscription_.reset();
     grid_subscription_.reset();
+    raw_grid_subscription_.reset();
     marker_publisher_.reset();
     command_publisher_.reset();
     status_publisher_.reset();
@@ -361,13 +366,15 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
   struct ReceivedGrid {
     LocalGrid grid;
     rclcpp::Time received_at;
+    builtin_interfaces::msg::Time stamp;
   };
   struct ReceivedObstacleStatus {
     lightnav_msgs::msg::ObstacleStatus message;
     rclcpp::Time received_at;
   };
 
-  void onGrid(const nav_msgs::msg::OccupancyGrid& message) {
+  void onGrid(const nav_msgs::msg::OccupancyGrid& message, bool raw = false) {
+    auto& destination = raw ? last_raw_grid_ : last_grid_;
     const auto& orientation = message.info.origin.orientation;
     const bool is_unrotated = std::fabs(orientation.x) < 1e-6 && std::fabs(orientation.y) < 1e-6 &&
                               std::fabs(orientation.z) < 1e-6 && std::fabs(orientation.w - 1.0) < 1e-6;
@@ -376,7 +383,7 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
         !std::isfinite(message.info.origin.position.y)) {
       RCLCPP_WARN(get_logger(), "rejected local_grid: need frame %s, unrotated finite origin",
                   grid_frame_.c_str());
-      last_grid_.reset();
+      destination.reset();
       return;
     }
     LocalGrid grid;
@@ -386,12 +393,14 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
     grid.origin_x_m = message.info.origin.position.x;
     grid.origin_y_m = message.info.origin.position.y;
     grid.cells = message.data;
-    if (grid.resolution_m <= 0.0 || grid.cells.size() != grid.width_cells * grid.height_cells) {
+    if (grid.resolution_m <= 0.0 || grid.width_cells == 0 || grid.height_cells == 0 ||
+        grid.cells.size() != grid.width_cells * grid.height_cells ||
+        std::any_of(grid.cells.begin(), grid.cells.end(), [](auto cell) { return cell != 0 && cell != 100; })) {
       RCLCPP_WARN(get_logger(), "ignored malformed local_grid");
-      last_grid_.reset();
+      destination.reset();
       return;
     }
-    last_grid_ = ReceivedGrid{std::move(grid), now()};
+    destination = ReceivedGrid{std::move(grid), now(), message.header.stamp};
   }
 
   void onPath(const lightnav_msgs::msg::PathWithId& message) {
@@ -443,12 +452,24 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
       }
       follow_result = follow_layer_->compute(pose, follow_inputs);
       arbitration_input.follow = follow_result.output;
+      const LocalGrid* raw_grid = nullptr;
+      if (is_grid_fresh && last_raw_grid_ &&
+          (current_time - last_raw_grid_->received_at).seconds() >= 0.0 &&
+          (current_time - last_raw_grid_->received_at).seconds() <= timeouts_.grid_timeout_s &&
+          last_raw_grid_->stamp == last_grid_->stamp &&
+          last_raw_grid_->grid.width_cells == last_grid_->grid.width_cells &&
+          last_raw_grid_->grid.height_cells == last_grid_->grid.height_cells &&
+          last_raw_grid_->grid.resolution_m == last_grid_->grid.resolution_m &&
+          last_raw_grid_->grid.origin_x_m == last_grid_->grid.origin_x_m &&
+          last_raw_grid_->grid.origin_y_m == last_grid_->grid.origin_y_m) {
+        raw_grid = &last_raw_grid_->grid;
+      }
       arbitration_input.avoid = avoid_layer_->compute(AvoidContext{
           pose, follow_layer_->pathPoints(), follow_result.closest_index,
           arbitration_input.is_grid_fresh, is_grid_fresh ? &last_grid_->grid : nullptr,
           current_time.seconds(),
           follow_result.remaining_distance_m, follow_inputs.is_stop_zone_occupied,
-          follow_inputs.is_obstacle_status_fresh});
+          follow_inputs.is_obstacle_status_fresh, raw_grid});
     }
     const bool marker_active = arcMarkersActive(is_pose_fresh, arbitration_input.avoid.is_asserted);
     const auto marker_time = std::chrono::steady_clock::now().time_since_epoch();
@@ -511,6 +532,7 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
   FreshnessTimeouts timeouts_;
   std::string grid_frame_;
   std::optional<ReceivedGrid> last_grid_;
+  std::optional<ReceivedGrid> last_raw_grid_;
   std::optional<ReceivedPose> last_pose_;
   std::optional<ReceivedObstacleStatus> last_obstacle_status_;
   double arc_markers_rate_hz_{0.0};
@@ -521,6 +543,7 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr pose_subscription_;
   rclcpp::Subscription<lightnav_msgs::msg::ObstacleStatus>::SharedPtr obstacle_subscription_;
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr grid_subscription_;
+  rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr raw_grid_subscription_;
   rclcpp_lifecycle::LifecyclePublisher<lightnav_msgs::msg::VelocityCommand>::SharedPtr
       command_publisher_;
   rclcpp_lifecycle::LifecyclePublisher<lightnav_msgs::msg::FollowStatus>::SharedPtr

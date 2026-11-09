@@ -65,7 +65,8 @@ std::vector<ArcCandidate> evaluateArcCandidates(const LocalGrid& grid, const Pos
                                                 const std::vector<Point2D>& path_points,
                                                 std::size_t closest_index,
                                                 double previous_curvature_per_m,
-                                                const AvoidParameters& parameters);
+                                                const AvoidParameters& parameters,
+                                                const LocalGrid* raw_grid = nullptr);
 
 // Lowest-score feasible candidate; nullopt when none is feasible.
 std::optional<ArcCandidate> selectBestCandidate(const std::vector<ArcCandidate>& candidates);
@@ -80,6 +81,7 @@ struct AvoidContext {
   double remaining_distance_m{std::numeric_limits<double>::infinity()};
   bool is_stop_zone_occupied{false};
   bool is_obstacle_status_fresh{true};
+  const LocalGrid* raw_grid{nullptr};
 };
 
 // Priority 1 layer.

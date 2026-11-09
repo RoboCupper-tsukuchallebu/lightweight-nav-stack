@@ -128,7 +128,7 @@ std::vector<ArcCandidate> evaluateArcCandidates(const LocalGrid& grid, const Pos
                                                 const std::vector<Point2D>& path_points,
                                                 std::size_t closest_index,
                                                 double previous_curvature_per_m,
-                                                const AvoidParameters& parameters) {
+                                                const AvoidParameters& parameters, const LocalGrid* raw_grid) {
   std::vector<ArcCandidate> candidates;
   if (parameters.arc_candidate_count < 1 || path_points.empty() ||
       !std::isfinite(grid.resolution_m) || grid.resolution_m <= 0.0 ||
@@ -143,7 +143,8 @@ std::vector<ArcCandidate> evaluateArcCandidates(const LocalGrid& grid, const Pos
       path_points, first_index, parameters.arc_length_m + 2.0 * parameters.max_path_deviation_m);
   const Point2D target = pathPointAhead(path_points, closest_index, parameters.arc_length_m);
   candidates.reserve(static_cast<std::size_t>(parameters.arc_candidate_count));
-  const double spacing_m = grid.resolution_m / 2.0;
+  const LocalGrid& footprint_grid = raw_grid != nullptr ? *raw_grid : grid;
+  const double spacing_m = footprint_grid.resolution_m / 2.0;
   const int forward_steps = static_cast<int>(std::ceil(parameters.stop_zone_x_m / spacing_m));
   const int lateral_steps = static_cast<int>(std::ceil(parameters.stop_zone_y_half_m / spacing_m));
 
@@ -159,7 +160,7 @@ std::vector<ArcCandidate> evaluateArcCandidates(const LocalGrid& grid, const Pos
     for (double travelled_m = parameters.arc_step_m;
          travelled_m <= parameters.arc_length_m + 1e-9; travelled_m += parameters.arc_step_m) {
       const Point2D sample = arcPointInBody(candidate.curvature_per_m, travelled_m);
-      bool occupied = false;
+      bool occupied = grid.isOccupiedInBody(sample.x_m, sample.y_m);
       // Scan the forward rectangular stop zone in the orientation of this arc.
       // Half-cell spacing avoids gaps when the rectangle is rotated.
       const double heading_rad = candidate.curvature_per_m * travelled_m;
@@ -170,7 +171,7 @@ std::vector<ArcCandidate> evaluateArcCandidates(const LocalGrid& grid, const Pos
         for (int lateral_index = -lateral_steps; lateral_index <= lateral_steps && !occupied; ++lateral_index) {
           const double lateral_m = std::clamp(lateral_index * spacing_m,
                                                -parameters.stop_zone_y_half_m, parameters.stop_zone_y_half_m);
-          occupied = grid.isOccupiedInBody(sample.x_m + cosine * forward_m - sine * lateral_m,
+          occupied = footprint_grid.isOccupiedInBody(sample.x_m + cosine * forward_m - sine * lateral_m,
                                            sample.y_m + sine * forward_m + cosine * lateral_m);
         }
       }
@@ -274,7 +275,7 @@ LayerOutput ArcAvoidLayer::compute(const AvoidContext& context) {
 
   candidates_ = evaluateArcCandidates(
       grid, context.pose, context.path_points, context.closest_index, previous_curvature_per_m_,
-      parameters_);
+      parameters_, context.raw_grid);
   const auto best = selectBestCandidate(candidates_);
   selected_candidate_ = best;
   LayerOutput output;
