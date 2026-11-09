@@ -85,6 +85,17 @@ TEST(EvaluateArcCandidates, OccupiedCellOnArcRejectsIt) {
   EXPECT_NE(candidates[7].curvature_per_m, best->curvature_per_m);
 }
 
+TEST(EvaluateArcCandidates, RejectsOccupiedGridBesideArcWithinStopZoneMargin) {
+  LocalGrid grid = makeEmptyGrid();
+  fillRectangle(grid, 1.0, 1.1, 0.15, 0.19);
+  AvoidParameters parameters = makeAvoidParameters();
+  EXPECT_TRUE(evaluateArcCandidates(grid, kOrigin, makeStraightPath(), 0, 0.0, parameters)[7].is_feasible);
+  parameters.stop_zone_margin_m = stopZoneMargin(0.3, 0.2, 0.3);
+  EXPECT_TRUE(evaluateArcCandidates(grid, kOrigin, makeStraightPath(), 0, 0.0, parameters)[7].is_feasible);
+  parameters.stop_zone_margin_m = stopZoneMargin(0.3, 0.6, 0.3);
+  EXPECT_FALSE(evaluateArcCandidates(grid, kOrigin, makeStraightPath(), 0, 0.0, parameters)[7].is_feasible);
+}
+
 TEST(EvaluateArcCandidates, ArcsEndingBeyondMaxPathDeviationAreRejected) {
   AvoidParameters parameters = makeAvoidParameters();
   parameters.max_path_deviation_m = 0.2;

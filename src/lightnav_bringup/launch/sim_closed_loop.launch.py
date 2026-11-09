@@ -27,7 +27,7 @@ def launch_setup(context):
         "obstacle_monitor": {**production["obstacle_monitor"]["ros__parameters"], "base_frame": frame},
         "pose_adapter_node": {"odom_topic": "/sim/odom", "expected_frame_id": "world",
                               "body_to_base_xyz_rpy": [-0.1, 0.0, -0.7, 0.0, 0.0, 0.0]},
-        "controller_node": {**production["controller_node"]["ros__parameters"], "grid_frame": frame, "max_path_deviation_m": float(LaunchConfiguration("max_path_deviation_m").perform(context))},
+        "controller_node": {**production["controller_node"]["ros__parameters"], **robot_launch.controller_obstacle_parameters(production["obstacle_monitor"]["ros__parameters"]), "grid_frame": frame, "max_path_deviation_m": float(LaunchConfiguration("max_path_deviation_m").perform(context))},
     }
     scene = {"obstacles": [4.0, 0.3, 0.5]} if scenario == "avoid" else {"walls": [4.0, -1.5, 4.0, 1.5]}
     entities = [Node(package="lightnav_sim", executable="kinematic_sim_node", output="screen",

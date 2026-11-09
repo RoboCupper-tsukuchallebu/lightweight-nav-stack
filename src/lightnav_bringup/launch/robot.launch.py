@@ -7,6 +7,8 @@ Launch arguments:
                 following waypoints.
 """
 
+import yaml
+
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
@@ -40,7 +42,7 @@ def build_lifecycle_entities(package, executable, node_name, robot_config):
         name=node_name,
         namespace="",
         output="screen",
-        parameters=[robot_config],
+        parameters=robot_config if isinstance(robot_config, list) else [robot_config],
     )
     activate_after_configure = RegisterEventHandler(
         OnStateTransition(
@@ -64,17 +66,29 @@ def build_lifecycle_entities(package, executable, node_name, robot_config):
     return [node, activate_after_configure, configure]
 
 
+def controller_obstacle_parameters(monitor_parameters):
+    # Keep defaults in sync with obstacle_grid.hpp when the YAML omits them.
+    return {name: float(monitor_parameters.get(name, default)) for name, default in (
+        ("stop_zone_x_m", 1.0), ("stop_zone_y_half_m", 0.4), ("inflation_radius_m", 0.5))}
+
+
 def launch_setup(context, *args, **kwargs):
     safety_gate_value = LaunchConfiguration("safety_gate").perform(context).strip().lower()
     if safety_gate_value not in ("true", "false"):
         raise RuntimeError(f"safety_gate must be 'true' or 'false', got '{safety_gate_value}'")
+    config_path = LaunchConfiguration("robot_config").perform(context)
+    with open(config_path) as config_file:
+        config = yaml.safe_load(config_file) or {}
+    monitor_parameters = config.get("obstacle_monitor", {}).get("ros__parameters", {})
+    controller_parameters = controller_obstacle_parameters(monitor_parameters)
     robot_config = ParameterFile(LaunchConfiguration("robot_config"), allow_substs=False)
     nodes = list(NAV_NODES)
     if safety_gate_value == "true":
         nodes.append(SAFETY_GATE_NODE)
     entities = []
     for package, executable, node_name in nodes:
-        entities.extend(build_lifecycle_entities(package, executable, node_name, robot_config))
+        parameters = [robot_config, controller_parameters] if node_name == "controller_node" else robot_config
+        entities.extend(build_lifecycle_entities(package, executable, node_name, parameters))
     return entities
 
 

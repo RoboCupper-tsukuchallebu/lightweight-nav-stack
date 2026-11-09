@@ -37,6 +37,11 @@ double yawFromQuaternion(const geometry_msgs::msg::Quaternion& quaternion) {
 }  // namespace
 
 class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
+  double configuredStopZoneMargin() const {
+    return stopZoneMargin(get_parameter("stop_zone_x_m").as_double(),
+                          get_parameter("stop_zone_y_half_m").as_double(),
+                          get_parameter("inflation_radius_m").as_double());
+  }
  public:
   explicit ControllerNode(const rclcpp::NodeOptions& options = rclcpp::NodeOptions())
       : rclcpp_lifecycle::LifecycleNode("controller_node", options) {
@@ -45,6 +50,9 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
     structural.description = "Structural parameter fixed at construction";
     declare_parameter("grid_frame", "base_link", structural);
     declare_parameter("control_hz", 20.0, structural);
+    declare_parameter("stop_zone_x_m", 1.0, structural);
+    declare_parameter("stop_zone_y_half_m", 0.4, structural);
+    declare_parameter("inflation_radius_m", 0.5, structural);
     declare_parameter("lookahead_m", 1.0);
     declare_parameter("search_window_m", 5.0);
     declare_parameter("v_max", 0.6);
@@ -99,7 +107,7 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
       return CallbackReturn::FAILURE;
     }
     const std::vector<std::string> positive_names = {
-        "control_hz", "lookahead_m", "search_window_m", "v_max", "v_min", "v_slow",
+        "control_hz", "stop_zone_x_m", "stop_zone_y_half_m", "lookahead_m", "search_window_m", "v_max", "v_min", "v_slow",
         "w_max", "w_rotate", "k_end", "goal_tolerance_m", "rotate_in_place_heading_rad",
         "pose_timeout_s", "obstacle_status_timeout_s", "grid_timeout_s",
         "v_avoid", "arc_length_m", "arc_step_m", "w_path", "w_heading",
@@ -112,6 +120,11 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
                      name.c_str(), value);
         return CallbackReturn::FAILURE;
       }
+    }
+    const double inflation_radius_m = get_parameter("inflation_radius_m").as_double();
+    if (!std::isfinite(inflation_radius_m) || inflation_radius_m < 0.0) {
+      RCLCPP_ERROR(get_logger(), "parameter inflation_radius_m must be finite and nonnegative");
+      return CallbackReturn::FAILURE;
     }
     FollowParameters follow_parameters;
     follow_parameters.lookahead_m = get_parameter("lookahead_m").as_double();
@@ -130,6 +143,7 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
 
     follow_layer_ = std::make_unique<FollowLayer>(follow_parameters);
     AvoidParameters avoid_parameters;
+    avoid_parameters.stop_zone_margin_m = configuredStopZoneMargin();
     avoid_parameters.v_avoid_mps = get_parameter("v_avoid").as_double();
     avoid_parameters.w_max_rps = follow_parameters.w_max_rps;
     avoid_parameters.arc_candidate_count = static_cast<int>(get_parameter("arc_candidate_count").as_int());
@@ -290,6 +304,7 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
       follow.goal_tolerance_m = get_parameter("goal_tolerance_m").as_double();
       follow.rotate_in_place_heading_rad = get_parameter("rotate_in_place_heading_rad").as_double();
       AvoidParameters avoid;
+      avoid.stop_zone_margin_m = configuredStopZoneMargin();
       avoid.v_avoid_mps = get_parameter("v_avoid").as_double();
       avoid.w_max_rps = follow.w_max_rps;
       avoid.arc_candidate_count = static_cast<int>(get_parameter("arc_candidate_count").as_int());

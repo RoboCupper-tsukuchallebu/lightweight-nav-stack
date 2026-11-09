@@ -30,10 +30,18 @@ class TestClosedLoop(ClosedLoopTest):
                              and abs(message.angular.z) < 1e-6)
             self.assertLessEqual(zero_time - stop_time, 0.5)
         if not any(item.is_stop_zone_occupied for item in self.obstacles):
-            # Verify a stationary command while blocked, not just a status flag.
-            self.assertTrue(self.commands)
-            self.assertAlmostEqual(self.commands[-1][1].linear.x, 0.0, delta=1e-6)
-            self.assertAlmostEqual(self.commands[-1][1].angular.z, 0.0, delta=1e-6)
+            # Observe a full second of zero commands while the obstacle remains outside.
+            start = self.commands[-1][0]
+            status_start = len(self.status)
+            self.wait_for(lambda: self.commands[-1][0] >= start + 1.0)
+            samples = [(timestamp, command) for timestamp, command in self.commands if timestamp >= start]
+            self.assertGreaterEqual(len(samples), 3)
+            self.assertFalse(any(item.is_stop_zone_occupied for item in self.obstacles))
+            self.assertGreaterEqual(len(self.status[status_start:]), 3)
+            self.assertTrue(all(item.state == FollowStatus.BLOCKED or item.is_stuck
+                                for item in self.status[status_start:]))
+            self.assertTrue(all(abs(command.linear.x) < 1e-6 and abs(command.angular.z) < 1e-6
+                                for _, command in samples))
         blocked = next(item for item in self.status if item.state == FollowStatus.BLOCKED)
         stuck = next(item for item in self.status if item.is_stuck)
         def stamp_seconds(item):

@@ -132,6 +132,7 @@ std::vector<ArcCandidate> evaluateArcCandidates(const LocalGrid& grid, const Pos
                                                 const AvoidParameters& parameters) {
   std::vector<ArcCandidate> candidates;
   if (parameters.arc_candidate_count < 1 || path_points.empty() ||
+      !std::isfinite(grid.resolution_m) || grid.resolution_m <= 0.0 ||
       !std::isfinite(parameters.arc_length_m) || parameters.arc_length_m <= 0.0 ||
       !std::isfinite(parameters.arc_step_m) || parameters.arc_step_m <= 0.0 ||
       !std::isfinite(parameters.max_path_deviation_m) || parameters.max_path_deviation_m <= 0.0) {
@@ -156,7 +157,21 @@ std::vector<ArcCandidate> evaluateArcCandidates(const LocalGrid& grid, const Pos
     for (double travelled_m = parameters.arc_step_m;
          travelled_m <= parameters.arc_length_m + 1e-9; travelled_m += parameters.arc_step_m) {
       const Point2D sample = arcPointInBody(candidate.curvature_per_m, travelled_m);
-      if (grid.isOccupiedInBody(sample.x_m, sample.y_m) ||
+      bool occupied = false;
+      // Check the inflated grid around each arc point for the remaining
+      // distance to the furthest corner of the rectangular stop zone.
+      const double spacing_m = grid.resolution_m / 2.0;
+      const int steps = static_cast<int>(std::ceil(parameters.stop_zone_margin_m / spacing_m));
+      for (int x_index = -steps; x_index <= steps && !occupied; ++x_index) {
+        for (int y_index = -steps; y_index <= steps && !occupied; ++y_index) {
+          const double dx = x_index * spacing_m;
+          const double dy = y_index * spacing_m;
+          if (std::hypot(dx, dy) <= parameters.stop_zone_margin_m + 1e-9) {
+            occupied = grid.isOccupiedInBody(sample.x_m + dx, sample.y_m + dy);
+          }
+        }
+      }
+      if (occupied ||
           distanceToPath(toWorld(pose, sample), path_points, first_index, last_index) >
               parameters.max_path_deviation_m) {
         candidate.is_feasible = false;
