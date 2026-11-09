@@ -297,15 +297,15 @@ TEST(GlobalInitializationSearch, G6WindowLimitsSearchOnLargeMap) {
   world.add_box({8.0, 3.4}, {8.5, 4.2});
   PointList map = world.sample_map(0.15);
   const PointList room = map;
-  for (const auto& point : room) map.push_back(point + Eigen::Vector3f(60, 0, 0));
+  for (const auto& point : room) map.push_back(point + Eigen::Vector3f(48, 36, 0));
   Eigen::Isometry3d sensor = Eigen::Isometry3d::Identity();
   sensor.translation() = Eigen::Vector3d(1, 0, 0.5);
   const auto timed = world.synthesize_scan([&](double) { return sensor; }, 0.0, 0.1, true, 360, 8);
   PointList scan;
   for (const auto& point : timed) scan.push_back(point.position + Eigen::Vector3f(0, 0, 0.5f));
   GlobalInitializationSearchParameters parameters;
-  parameters.minimum = {0, -20};
-  parameters.maximum = {70, 20};
+  parameters.minimum = {0, -2};
+  parameters.maximum = {58.5, 42};
   parameters.maximum_range_m = 12;
   std::atomic<bool> abort{false};
   const auto whole = search_global_initialization(map, scan, parameters, abort);
