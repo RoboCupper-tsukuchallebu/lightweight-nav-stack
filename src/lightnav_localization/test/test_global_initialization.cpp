@@ -404,3 +404,50 @@ TEST(GlobalInitializationSearch, G10MeasuresSearchOn2500SquareMetres) {
   for (double duration : result.target_seconds) std::cout << "G10 target=" << duration << std::endl;
   for (double duration : result.matching_seconds) std::cout << "G10 matching=" << duration << std::endl;
 }
+
+TEST(GlobalInitializationSearch, G11RejectsDuplicatedRoomWithDecoyBoxes) {
+  using lightnav_localization::testing::SyntheticWorld;
+  SyntheticWorld world({{0.0, 0.0}, {5.0, 0.0}});
+  world.add_box({1.0, 0.5}, {1.7, 1.4});
+  PointList map = world.sample_map(0.15);
+  const PointList room = map;
+  for (const auto& point : room) map.push_back(point + Eigen::Vector3f(8.0f, 0.0f, 0.0f));
+  // Additional short obstacles create competing 2D features between the rooms.
+  SyntheticWorld decoy({{16.0, 0.0}, {20.0, 0.0}});
+  decoy.add_box({17.0, 0.5}, {17.7, 1.4});
+  for (const auto& point : decoy.sample_map(0.15)) map.push_back(point);
+  Eigen::Isometry3d sensor = Eigen::Isometry3d::Identity();
+  sensor.translation() = Eigen::Vector3d(2.5, 0.0, 0.5);
+  const auto timed = world.synthesize_scan([&](double) { return sensor; }, 0.0, 0.1, true, 360, 8);
+  PointList scan;
+  for (const auto& point : timed) scan.push_back(point.position + Eigen::Vector3f(0, 0, 0.5f));
+  GlobalInitializationSearchParameters parameters;
+  parameters.minimum = {0.0, -2.0};
+  parameters.maximum = {20.0, 2.0};
+  parameters.maximum_range_m = 6.0;
+  std::atomic<bool> abort{false};
+  const auto result = search_global_initialization(map, scan, parameters, abort);
+  EXPECT_FALSE(result.decision.accepted);
+  EXPECT_EQ(result.decision.error, "ambiguous");
+}
+
+TEST(GlobalInitializationSearch, G12RejectsRoomAbsentFromMap) {
+  using lightnav_localization::testing::SyntheticWorld;
+  SyntheticWorld map_world({{0.0, 0.0}, {5.0, 0.0}});
+  SyntheticWorld scan_world({{0.0, 0.0}, {12.0, 0.0}}, false);
+  const auto map = map_world.sample_map(0.15);
+  Eigen::Isometry3d sensor = Eigen::Isometry3d::Identity();
+  sensor.translation() = Eigen::Vector3d(2.5, 0.0, 0.5);
+  const auto timed = scan_world.synthesize_scan([&](double) { return sensor; }, 0.0, 0.1, true, 360, 8);
+  PointList scan;
+  for (const auto& point : timed) scan.push_back(point.position + Eigen::Vector3f(0, 0, 0.5f));
+  GlobalInitializationSearchParameters parameters;
+  parameters.minimum = {0.0, -2.0};
+  parameters.maximum = {5.0, 2.0};
+  parameters.maximum_range_m = 8.0;
+  std::atomic<bool> abort{false};
+  const auto result = search_global_initialization(map, scan, parameters, abort);
+  EXPECT_FALSE(result.decision.accepted);
+  EXPECT_TRUE(result.decision.error == "low_score" || result.decision.error == "ambiguous")
+      << result.decision.error;
+}
