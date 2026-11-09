@@ -259,7 +259,7 @@ TEST_F(ControllerNodeLifecycle, TuningParametersAcceptBothDirections) {
   configureAndActivate();
   for (const auto& name : {"lookahead_m", "search_window_m", "v_max", "v_slow", "w_max",
                            "w_rotate", "v_avoid", "k_end", "goal_tolerance_m",
-                           "rotate_in_place_heading_rad", "w_path", "w_heading", "w_smooth",
+                           "rotate_in_place_heading_threshold_rad", "w_path", "w_heading", "w_smooth",
                            "stuck_timeout_s"}) {
     SCOPED_TRACE(name);
     const double initial = node_->get_parameter(name).as_double();

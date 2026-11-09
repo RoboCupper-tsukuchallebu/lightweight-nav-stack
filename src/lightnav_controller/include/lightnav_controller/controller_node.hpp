@@ -56,7 +56,8 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
     declare_parameter("w_rotate", 0.3);
     declare_parameter("k_end", 0.5);
     declare_parameter("goal_tolerance_m", 0.3);
-    declare_parameter("rotate_in_place_heading_rad", 1.0);
+    declare_parameter("rotate_in_place_heading_threshold_rad", 1.2);
+    declare_parameter("stuck_rotate_after_s", 2.0);
     declare_parameter("pose_timeout_s", 0.5);
     declare_parameter("obstacle_status_timeout_s", 0.5);
     declare_parameter("grid_timeout_s", 0.5);
@@ -107,7 +108,7 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
     }
     const std::vector<std::string> positive_names = {
         "control_hz", "lookahead_m", "search_window_m", "v_max", "v_min", "v_slow",
-        "w_max", "w_rotate", "k_end", "goal_tolerance_m", "rotate_in_place_heading_rad",
+        "w_max", "w_rotate", "k_end", "goal_tolerance_m", "rotate_in_place_heading_threshold_rad",
         "pose_timeout_s", "obstacle_status_timeout_s", "grid_timeout_s",
         "v_avoid", "arc_length_m", "arc_step_m", "w_path", "w_heading",
         "w_smooth", "avoid_trigger_m", "avoid_release_m", "rejoin_distance_m",
@@ -131,7 +132,7 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
     follow_parameters.k_end_per_s = get_parameter("k_end").as_double();
     follow_parameters.goal_tolerance_m = get_parameter("goal_tolerance_m").as_double();
     follow_parameters.rotate_in_place_heading_rad =
-        get_parameter("rotate_in_place_heading_rad").as_double();
+        get_parameter("rotate_in_place_heading_threshold_rad").as_double();
     timeouts_.pose_timeout_s = get_parameter("pose_timeout_s").as_double();
     timeouts_.obstacle_status_timeout_s = get_parameter("obstacle_status_timeout_s").as_double();
 
@@ -155,6 +156,8 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
     avoid_parameters.rejoin_distance_m = get_parameter("rejoin_distance_m").as_double();
     avoid_parameters.avoid_release_hold_s = get_parameter("avoid_release_hold_s").as_double();
     avoid_parameters.stuck_timeout_s = get_parameter("stuck_timeout_s").as_double();
+    avoid_parameters.stuck_rotate_after_s = get_parameter("stuck_rotate_after_s").as_double();
+    avoid_parameters.w_rotate_rps = follow_parameters.w_rotate_rps;
     timeouts_.grid_timeout_s = get_parameter("grid_timeout_s").as_double();
     avoid_parameters.goal_tolerance_m = follow_parameters.goal_tolerance_m;
     avoid_parameters.k_end_per_s = follow_parameters.k_end_per_s;
@@ -297,7 +300,7 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
       follow.w_rotate_rps = get_parameter("w_rotate").as_double();
       follow.k_end_per_s = get_parameter("k_end").as_double();
       follow.goal_tolerance_m = get_parameter("goal_tolerance_m").as_double();
-      follow.rotate_in_place_heading_rad = get_parameter("rotate_in_place_heading_rad").as_double();
+      follow.rotate_in_place_heading_rad = get_parameter("rotate_in_place_heading_threshold_rad").as_double();
       AvoidParameters avoid;
       avoid.v_avoid_mps = get_parameter("v_avoid").as_double();
       avoid.w_max_rps = follow.w_max_rps;
@@ -313,6 +316,8 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
       avoid.rejoin_distance_m = get_parameter("rejoin_distance_m").as_double();
       avoid.avoid_release_hold_s = get_parameter("avoid_release_hold_s").as_double();
       avoid.stuck_timeout_s = get_parameter("stuck_timeout_s").as_double();
+      avoid.stuck_rotate_after_s = get_parameter("stuck_rotate_after_s").as_double();
+      avoid.w_rotate_rps = follow.w_rotate_rps;
       avoid.goal_tolerance_m = follow.goal_tolerance_m;
       avoid.k_end_per_s = follow.k_end_per_s;
       FreshnessTimeouts timeouts;
@@ -438,6 +443,9 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
           follow_result.remaining_distance_m, follow_inputs.is_stop_zone_occupied,
           follow_inputs.is_obstacle_status_fresh});
     }
+    if (!is_pose_fresh) {
+      avoid_layer_->resetWaiting();
+    }
     const bool marker_active = arcMarkersActive(is_pose_fresh, arbitration_input.avoid.is_asserted);
     const auto marker_time = std::chrono::steady_clock::now().time_since_epoch();
     if (marker_publisher_ && marker_rate_.ready(
@@ -473,6 +481,7 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
     status.remaining_distance_m = static_cast<float>(follow_result.remaining_distance_m);
     status.path_deviation_m = static_cast<float>(follow_result.path_deviation_m);
     status.commanded_linear_mps = static_cast<float>(result.twist.linear_mps);
+    status.commanded_angular_rps = static_cast<float>(result.twist.angular_rps);
     status.is_stuck = result.reason == StopReason::kStuck;
     status_publisher_->publish(status);
   }
@@ -485,12 +494,12 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
   const std::map<std::string, bool> positive_names_ = {
       {"lookahead_m", true}, {"search_window_m", true}, {"v_max", true}, {"v_min", true},
       {"v_slow", true}, {"w_max", true}, {"w_rotate", true}, {"k_end", true},
-      {"goal_tolerance_m", true}, {"rotate_in_place_heading_rad", true},
+      {"goal_tolerance_m", true}, {"rotate_in_place_heading_threshold_rad", true},
       {"pose_timeout_s", true}, {"obstacle_status_timeout_s", true}, {"grid_timeout_s", true},
       {"v_avoid", true}, {"arc_length_m", true}, {"arc_step_m", true},
       {"max_path_deviation_m", true}, {"w_path", true}, {"w_heading", true}, {"w_smooth", true},
       {"avoid_trigger_m", true}, {"avoid_release_m", true}, {"rejoin_distance_m", true},
-      {"avoid_release_hold_s", true}, {"stuck_timeout_s", true}};
+      {"avoid_release_hold_s", true}, {"stuck_timeout_s", true}, {"stuck_rotate_after_s", true}};
   std::map<std::string, double> baseline_;
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr validation_handle_;
   rclcpp::node_interfaces::PostSetParametersCallbackHandle::SharedPtr apply_handle_;
