@@ -2,12 +2,18 @@
 
 #include <Eigen/Geometry>
 #include <memory>
+#include <string>
 
 #include "lightnav_localization/pcd_io.hpp"
 
 namespace lightnav_localization {
 
 struct MatcherParameters {
+  std::string method = "gicp";
+  double vgicp_voxel_m = 0.5;
+  bool vgicp_two_stage = false;
+  double vgicp_coarse_voxel_m = 2.0;
+  double vgicp_coarse_correspondence_m = 2.0;
   double max_correspondence_distance_m = 1.0;
   int max_iterations = 30;
   double inlier_ratio_min = 0.5;
@@ -29,7 +35,7 @@ struct MatchResult {
 class PreparedTarget {
  public:
   PreparedTarget() = default;
-  explicit PreparedTarget(const PointList& points);
+  explicit PreparedTarget(const PointList& points, const MatcherParameters& parameters = {});
   bool is_valid() const { return implementation_ != nullptr; }
 
   struct Implementation;  // holds small_gicp types; opaque to users of this header

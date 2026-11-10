@@ -102,6 +102,8 @@ params ファイル `docker/config/localization_indoor.yaml` で切り替える
 
 ## パラメータ
 
+W-1 は既定で無効。スリップ判定の根拠は LiDAR の照合だけなので、誤照合とスリップを区別できない。有効化には独立したスリップの根拠と検証用の bag が必要。
+
 既定値は `config/localization.yaml`。主なもの:
 
 | パラメータ | 既定 | 意味 |
@@ -114,11 +116,20 @@ params ファイル `docker/config/localization_indoor.yaml` で切り替える
 | `init_gps_max_std_m` / `init_scan_count` / `init_yaw_step_deg` | 3.0 / 3 / 15 | 初期位置合わせ |
 | `init_coarse_corr_m` / `init_fine_corr_m` / `init_inlier_ratio_min` | 2.0 / 0.5 / 0.6 | 初期 yaw 照合 |
 | `publish_tf` / `status_rate_hz` | true / 2.0 | |
+| `wheel_yaw_slip_threshold_rad` / `wheel_sigma_yaw_per_rad` / `wheel_sigma_yaw_per_m` | 0.0 / 0.1 / 0.01 | 既定では無効。閾値を正の値にすると、受理された LiDAR 照合と車輪のキーフレーム間の相対 yaw の差が閾値を超えた場合に限り、車輪 yaw の標準偏差をその差以上に広げる。それ以外は従来の式を使う |
+| `wheel_robust_kernel` / `wheel_robust_k` | huber / 8.0 | スリップと判定した車輪因子の白色化残差に適用する Huber または cauchy。地図・GPS の `huber_k` とは独立。σ を不一致の大きさまで広げるため白色化残差はおよそ 1σ 以下になり、カーネルは追加の保険で、現状ほぼ効かない。8.0 は暫定値 |
+| `lidar_odom_slip_gate_yaw_rad` | 0.0 | 既定では拡張ゲートは無効。既存ゲートより大きい値を設定すると有効になる。直進中・停止中とスリップを区別する独立の根拠がないため。有効にすると直進中に最大この値まで yaw の誤照合を通す。車輪 yaw レートが閾値未満の場合に既存ゲートとこの値の大きい方を使い、収束・inlier・並進ゲートも必要 |
+| `lidar_odom_slip_wheel_yaw_rate_rad_s` / `lidar_odom_slip_wheel_rate_window_s` | 0.05 / 0.05 | 拡張ゲートの車輪 yaw レート閾値（rad/s）と、その計測窓（秒、有限かつ正） |
 | `visualization_enabled` | true | `map_cloud` と `path` を出す。false で両方とも作らない |
 | `visualization_rate_hz` / `visualization_voxel_m` / `visualization_max_points` | 0.5 / 0.2 / 1000000 | プレビューの出力周期（ノードの時計）、点の間引き、点数の上限（超えた分は積まない） |
 | `path_min_step_m` / `path_max_poses` | 0.1 / 20000 | 軌跡に足す最小の移動量、最大の個数（超えたら古い方から捨てる） |
 | `window_s` / `huber_k` | 30.0 / 1.0 | 姿勢グラフ |
 | `voxel_size_m` / `keyframe_distance_m` / `keyframe_time_s` | 0.5 / 1.0 / 1.0 | LiDAR オドメトリ |
+| `map_match_method` | `gicp` | 事前地図照合の方式（`gicp` / `vgicp`） |
+| `map_vgicp_voxel_m` | 0.5 | VGICP の細段ボクセル幅（m） |
+| `map_vgicp_two_stage` | false | VGICP の粗密 2 段階照合を有効にする。粗段が未収束なら元の予測から細段を開始 |
+| `map_vgicp_coarse_voxel_m` / `map_vgicp_coarse_correspondence_m` | 2.0 / 2.0 | 粗段のボクセル幅 / 対応点距離の上限（m） |
+| `map_max_correspondence_distance_m` / `map_max_iterations` | 1.0 / 30 | GICP または VGICP 細段の対応点距離上限（m） / 各段の反復回数上限 |
 | `map_inlier_ratio_min` / `map_gate_translation_m` / `map_gate_rotation_rad` | 0.5 / 1.0 / 0.2 | 事前地図照合 |
 | `gps_std_m_by_status` | `[2.0, 1.0, 0.3]` | GST 無しの FIX / SBAS / GBAS |
 | `gps_min_status` | -1 | この `NavSatStatus` 未満の fix は `Localizer` に渡さない（-1 = 全部受ける）。`docker/config/robot.yaml` は 1（Float 以上）。Single（status 0）は初期化・mapping の原点・因子のどれにも使わず、棄却数にも数えない |
@@ -127,6 +138,8 @@ params ファイル `docker/config/localization_indoor.yaml` で切り替える
 | `correction_slew_mps` / `correction_slew_rps` / `large_correction_threshold_m` | 0.2 / 0.1 / 1.0 | 補正の平滑化 |
 | `tracking_window_s` / `lost_position_std_m` | 5.0 / 2.0 | 状態判定 |
 | `odom_only_max_distance_m` / `odom_only_max_s` / `drift_rate` | 50 / 60 / 0.02 | ODOM_ONLY の上限。**`mode: mapping` では無効**（この 2 つで LOST にしない。D5） |
+
+VGICP は対象点のボクセルと隣接する 26 ボクセルを探索するため、対応距離を大きくしても探索範囲はボクセル幅で制限される。VGICP のインライア率は距離条件を満たすボクセル対応がある入力点の割合で、GICP の点同士の対応率とは異なる。`map_inlier_ratio_min` は方式ごとに調整する。
 
 ## 診断とエラーの保持
 

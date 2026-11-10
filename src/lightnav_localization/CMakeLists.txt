@@ -39,6 +39,7 @@ add_library(lightnav_localization_core
   src/gps_input.cpp
   src/lidar_odometry.cpp
   src/initial_alignment.cpp
+  src/global_initialization.cpp
   src/point_cloud_extraction.cpp
   src/visualization.cpp
   src/localizer.cpp)
@@ -98,13 +99,14 @@ if(BUILD_TESTING)
   find_package(GTest REQUIRED)
   foreach(test_name pcd_io map_metadata pose_buffer deskew matcher performance pose_graph gps_input
                     corrector state_machine lidar_odometry localizer match_information
-                    performance_large initial_alignment point_cloud_extraction mapping
+                    performance_large initial_alignment global_initialization point_cloud_extraction mapping
                     visualization)
     add_executable(test_${test_name} test/test_${test_name}.cpp)
     target_link_libraries(test_${test_name} lightnav_localization_core GTest::gtest GTest::gtest_main)
     target_compile_options(test_${test_name} PRIVATE -Wall -Wextra -Werror)
     add_test(NAME ${test_name} COMMAND test_${test_name})
   endforeach()
+  target_include_directories(test_matcher SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/small_gicp/include)
 
   add_executable(test_localization_node test/test_localization_node.cpp)
   target_link_libraries(test_localization_node

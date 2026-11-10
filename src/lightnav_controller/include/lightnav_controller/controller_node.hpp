@@ -4,6 +4,8 @@
 #include <cmath>
 #include <limits>
 #include <memory>
+#include <map>
+#include <climits>
 #include <optional>
 #include <string>
 #include <vector>
@@ -11,6 +13,7 @@
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "nav_msgs/msg/occupancy_grid.hpp"
 #include "lightnav_controller/arbitrate.hpp"
+#include "lightnav_controller/arc_markers.hpp"
 #include "lightnav_controller/avoid_layer.hpp"
 #include "lightnav_controller/follow_layer.hpp"
 #include "lightnav_controller/freshness.hpp"
@@ -36,9 +39,14 @@ double yawFromQuaternion(const geometry_msgs::msg::Quaternion& quaternion) {
 
 class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
  public:
-  ControllerNode() : rclcpp_lifecycle::LifecycleNode("controller_node") {
-    declare_parameter("grid_frame", "base_link");
-    declare_parameter("control_hz", 20.0);
+  explicit ControllerNode(const rclcpp::NodeOptions& options = rclcpp::NodeOptions())
+      : rclcpp_lifecycle::LifecycleNode("controller_node", options) {
+    rcl_interfaces::msg::ParameterDescriptor structural;
+    structural.read_only = true;
+    structural.description = "Structural parameter fixed at construction";
+    declare_parameter("grid_frame", "base_link", structural);
+    declare_parameter("control_hz", 20.0, structural);
+    declare_parameter("arc_markers_rate_hz", 2.0, structural);
     declare_parameter("lookahead_m", 1.0);
     declare_parameter("search_window_m", 5.0);
     declare_parameter("v_max", 0.6);
@@ -48,7 +56,8 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
     declare_parameter("w_rotate", 0.3);
     declare_parameter("k_end", 0.5);
     declare_parameter("goal_tolerance_m", 0.3);
-    declare_parameter("rotate_in_place_heading_rad", 1.0);
+    declare_parameter("rotate_in_place_heading_threshold_rad", 1.2);
+    declare_parameter("stuck_rotate_after_s", 2.0);
     declare_parameter("pose_timeout_s", 0.5);
     declare_parameter("obstacle_status_timeout_s", 0.5);
     declare_parameter("grid_timeout_s", 0.5);
@@ -65,14 +74,31 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
     declare_parameter("rejoin_distance_m", 0.5);
     declare_parameter("avoid_release_hold_s", 1.0);
     declare_parameter("stuck_timeout_s", 10.0);
+    for (const auto& name : safety_names_) {
+      baseline_[name.first] = get_parameter(name.first).as_double();
+    }
+    validation_handle_ = add_on_set_parameters_callback(
+        [this](const std::vector<rclcpp::Parameter>& parameters) { return validateChange(parameters); });
+    apply_handle_ = add_post_set_parameters_callback(
+        [this](const std::vector<rclcpp::Parameter>& parameters) { applyChange(parameters); });
   }
 
   CallbackReturn on_configure(const rclcpp_lifecycle::State&) override {
+    const auto validation = validateValues({}, true);
+    if (!validation.empty()) {
+      RCLCPP_ERROR(get_logger(), "%s", validation.c_str());
+      return CallbackReturn::FAILURE;
+    }
     const double max_path_deviation_m = get_parameter("max_path_deviation_m").as_double();
     if (!std::isfinite(max_path_deviation_m) || max_path_deviation_m <= 0.0) {
       RCLCPP_ERROR(get_logger(),
                    "Specify max_path_deviation_m in the course-specific yaml; "
                    "the value must be finite and positive (got %f)", max_path_deviation_m);
+      return CallbackReturn::FAILURE;
+    }
+    arc_markers_rate_hz_ = get_parameter("arc_markers_rate_hz").as_double();
+    if (!std::isfinite(arc_markers_rate_hz_) || arc_markers_rate_hz_ < 0.0) {
+      RCLCPP_ERROR(get_logger(), "arc_markers_rate_hz must be finite and nonnegative");
       return CallbackReturn::FAILURE;
     }
     grid_frame_ = get_parameter("grid_frame").as_string();
@@ -82,7 +108,7 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
     }
     const std::vector<std::string> positive_names = {
         "control_hz", "lookahead_m", "search_window_m", "v_max", "v_min", "v_slow",
-        "w_max", "w_rotate", "k_end", "goal_tolerance_m", "rotate_in_place_heading_rad",
+        "w_max", "w_rotate", "k_end", "goal_tolerance_m", "rotate_in_place_heading_threshold_rad",
         "pose_timeout_s", "obstacle_status_timeout_s", "grid_timeout_s",
         "v_avoid", "arc_length_m", "arc_step_m", "w_path", "w_heading",
         "w_smooth", "avoid_trigger_m", "avoid_release_m", "rejoin_distance_m",
@@ -106,7 +132,7 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
     follow_parameters.k_end_per_s = get_parameter("k_end").as_double();
     follow_parameters.goal_tolerance_m = get_parameter("goal_tolerance_m").as_double();
     follow_parameters.rotate_in_place_heading_rad =
-        get_parameter("rotate_in_place_heading_rad").as_double();
+        get_parameter("rotate_in_place_heading_threshold_rad").as_double();
     timeouts_.pose_timeout_s = get_parameter("pose_timeout_s").as_double();
     timeouts_.obstacle_status_timeout_s = get_parameter("obstacle_status_timeout_s").as_double();
 
@@ -130,6 +156,8 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
     avoid_parameters.rejoin_distance_m = get_parameter("rejoin_distance_m").as_double();
     avoid_parameters.avoid_release_hold_s = get_parameter("avoid_release_hold_s").as_double();
     avoid_parameters.stuck_timeout_s = get_parameter("stuck_timeout_s").as_double();
+    avoid_parameters.stuck_rotate_after_s = get_parameter("stuck_rotate_after_s").as_double();
+    avoid_parameters.w_rotate_rps = follow_parameters.w_rotate_rps;
     timeouts_.grid_timeout_s = get_parameter("grid_timeout_s").as_double();
     avoid_parameters.goal_tolerance_m = follow_parameters.goal_tolerance_m;
     avoid_parameters.k_end_per_s = follow_parameters.k_end_per_s;
@@ -138,6 +166,8 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
     last_pose_.reset();
     last_obstacle_status_.reset();
 
+    marker_publisher_ = create_publisher<visualization_msgs::msg::MarkerArray>(
+        "/lightnav/controller/arc_candidates", rclcpp::QoS(1).reliable());
     command_publisher_ = create_publisher<lightnav_msgs::msg::VelocityCommand>(
         "/lightnav/cmd_vel_raw", rclcpp::QoS(10).reliable());
     status_publisher_ = create_publisher<lightnav_msgs::msg::FollowStatus>(
@@ -193,12 +223,124 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
   }
 
  private:
+  using Values = std::map<std::string, rclcpp::Parameter>;
+
+  std::string validateValues(const Values& changes, bool configuring) const {
+    auto value = [this, &changes](const std::string& name) {
+      const auto found = changes.find(name);
+      return found == changes.end() ? get_parameter(name) : found->second;
+    };
+    for (const auto& entry : positive_names_) {
+      const auto& name = entry.first;
+      const double number = value(name).as_double();
+      // The missing course-specific default is allowed until configure.
+      if (!configuring && name == "max_path_deviation_m" &&
+          changes.count(name) == 0 && !std::isfinite(number)) continue;
+      if (!std::isfinite(number) || number <= 0.0) return name + ": must be finite and positive";
+    }
+    const auto count = value("arc_candidate_count").as_int();
+    if (count < 1 || count > INT_MAX) return "arc_candidate_count: must be between 1 and INT_MAX";
+    if (!(value("v_min").as_double() <= value("v_slow").as_double() &&
+          value("v_slow").as_double() <= value("v_max").as_double()))
+      return "v_min <= v_slow <= v_max is required";
+    if (!(value("avoid_trigger_m").as_double() < value("avoid_release_m").as_double()))
+      return "avoid_trigger_m must be less than avoid_release_m";
+    return {};
+  }
+
+  rcl_interfaces::msg::SetParametersResult validateChange(
+      const std::vector<rclcpp::Parameter>& parameters) const {
+    rcl_interfaces::msg::SetParametersResult result;
+    result.successful = false;
+    Values changes;
+    for (const auto& parameter : parameters) {
+      const auto& name = parameter.get_name();
+      if (name == "use_sim_time" || name == "grid_frame" || name == "control_hz" || name == "arc_markers_rate_hz") {
+        result.reason = name + ": read-only after construction";
+        break;
+      }
+      if (name == "arc_candidate_count") {
+        if (parameter.get_type() != rclcpp::ParameterType::PARAMETER_INTEGER) {
+          result.reason = name + ": expected integer"; break;
+        }
+      } else if (positive_names_.count(name)) {
+        if (parameter.get_type() != rclcpp::ParameterType::PARAMETER_DOUBLE) {
+          result.reason = name + ": expected double"; break;
+        }
+        const auto safety = safety_names_.find(name);
+        if (safety != safety_names_.end()) {
+          const double requested = parameter.as_double();
+          const double baseline = baseline_.at(name);
+          if (!(std::isfinite(requested) && std::isfinite(baseline) &&
+                (safety->second ? requested >= baseline : requested <= baseline))) {
+            result.reason = name + ": must be finite and on the conservative side of the finite startup value";
+            break;
+          }
+        }
+      } else {
+        result.reason = name + ": unsupported runtime parameter"; break;
+      }
+      changes.insert_or_assign(name, parameter);
+    }
+    if (result.reason.empty()) result.reason = validateValues(changes, false);
+    result.successful = result.reason.empty();
+    if (!result.successful) RCLCPP_WARN(get_logger(), "parameter rejected: %s", result.reason.c_str());
+    return result;
+  }
+
+  void applyChange(const std::vector<rclcpp::Parameter>& parameters) {
+    if (follow_layer_ && avoid_layer_) {
+      FollowParameters follow;
+      follow.lookahead_m = get_parameter("lookahead_m").as_double();
+      follow.search_window_m = get_parameter("search_window_m").as_double();
+      follow.v_max_mps = get_parameter("v_max").as_double();
+      follow.v_min_mps = get_parameter("v_min").as_double();
+      follow.v_slow_mps = get_parameter("v_slow").as_double();
+      follow.w_max_rps = get_parameter("w_max").as_double();
+      follow.w_rotate_rps = get_parameter("w_rotate").as_double();
+      follow.k_end_per_s = get_parameter("k_end").as_double();
+      follow.goal_tolerance_m = get_parameter("goal_tolerance_m").as_double();
+      follow.rotate_in_place_heading_rad = get_parameter("rotate_in_place_heading_threshold_rad").as_double();
+      AvoidParameters avoid;
+      avoid.v_avoid_mps = get_parameter("v_avoid").as_double();
+      avoid.w_max_rps = follow.w_max_rps;
+      avoid.arc_candidate_count = static_cast<int>(get_parameter("arc_candidate_count").as_int());
+      avoid.arc_length_m = get_parameter("arc_length_m").as_double();
+      avoid.arc_step_m = get_parameter("arc_step_m").as_double();
+      avoid.max_path_deviation_m = get_parameter("max_path_deviation_m").as_double();
+      avoid.w_path = get_parameter("w_path").as_double();
+      avoid.w_heading = get_parameter("w_heading").as_double();
+      avoid.w_smooth = get_parameter("w_smooth").as_double();
+      avoid.avoid_trigger_m = get_parameter("avoid_trigger_m").as_double();
+      avoid.avoid_release_m = get_parameter("avoid_release_m").as_double();
+      avoid.rejoin_distance_m = get_parameter("rejoin_distance_m").as_double();
+      avoid.avoid_release_hold_s = get_parameter("avoid_release_hold_s").as_double();
+      avoid.stuck_timeout_s = get_parameter("stuck_timeout_s").as_double();
+      avoid.stuck_rotate_after_s = get_parameter("stuck_rotate_after_s").as_double();
+      avoid.w_rotate_rps = follow.w_rotate_rps;
+      avoid.goal_tolerance_m = follow.goal_tolerance_m;
+      avoid.k_end_per_s = follow.k_end_per_s;
+      FreshnessTimeouts timeouts;
+      timeouts.pose_timeout_s = get_parameter("pose_timeout_s").as_double();
+      timeouts.obstacle_status_timeout_s = get_parameter("obstacle_status_timeout_s").as_double();
+      timeouts.grid_timeout_s = get_parameter("grid_timeout_s").as_double();
+      follow_layer_->updateParameters(follow);
+      avoid_layer_->updateParameters(avoid);
+      timeouts_ = timeouts;
+    }
+    for (const auto& parameter : parameters) {
+      RCLCPP_INFO(get_logger(), "parameter changed: %s -> %s", parameter.get_name().c_str(),
+                  parameter.value_to_string().c_str());
+    }
+  }
+
   void releaseOutputs() {
     timer_.reset();
     path_subscription_.reset();
     pose_subscription_.reset();
     obstacle_subscription_.reset();
     grid_subscription_.reset();
+    marker_publisher_.reset();
     command_publisher_.reset();
     status_publisher_.reset();
     follow_layer_.reset();
@@ -301,6 +443,19 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
           follow_result.remaining_distance_m, follow_inputs.is_stop_zone_occupied,
           follow_inputs.is_obstacle_status_fresh});
     }
+    if (!is_pose_fresh) {
+      avoid_layer_->resetWaiting();
+    }
+    const bool marker_active = arcMarkersActive(is_pose_fresh, arbitration_input.avoid.is_asserted);
+    const auto marker_time = std::chrono::steady_clock::now().time_since_epoch();
+    if (marker_publisher_ && marker_rate_.ready(
+        std::chrono::duration<double>(marker_time).count(),
+        arc_markers_rate_hz_, marker_publisher_->get_subscription_count() > 0)) {
+      marker_publisher_->publish(makeArcMarkers(avoid_layer_->candidates(), avoid_layer_->selectedCandidate(),
+          get_parameter("arc_length_m").as_double(), get_parameter("arc_step_m").as_double(),
+          grid_frame_, current_time, marker_active, arbitration_input.avoid.reason,
+          arc_markers_rate_hz_));
+    }
     const ArbitrationResult result = arbitrate(arbitration_input);
     publish(result, follow_result);
   }
@@ -326,17 +481,38 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
     status.remaining_distance_m = static_cast<float>(follow_result.remaining_distance_m);
     status.path_deviation_m = static_cast<float>(follow_result.path_deviation_m);
     status.commanded_linear_mps = static_cast<float>(result.twist.linear_mps);
+    status.commanded_angular_rps = static_cast<float>(result.twist.angular_rps);
     status.is_stuck = result.reason == StopReason::kStuck;
     status_publisher_->publish(status);
   }
 
+  const std::map<std::string, bool> safety_names_ = {
+      {"v_min", false}, {"max_path_deviation_m", false}, {"pose_timeout_s", false},
+      {"obstacle_status_timeout_s", false}, {"grid_timeout_s", false},
+      {"avoid_trigger_m", true}, {"avoid_release_m", true}, {"arc_step_m", false},
+      {"arc_length_m", true}, {"rejoin_distance_m", false}, {"avoid_release_hold_s", true}};
+  const std::map<std::string, bool> positive_names_ = {
+      {"lookahead_m", true}, {"search_window_m", true}, {"v_max", true}, {"v_min", true},
+      {"v_slow", true}, {"w_max", true}, {"w_rotate", true}, {"k_end", true},
+      {"goal_tolerance_m", true}, {"rotate_in_place_heading_threshold_rad", true},
+      {"pose_timeout_s", true}, {"obstacle_status_timeout_s", true}, {"grid_timeout_s", true},
+      {"v_avoid", true}, {"arc_length_m", true}, {"arc_step_m", true},
+      {"max_path_deviation_m", true}, {"w_path", true}, {"w_heading", true}, {"w_smooth", true},
+      {"avoid_trigger_m", true}, {"avoid_release_m", true}, {"rejoin_distance_m", true},
+      {"avoid_release_hold_s", true}, {"stuck_timeout_s", true}, {"stuck_rotate_after_s", true}};
+  std::map<std::string, double> baseline_;
+  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr validation_handle_;
+  rclcpp::node_interfaces::PostSetParametersCallbackHandle::SharedPtr apply_handle_;
   std::unique_ptr<FollowLayer> follow_layer_;
-  std::unique_ptr<AvoidLayer> avoid_layer_;
+  std::unique_ptr<ArcAvoidLayer> avoid_layer_;
   FreshnessTimeouts timeouts_;
   std::string grid_frame_;
   std::optional<ReceivedGrid> last_grid_;
   std::optional<ReceivedPose> last_pose_;
   std::optional<ReceivedObstacleStatus> last_obstacle_status_;
+  double arc_markers_rate_hz_{0.0};
+  ArcMarkerRate marker_rate_;
+  rclcpp_lifecycle::LifecyclePublisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_publisher_;
   rclcpp::TimerBase::SharedPtr timer_;
   rclcpp::Subscription<lightnav_msgs::msg::PathWithId>::SharedPtr path_subscription_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr pose_subscription_;

@@ -55,12 +55,18 @@ localization_node:
     lidar_odom_gate_translation_m: 0.3
     lidar_odom_gate_translation_ratio: 0.2
     lidar_odom_gate_yaw_rad: 0.1
+    lidar_odom_slip_gate_yaw_rad: 0.0
+    lidar_odom_slip_wheel_yaw_rate_rad_s: 0.05
+    lidar_odom_slip_wheel_rate_window_s: 0.05
     lidar_odom_covariance_scale: 1.0
     lidar_odom_sigma_floor_m: 0.02
     lidar_odom_sigma_floor_rad: 0.005
 
     # Wheel factor.
     wheel_sigma_translation_per_m: 0.02
+    wheel_yaw_slip_threshold_rad: 0.0
+    wheel_robust_kernel: huber
+    wheel_robust_k: 8.0
     wheel_sigma_yaw_per_rad: 0.1
     wheel_sigma_yaw_per_m: 0.01
     planar_sigma_z_per_m: 0.05
@@ -71,6 +77,15 @@ localization_node:
     keyframe_distance_m: 1.0
     keyframe_time_s: 1.0
     match_rate_hz: 2.0
+    # GICP (default) or VGICP. Each stage uses map_max_iterations.
+    map_match_method: gicp
+    map_vgicp_voxel_m: 0.5
+    map_vgicp_two_stage: false
+    map_vgicp_coarse_voxel_m: 2.0
+    map_vgicp_coarse_correspondence_m: 2.0
+    # VGICP searches the same and 26 neighboring voxels, so voxel width
+    # limits the search range even when the correspondence distance is larger. The inlier ratio is the share with a voxel correspondence;
+    # tune map_inlier_ratio_min separately for each method.
     map_max_correspondence_distance_m: 1.0
     map_max_iterations: 30
     map_inlier_ratio_min: 0.5

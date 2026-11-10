@@ -92,6 +92,10 @@ struct Localizer::Implementation {
         machine(state_parameters_for(parameters_in)),
         conflict(parameters_in.gps_conflict_window, parameters_in.gps_conflict_ratio),
         gps_origin(gps_origin_in) {
+    if (!std::isfinite(parameters.lidar_odometry.slip_wheel_rate_window_s) ||
+        parameters.lidar_odometry.slip_wheel_rate_window_s <= 0.0) {
+      throw std::invalid_argument("lidar odometry slip wheel rate window must be finite and positive");
+    }
     if (gps_origin) gps.emplace(*gps_origin, parameters_in.gps);
   }
 
@@ -263,12 +267,12 @@ struct Localizer::Implementation {
     submap_rebuild_time_ms = elapsed_ms(start);
   }
 
-  static MapTargetBuild build_map_target(const PointList& all_points, const Eigen::Vector2d& center) {
+  MapTargetBuild build_map_target(const PointList& all_points, const Eigen::Vector2d& center) {
     PointList cropped;
     for (const auto& point : all_points) {
       if ((point.head<2>().cast<double>() - center).norm() <= kMapSubmapRadiusM) cropped.push_back(point);
     }
-    return {PreparedTarget(cropped), center};
+    return {PreparedTarget(cropped, parameters.map_matcher), center};
   }
 
   // The first target is built synchronously; later rebuilds (every 50 m) run on a worker thread so
@@ -417,10 +421,17 @@ struct Localizer::Implementation {
 
     Eigen::Isometry3d best = prediction;
     std::optional<MatchResult> lidar_result;
+    const double wheel_rate_interval_sec = parameters.lidar_odometry.slip_wheel_rate_window_s;
+    const auto recent_odom = buffer.interpolate(pending.stamp - wheel_rate_interval_sec);
+    double wheel_yaw_rate = 1.0;
+    if (recent_odom) {
+      const Eigen::Isometry3d recent_relative = invert_isometry(*recent_odom) * *odom_now;
+      wheel_yaw_rate = std::atan2(recent_relative.rotation()(1, 0), recent_relative.rotation()(0, 0)) / wheel_rate_interval_sec;
+    }
     if (lidar.has_submap()) {
       // Keep the gate's scan-to-scan wheel distance independent of the optimized prediction.
       const Eigen::Isometry3d scan_relative = invert_isometry(last_scan_odom_for_gate) * *odom_now;
-      MatchResult result = lidar.match(cloud, prediction, scan_relative.translation().norm());
+      MatchResult result = lidar.match(cloud, prediction, scan_relative.translation().norm(), wheel_yaw_rate);
       last_lidar_odom_inlier_ratio = result.inlier_ratio;
       if (result.is_accepted) {
         best = result.target_to_source;
@@ -437,7 +448,13 @@ struct Localizer::Implementation {
     const bool is_keyframe = moved_since_keyframe_m >= parameters.keyframe_distance_m ||
                              pending.stamp - last_keyframe_sec + kKeyframeTimeToleranceSec >= parameters.keyframe_time_s;
     if (is_keyframe) {
-      const int index = graph->add_node_with_wheel_factor(pending.stamp, best, wheel_relative);
+      double yaw_disagreement = 0.0;
+      if (lidar_result) {
+        const Eigen::Isometry3d lidar_relative = invert_isometry(*last_pose) * best;
+        const Eigen::Matrix3d difference = wheel_relative.rotation().transpose() * lidar_relative.rotation();
+        yaw_disagreement = std::abs(std::atan2(difference(1, 0), difference(0, 0)));
+      }
+      const int index = graph->add_node_with_wheel_factor(pending.stamp, best, wheel_relative, yaw_disagreement);
       if (lidar_result) {
         graph->add_lidar_odometry_factor(
             last.index, index, invert_isometry(*last_pose) * best,

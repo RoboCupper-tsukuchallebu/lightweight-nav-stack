@@ -37,6 +37,15 @@ ObstacleMonitorNode::ObstacleMonitorNode(const rclcpp::NodeOptions & options)
   declare_parameter("points_qos_reliability", "reliable", readOnly);
   declare_parameter("scan_topic", "", readOnly);
   declare_parameter("base_frame", "base_link", readOnly);
+  declare_parameter("memory_frame", "odom", readOnly);
+  declare_parameter("blind_radius_m", 0.6);
+  // Age applies only when a cell is currently observable.
+  declare_parameter("memory_max_age_s", 30.0);
+  declare_parameter("memory_max_range_m", 10.0, readOnly);
+  declare_parameter("tf_max_age_s", 0.5, readOnly);
+  declare_parameter("memory_reset_report_s", 2.0, readOnly);
+  declare_parameter("memory_jump_distance_m", 1.0, readOnly);
+  declare_parameter("memory_jump_angle_rad", 0.7853981634, readOnly);
   declare_parameter("points_timeout_s", 0.5);
   declare_parameter("scan_timeout_s", 0.5);
   declare_parameter("tf_timeout_s", 0.1);
@@ -81,7 +90,7 @@ rcl_interfaces::msg::SetParametersResult ObstacleMonitorNode::validateParameters
   auto reject = [&](const std::string & reason) {result.reason = reason; return result;};
   const std::set<std::string> increasing = {"z_max_m", "scan_max_use_range_m",
     "inflation_radius_m", "stop_zone_x_m", "stop_zone_y_half_m", "slow_zone_x_m",
-    "slow_zone_y_half_m", "clear_hold_s"};
+    "slow_zone_y_half_m", "clear_hold_s", "blind_radius_m", "memory_max_age_s"};
   const std::set<std::string> decreasing = {"height_diff_threshold_m", "min_points_per_cell",
     "min_cell_count", "occupied_min_frames", "points_timeout_s", "scan_timeout_s", "tf_timeout_s"};
   auto values = startupParameters_;
@@ -125,6 +134,9 @@ rcl_interfaces::msg::SetParametersResult ObstacleMonitorNode::validateParameters
       return reject(name + ": must be finite and positive");
     }
   }
+  if (number("memory_max_age_s") <= 0.0) {
+    return reject("memory_max_age_s: must be positive");
+  }
   const double size = number("grid_size_m"), cell = number("cell_size_m");
   const double originX = number("grid_origin_x_m"), originY = number("grid_origin_y_m");
   if (!(std::isfinite(size) && std::isfinite(cell) && std::isfinite(originX) &&
@@ -162,11 +174,16 @@ void ObstacleMonitorNode::applyParameters(const std::vector<rclcpp::Parameter> &
     if (name == "points_timeout_s") {pointsTimeout = value.as_double();}
     if (name == "scan_timeout_s") {scanTimeout = value.as_double();}
     if (name == "tf_timeout_s") {tfTimeout = value.as_double();}
+    if (name == "blind_radius_m") {blindRadiusMeters_ = value.as_double();}
+    if (name == "memory_max_age_s") {memoryMaxAgeSeconds_ = value.as_double();}
   }
   parameters_ = updated;
   pointsTimeoutSeconds_ = pointsTimeout;
   scanTimeoutSeconds_ = scanTimeout;
   tfTimeoutSeconds_ = tfTimeout;
+  if (memory_) {
+    memory_->updateSafetyParameters(blindRadiusMeters_, memoryMaxAgeSeconds_);
+  }
   if (stopHysteresis_) {
     stopHysteresis_->updateParameters(updated.minCellCount, updated.occupiedMinFrames, updated.clearHoldSeconds);
     slowHysteresis_->updateParameters(updated.minCellCount, updated.occupiedMinFrames, updated.clearHoldSeconds);
@@ -203,6 +220,14 @@ ObstacleMonitorNode::CallbackReturn ObstacleMonitorNode::on_configure(const rclc
   parameters_.occupiedMinFrames = static_cast<int>(get_parameter("occupied_min_frames").as_int());
   parameters_.clearHoldSeconds = get_parameter("clear_hold_s").as_double();
   baseFrame_ = get_parameter("base_frame").as_string();
+  memoryFrame_ = get_parameter("memory_frame").as_string();
+  blindRadiusMeters_ = get_parameter("blind_radius_m").as_double();
+  memoryMaxAgeSeconds_ = get_parameter("memory_max_age_s").as_double();
+  memoryMaxRangeMeters_ = get_parameter("memory_max_range_m").as_double();
+  tfMaxAgeSeconds_ = get_parameter("tf_max_age_s").as_double();
+  memoryResetReportSeconds_ = get_parameter("memory_reset_report_s").as_double();
+  jumpDistanceMeters_ = get_parameter("memory_jump_distance_m").as_double();
+  jumpAngleRadians_ = get_parameter("memory_jump_angle_rad").as_double();
   pointsTopic_ = get_parameter("points_topic").as_string();
   scanTopic_ = get_parameter("scan_topic").as_string();
   const std::string pointsQosReliability = get_parameter("points_qos_reliability").as_string();
@@ -233,12 +258,23 @@ ObstacleMonitorNode::CallbackReturn ObstacleMonitorNode::on_configure(const rclc
   const bool isValid = parameters_.cellSizeMeters > 0.0 && parameters_.gridSizeMeters > 0.0 &&
     std::isfinite(parameters_.stepNeighborRadiusMeters) &&
     parameters_.stepNeighborRadiusMeters >= 0.0 && watchdogHz_ > 0.0 &&
-    (!pointsTopic_.empty() || !scanTopic_.empty());
+    (!pointsTopic_.empty() || !scanTopic_.empty()) && !memoryFrame_.empty() &&
+    std::isfinite(blindRadiusMeters_) && blindRadiusMeters_ >= 0.0 &&
+    std::isfinite(memoryMaxAgeSeconds_) && memoryMaxAgeSeconds_ > 0.0 &&
+    std::isfinite(memoryMaxRangeMeters_) && memoryMaxRangeMeters_ > 0.0 &&
+    std::isfinite(tfMaxAgeSeconds_) && tfMaxAgeSeconds_ > 0.0 &&
+    std::isfinite(memoryResetReportSeconds_) && memoryResetReportSeconds_ > 0.0 &&
+    std::isfinite(jumpDistanceMeters_) && jumpDistanceMeters_ > 0.0 &&
+    std::isfinite(jumpAngleRadians_) && jumpAngleRadians_ > 0.0;
   if (!isValid) {
-    RCLCPP_ERROR(get_logger(), "invalid parameters: sizes and watchdog_hz must be positive, step_neighbor_radius_m must be finite and nonnegative, and at least one input topic is needed");
+    RCLCPP_ERROR(get_logger(), "invalid parameters: sizes and watchdog_hz must be positive, step_neighbor_radius_m must be finite and nonnegative, at least one input topic and memory_frame are needed; blind_radius_m must be finite and nonnegative; memory_max_age_s, memory_max_range_m, tf_max_age_s, memory_reset_report_s, memory_jump_distance_m and memory_jump_angle_rad must be finite and positive");
     return CallbackReturn::FAILURE;
   }
   geometry_ = GridGeometry::fromParameters(parameters_);
+  memory_.emplace(geometry_, blindRadiusMeters_, memoryMaxAgeSeconds_, jumpDistanceMeters_, jumpAngleRadians_, memoryMaxRangeMeters_);
+  worldFromBase_.reset();
+  poseUpdate_.reset();
+  memoryReset_.reset();
   stopHysteresis_.emplace(
     parameters_.minCellCount, parameters_.occupiedMinFrames, parameters_.clearHoldSeconds);
   slowHysteresis_.emplace(
@@ -300,6 +336,8 @@ ObstacleMonitorNode::CallbackReturn ObstacleMonitorNode::on_cleanup(const rclcpp
   scanSubscription_.reset();
   statusPublisher_.reset();
   gridPublisher_.reset();
+  memory_.reset();
+  worldFromBase_.reset();
   tfListener_.reset();
   tfBuffer_.reset();
   return CallbackReturn::SUCCESS;
@@ -331,6 +369,51 @@ std::optional<Eigen::Isometry3d> ObstacleMonitorNode::lookupBaseFromSensor(
   }
 }
 
+bool ObstacleMonitorNode::updateMemory(const ObstacleGrid & grid,
+  const Eigen::Isometry3d & baseFromSensor, const builtin_interfaces::msg::Time & stamp,
+  bool & memoryTfStale)
+{
+  try {
+    const rclcpp::Time frameTime(stamp, get_clock()->get_clock_type());
+    if (frameTime.nanoseconds() == 0 || std::abs((get_clock()->now() - frameTime).seconds()) > tfMaxAgeSeconds_) {
+      throw tf2::TransformException("sensor timestamp is stale");
+    }
+    geometry_msgs::msg::TransformStamped transform;
+    try {
+      transform = tfBuffer_->lookupTransform(memoryFrame_, baseFrame_, frameTime);
+    } catch (const tf2::ExtrapolationException &) {
+      transform = tfBuffer_->lookupTransform(memoryFrame_, baseFrame_, tf2::TimePointZero);
+      const rclcpp::Time latestTime(transform.header.stamp, get_clock()->get_clock_type());
+      // Only accept a slightly older pose; never substitute a future pose.
+      if (latestTime.nanoseconds() == 0 || latestTime > frameTime ||
+        (frameTime - latestTime).seconds() > tfMaxAgeSeconds_) {
+        throw tf2::TransformException("latest memory transform is outside the allowed age");
+      }
+    }
+    const rclcpp::Time transformTime(transform.header.stamp, get_clock()->get_clock_type());
+    if (transformTime.nanoseconds() != 0 &&
+      std::abs((get_clock()->now() - transformTime).seconds()) > tfMaxAgeSeconds_) {
+      throw tf2::TransformException("memory transform is stale");
+    }
+    worldFromBase_ = tf2::transformToEigen(transform);
+    poseUpdate_ = SteadyClock::now();
+    memoryTfStale = false;
+  } catch (const tf2::TransformException & exception) {
+    memoryTfStale = true;
+    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "memory TF unavailable: %s", exception.what());
+    return false;
+  }
+  const double nowSeconds = std::chrono::duration<double>(SteadyClock::now().time_since_epoch()).count();
+  if (memory_->update(grid.occupiedCells(), grid.groundCells(), *worldFromBase_,
+      baseFromSensor.translation(), nowSeconds)) {
+    memoryReset_ = SteadyClock::now();
+    pointsState_.occupiedCells.clear();
+    scanState_.occupiedCells.clear();
+    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "memory cleared after TF jump");
+  }
+  return true;
+}
+
 void ObstacleMonitorNode::handlePointCloud(const sensor_msgs::msg::PointCloud2::SharedPtr cloud)
 {
   const auto frameStart = SteadyClock::now();
@@ -344,6 +427,10 @@ void ObstacleMonitorNode::handlePointCloud(const sensor_msgs::msg::PointCloud2::
     projectPointCloud(*cloud, *baseFromSensor, grid);
   } catch (const std::exception & exception) {
     RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 2000, "%s", exception.what());
+    publishResult(frameStart, false);
+    return;
+  }
+  if (!updateMemory(grid, *baseFromSensor, cloud->header.stamp, pointsState_.memoryTfStale)) {
     publishResult(frameStart, false);
     return;
   }
@@ -361,6 +448,10 @@ void ObstacleMonitorNode::handleLaserScan(const sensor_msgs::msg::LaserScan::Sha
   }
   ObstacleGrid grid(geometry_, parameters_);
   projectLaserScan(*scan, *baseFromSensor, parameters_.scanMaxUseRangeMeters, grid);
+  if (!updateMemory(grid, *baseFromSensor, scan->header.stamp, scanState_.memoryTfStale)) {
+    publishResult(frameStart, false);
+    return;
+  }
   scanState_.occupiedCells = grid.occupiedCells();
   scanState_.lastUpdate = SteadyClock::now();
   // The 3D cloud drives publishing when enabled; the scan drives it only when it is alone.
@@ -408,12 +499,20 @@ void ObstacleMonitorNode::publishResult(
     };
   collect("points", pointsTopic_, pointsState_, pointsTimeoutSeconds_);
   collect("scan", scanTopic_, scanState_, scanTimeoutSeconds_);
+  if ((!pointsTopic_.empty() && pointsState_.memoryTfStale) ||
+    (!scanTopic_.empty() && scanState_.memoryTfStale) || !poseUpdate_ || secondsSince(*poseUpdate_, now) > tfMaxAgeSeconds_) {
+    status.stale_sources.push_back("tf:" + memoryFrame_);
+  }
+  if (memoryReset_ && secondsSince(*memoryReset_, now) < memoryResetReportSeconds_) {
+    status.stale_sources.push_back("obstacle_memory_reset");
+  }
   status.is_input_stale = !status.stale_sources.empty();
   status.header.stamp = get_clock()->now();
   status.header.frame_id = baseFrame_;
   status.nearest_distance_m = std::numeric_limits<float>::infinity();
 
-  if (!status.is_input_stale) {
+  if (!status.is_input_stale && worldFromBase_) {
+    occupiedCells = combineOccupiedCells(occupiedCells, memory_->cells(*worldFromBase_, nowSeconds));
     const auto summary = summarizeOccupiedCells(occupiedCells, geometry_, parameters_);
     if (shouldUpdateHysteresis) {
       stopHysteresis_->update(summary.stopZoneCellCount, nowSeconds);

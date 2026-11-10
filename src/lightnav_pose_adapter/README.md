@@ -48,3 +48,13 @@ pose_adapter_node:
     odom_topic: /wheel/odom
     expected_frame_id: odom
 ```
+
+## パラメータの変更
+
+| パラメータ | 種類 |
+|---|---|
+| `odom_topic`, `output_topic`, `expected_frame_id` | 構成（read-only） |
+| `body_to_base_xyz_rpy`, `map_from_odom_xy_yaw`, `max_position_variance_m2` | 構成（read-only） |
+| `use_sim_time` | 起動時のみ設定可能 |
+
+起動時に launch または YAML で指定する。起動後の変更は拒否される。

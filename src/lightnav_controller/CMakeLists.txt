@@ -6,6 +6,7 @@ find_package(rclcpp REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
+find_package(visualization_msgs REQUIRED)
 find_package(lightnav_msgs REQUIRED)
 
 add_library(lightnav_controller_core
@@ -31,6 +32,7 @@ set(controller_ros_libraries
   rclcpp_lifecycle::rclcpp_lifecycle
   geometry_msgs::geometry_msgs__rosidl_typesupport_cpp
   nav_msgs::nav_msgs__rosidl_typesupport_cpp
+  visualization_msgs::visualization_msgs__rosidl_typesupport_cpp
   lightnav_msgs::lightnav_msgs__rosidl_typesupport_cpp)
 
 add_executable(controller_node src/controller_node.cpp)
@@ -56,6 +58,13 @@ if(BUILD_TESTING)
         --gtest_output=xml:${AMENT_TEST_RESULTS_DIR}/${PROJECT_NAME}/${test_name}.gtest.xml
       GENERATE_RESULT_FOR_RETURN_CODE_ZERO)
   endforeach()
+
+  add_executable(test_arc_markers test/test_arc_markers.cpp)
+  target_link_libraries(test_arc_markers lightnav_controller_core GTest::gtest GTest::gtest_main ${controller_ros_libraries})
+  target_compile_options(test_arc_markers PRIVATE -Wall -Wextra -Werror)
+  ament_add_test(test_arc_markers COMMAND $<TARGET_FILE:test_arc_markers>
+    --gtest_output=xml:${AMENT_TEST_RESULTS_DIR}/${PROJECT_NAME}/test_arc_markers.gtest.xml
+    GENERATE_RESULT_FOR_RETURN_CODE_ZERO)
 
   add_executable(test_controller_node test/test_controller_node.cpp)
   target_link_libraries(test_controller_node lightnav_controller_core GTest::gtest GTest::gtest_main
