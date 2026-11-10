@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <functional>
@@ -223,6 +224,74 @@ TEST_F(ObstacleMonitorNodeTest, MemoryParametersRespectStartupAndAreApplied)
     EXPECT_TRUE(monitor_->describe_parameter(name).read_only);
     EXPECT_FALSE(monitor_->set_parameter(rclcpp::Parameter(name, 2.0)).successful);
   }
+}
+
+TEST_F(ObstacleMonitorNodeTest, IncreasedMemoryAgeKeepsObservableCell)
+{
+  executor_.remove_node(monitor_->get_node_base_interface());
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({{"points_timeout_s", 0.3}, {"watchdog_hz", 20.0},
+    {"memory_max_age_s", 0.2}, {"inflation_radius_m", 0.0}});
+  monitor_ = std::make_shared<ObstacleMonitorNode>(options);
+  executor_.add_node(monitor_->get_node_base_interface());
+  bringUp();
+  publishIdentityTransform();
+
+  auto cloud = makeObstacleCloud();
+  sensor_msgs::PointCloud2Modifier modifier(cloud);
+  modifier.resize(2);
+  sensor_msgs::PointCloud2Iterator<float> x(cloud, "x"), y(cloud, "y");
+  for (int index = 0; index < 2; ++index, ++x, ++y) {*x = 0.75F; *y = 0.55F;}
+  const auto gridCell = [this](double cellX, double cellY) {
+      const auto column = static_cast<std::size_t>((cellX - lastGrid_.info.origin.position.x) /
+        lastGrid_.info.resolution);
+      const auto row = static_cast<std::size_t>((cellY - lastGrid_.info.origin.position.y) /
+        lastGrid_.info.resolution);
+      return lastGrid_.data.at(row * lastGrid_.info.width + column);
+    };
+  const auto observationStart = std::chrono::steady_clock::now();
+  ASSERT_TRUE(waitUntil([this, &cloud] {
+    cloud.header.stamp = helper_->now();
+    pointsPublisher_->publish(cloud);
+    return gridCount_ > 0;
+  }, false));
+  ASSERT_GT(gridCell(0.75, 0.55), 0);
+  ASSERT_TRUE(monitor_->set_parameter(rclcpp::Parameter("memory_max_age_s", 60.0)).successful);
+  spinFor(milliseconds(500));  // Past the original 0.2 s, well before 60 s.
+
+  // Rotation makes the observed local cell map to a different world key, so its
+  // reinsertion cannot mask expiration of the original key at (0.75, 0.55).
+  geometry_msgs::msg::TransformStamped pose;
+  pose.header.stamp = helper_->now();
+  pose.header.frame_id = "odom";
+  pose.child_frame_id = "base_link";
+  pose.transform.rotation.z = std::sin(0.2);
+  pose.transform.rotation.w = std::cos(0.2);
+  broadcaster_->sendTransform(pose);
+  spinFor(milliseconds(100));
+  sensor_msgs::PointCloud2Iterator<float> rotatedX(cloud, "x"), rotatedY(cloud, "y");
+  for (int index = 0; index < 2; ++index, ++rotatedX, ++rotatedY) {
+    *rotatedX = 0.92F; *rotatedY = 0.22F;
+  }
+  ASSERT_LT(std::chrono::steady_clock::now() - observationStart, std::chrono::seconds(60));
+  cloud.header.stamp = helper_->now();
+  pointsPublisher_->publish(cloud);
+  spinFor(milliseconds(150));
+
+  pose.header.stamp = helper_->now();
+  pose.transform.rotation.z = 0.0;
+  pose.transform.rotation.w = 1.0;
+  broadcaster_->sendTransform(pose);
+  spinFor(milliseconds(100));
+  modifier.resize(0);
+  const int previousGridCount = gridCount_;
+  cloud.header.stamp = helper_->now();
+  pointsPublisher_->publish(cloud);
+  spinFor(milliseconds(150));
+  ASSERT_GT(gridCount_, previousGridCount);
+  EXPECT_FALSE(lastStatus_.is_input_stale);
+  ASSERT_GT(gridCell(0.75, 0.65), 0);  // The rotated observation was processed.
+  EXPECT_GT(gridCell(0.75, 0.55), 0);
 }
 
 TEST_F(ObstacleMonitorNodeTest, InvalidMemoryStartupValuesFailConfigure)
