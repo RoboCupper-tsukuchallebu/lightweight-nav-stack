@@ -551,6 +551,42 @@ TEST(ArcAvoidLayer, PathProgressKeepsFeasibleArcMoving) {
   EXPECT_EQ(layer.compute(context).reason, StopReason::kOk);
 }
 
+TEST(ArcAvoidLayer, PositionProgressCountsWhenRemainingDistanceIsFinite) {
+  ArcAvoidLayer layer{makeAvoidParameters()};
+  const auto path = makeStraightPath();
+  LocalGrid grid = makeEmptyGrid();
+  fillRectangle(grid, 1.0, 1.4, -0.3, 0.3);
+  auto context = makeContext(path, &grid, 0.0);
+  context.remaining_distance_m = 10.0;
+  EXPECT_EQ(layer.compute(context).reason, StopReason::kOk);
+  context.now_s = 9.0;
+  context.pose.y_m = 0.11;
+  EXPECT_EQ(layer.compute(context).reason, StopReason::kOk);
+  context.now_s = 18.0;
+  context.pose.y_m = 0.22;
+  EXPECT_EQ(layer.compute(context).reason, StopReason::kOk);
+}
+
+TEST(ArcAvoidLayer, ProgressStallRetriesAfterMeasuredRotation) {
+  ArcAvoidLayer layer{makeAvoidParameters()};
+  const auto path = makeStraightPath();
+  LocalGrid grid = makeEmptyGrid();
+  fillRectangle(grid, 1.0, 1.4, -0.3, 0.3);
+  auto context = makeContext(path, &grid, 0.0);
+  EXPECT_EQ(layer.compute(context).reason, StopReason::kOk);
+  context.now_s = 10.0;
+  EXPECT_EQ(layer.compute(context).reason, StopReason::kBlocked);
+  context.now_s = 22.0;
+  EXPECT_EQ(layer.compute(context).reason, StopReason::kStuck);
+  context.now_s = 23.0;
+  EXPECT_EQ(layer.compute(context).reason, StopReason::kStuck);
+  context.pose.yaw_rad = 0.31;
+  EXPECT_EQ(layer.compute(context).reason, StopReason::kOk);
+  context.pose.yaw_rad = 0.0;
+  context.now_s = 33.0;
+  EXPECT_EQ(layer.compute(context).reason, StopReason::kBlocked);
+}
+
 TEST(ArcAvoidLayer, RotatesAfterStuckDelayAndResumesWhenArcIsFeasible) {
   ArcAvoidLayer layer{makeAvoidParameters()};
   const auto path = makeStraightPath();

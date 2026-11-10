@@ -277,6 +277,7 @@ LayerOutput ArcAvoidLayer::compute(const AvoidContext& context) {
   if (context.is_stop_zone_occupied || is_at_path_end) {
     progress_since_s_.reset();
     progress_pose_.reset();
+    recovery_yaw_.reset();
     return makeWaiting(context.now_s, context.is_obstacle_status_fresh
                                           ? StopReason::kBlocked
                                           : StopReason::kObstacleStale);
@@ -299,18 +300,34 @@ LayerOutput ArcAvoidLayer::compute(const AvoidContext& context) {
     constexpr double kProgressDistanceM = 0.1;
     const bool path_progress = std::isfinite(progress_remaining_m_) &&
         progress_remaining_m_ - context.remaining_distance_m >= kProgressDistanceM;
-    const bool position_progress = !std::isfinite(progress_remaining_m_) &&
-        distanceBetween(*progress_pose_, current) >= kProgressDistanceM;
+    const bool position_progress = distanceBetween(*progress_pose_, current) >= kProgressDistanceM;
     if (path_progress || position_progress) {
       progress_since_s_ = context.now_s;
       progress_pose_ = current;
       progress_remaining_m_ = context.remaining_distance_m;
       waiting_since_s_.reset();
+      recovery_yaw_.reset();
     }
     if (context.now_s - *progress_since_s_ >= parameters_.stuck_timeout_s) {
-      return makeWaiting(context.now_s, StopReason::kBlocked);
+      // Retry only after the stuck rotation actually changes heading. The
+      // newly evaluated arc still has to pass all collision checks.
+      if (waiting_since_s_ && context.now_s - *waiting_since_s_ >=
+          parameters_.stuck_timeout_s + parameters_.stuck_rotate_after_s && !recovery_yaw_) {
+        recovery_yaw_ = context.pose.yaw_rad;
+      }
+      if (recovery_yaw_ && std::fabs(std::remainder(context.pose.yaw_rad - *recovery_yaw_,
+                                                   2.0 * std::acos(-1.0))) >= 0.3) {
+        progress_since_s_ = context.now_s;
+        progress_pose_ = current;
+        progress_remaining_m_ = context.remaining_distance_m;
+        waiting_since_s_.reset();
+        recovery_yaw_.reset();
+      } else {
+        return makeWaiting(context.now_s, StopReason::kBlocked);
+      }
     }
     waiting_since_s_.reset();
+    recovery_yaw_.reset();
     previous_curvature_per_m_ = best->curvature_per_m;
     const double linear_mps = std::min(parameters_.v_avoid_mps,
                                        parameters_.k_end_per_s * context.remaining_distance_m);
@@ -320,6 +337,7 @@ LayerOutput ArcAvoidLayer::compute(const AvoidContext& context) {
   }
   progress_since_s_.reset();
   progress_pose_.reset();
+  recovery_yaw_.reset();
   return makeWaiting(context.now_s, StopReason::kBlocked);
 }
 

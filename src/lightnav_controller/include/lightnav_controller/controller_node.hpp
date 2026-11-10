@@ -527,6 +527,11 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
       const auto& selected = avoid_layer_->selectedCandidate();
       if (selected && is_pose_fresh) out << " curvature=" << selected->curvature_per_m;
       else out << " curvature=none";
+      out << " stop=" << (is_obstacle_status_fresh && last_obstacle_status_->message.is_stop_zone_occupied)
+          << " candidates=";
+      for (const auto& candidate : avoid_layer_->candidates()) {
+        out << (candidate.is_feasible ? "ok" : candidate.rejection_reason) << ",";
+      }
       diagnostic.data = out.str();
       diagnostic_publisher_->publish(diagnostic);
     }

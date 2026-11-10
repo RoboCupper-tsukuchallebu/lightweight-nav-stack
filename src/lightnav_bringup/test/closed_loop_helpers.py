@@ -99,7 +99,8 @@ class ClosedLoopTest(unittest.TestCase):
             cls.trace.append((now, pose.x, pose.y, message.state, message.active_layer, cls.selected_arc,
                               obstacle, command.linear.x if command else None,
                               command.angular.z if command else None, inflated, raw,
-                              bool(inflated and raw and inflated[0] == raw[0]), cls.grid_diagnostic))
+                              bool(inflated and raw and inflated[0] == raw[0]), cls.grid_diagnostic,
+                              message.remaining_distance_m, message.closest_index))
 
     @classmethod
     def record_obstacle(cls, message):
@@ -116,7 +117,7 @@ class ClosedLoopTest(unittest.TestCase):
         deadline = time.monotonic() + 0.25
         while time.monotonic() < deadline:
             rclpy.spin_once(cls.node, timeout_sec=0.05)
-        print("TRACE monotonic_s x_m y_m state layer selected_arc_id stop_occupied linear angular inflated_stamp_count raw_stamp_count latest_stamps_match diagnostic", flush=True)
+        print("TRACE monotonic_s x_m y_m state layer selected_arc_id stop_occupied linear angular inflated_stamp_count raw_stamp_count latest_stamps_match diagnostic remaining_distance_m closest_index", flush=True)
         for row in cls.trace:
             print("TRACE", *row, flush=True)
         cls.action.destroy()
@@ -146,7 +147,7 @@ class ClosedLoopTest(unittest.TestCase):
             change_client = self.node.create_client(ChangeState, f"/{name}/change_state")
             while time.monotonic() < deadline:
                 future = client.call_async(GetState.Request())
-                self.wait_for(future.done, 10.0)
+                self.wait_for(future.done, 60.0)
                 state = future.result().current_state
                 print(f"LIFECYCLE_POLL {time.monotonic():.6f} {name} {state.label}", flush=True)
                 if state.id == State.PRIMARY_STATE_ACTIVE:

@@ -19,7 +19,7 @@ def main():
     try:
         if not client.wait_for_service(timeout_sec=30.0):
             node.get_logger().error(f"{target}: change_state service unavailable")
-            return
+            raise SystemExit(1)
         for transition, label in ((Transition.TRANSITION_CONFIGURE, "configure"),
                                   (Transition.TRANSITION_ACTIVATE, "activate")):
             if trace:
@@ -31,16 +31,20 @@ def main():
             if future.done() and future.exception() is None and future.result().success:
                 continue
             expected = State.PRIMARY_STATE_INACTIVE if label == "configure" else State.PRIMARY_STATE_ACTIVE
-            deadline = time.monotonic() + 3.0
+            deadline = time.monotonic() + 120.0
+            state_future = None
             while rclpy.ok() and time.monotonic() < deadline:
-                state_future = state_client.call_async(GetState.Request())
+                if state_future is None:
+                    state_future = state_client.call_async(GetState.Request())
                 rclpy.spin_until_future_complete(node, state_future, timeout_sec=0.5)
                 if (state_future.done() and state_future.exception() is None and
                         state_future.result().current_state.id == expected):
                     break
+                if state_future.done():
+                    state_future = None
             else:
                 node.get_logger().error(f"{target}: {label} failed or timed out")
-                return
+                raise SystemExit(1)
     finally:
         node.destroy_node()
         rclpy.try_shutdown()

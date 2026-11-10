@@ -114,7 +114,7 @@ class ArcAvoidLayer final : public AvoidLayer {
   LayerOutput compute(const AvoidContext& context) override;
 
   bool isAvoiding() const { return is_avoiding_; }
-  void resetWaiting() { waiting_since_s_.reset(); progress_since_s_.reset(); progress_pose_.reset(); }
+  void resetWaiting() { waiting_since_s_.reset(); progress_since_s_.reset(); progress_pose_.reset(); recovery_yaw_.reset(); }
   const std::vector<ArcCandidate>& candidates() const { return candidates_; }
   const std::optional<ArcCandidate>& selectedCandidate() const { return selected_candidate_; }
 
@@ -131,6 +131,7 @@ class ArcAvoidLayer final : public AvoidLayer {
   std::optional<double> waiting_since_s_;
   std::optional<double> progress_since_s_;
   std::optional<Point2D> progress_pose_;
+  std::optional<double> recovery_yaw_;
   double progress_remaining_m_{std::numeric_limits<double>::infinity()};
   double previous_curvature_per_m_{0.0};
   double rotation_sign_{-1.0};
