@@ -19,6 +19,7 @@ public:
   bool update(const std::vector<std::uint8_t> & occupied, const std::vector<std::uint8_t> & ground,
     const Eigen::Isometry3d & worldFromBase, const Eigen::Vector3d & sensorInBase, double nowSeconds);
   std::vector<std::uint8_t> cells(const Eigen::Isometry3d & worldFromBase, double nowSeconds);
+  void updateSafetyParameters(double blindRadiusMeters, double maxAgeSeconds);
   std::size_t size() const {return cells_.size();}
 private:
   using Key = std::pair<long long, long long>;

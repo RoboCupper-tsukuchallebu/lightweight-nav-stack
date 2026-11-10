@@ -3,6 +3,9 @@
 #include <cmath>
 #include <exception>
 #include <limits>
+#include <algorithm>
+#include <climits>
+#include <set>
 
 #include <tf2_eigen/tf2_eigen.hpp>
 #include <tf2_ros/transform_listener.h>
@@ -28,29 +31,31 @@ ObstacleMonitorNode::ObstacleMonitorNode(const rclcpp::NodeOptions & options)
 : rclcpp_lifecycle::LifecycleNode("obstacle_monitor", options)
 {
   const ObstacleMonitorParameters defaults;
-  declare_parameter("points_topic", "/velodyne_points");
-  declare_parameter("points_qos_reliability", "reliable");
-  declare_parameter("scan_topic", "");
-  declare_parameter("base_frame", "base_link");
-  declare_parameter("memory_frame", "odom");
+  rcl_interfaces::msg::ParameterDescriptor readOnly;
+  readOnly.read_only = true;
+  declare_parameter("points_topic", "/velodyne_points", readOnly);
+  declare_parameter("points_qos_reliability", "reliable", readOnly);
+  declare_parameter("scan_topic", "", readOnly);
+  declare_parameter("base_frame", "base_link", readOnly);
+  declare_parameter("memory_frame", "odom", readOnly);
   declare_parameter("blind_radius_m", 0.6);
   // Age applies only when a cell is currently observable.
   declare_parameter("memory_max_age_s", 30.0);
-  declare_parameter("memory_max_range_m", 10.0);
-  declare_parameter("tf_max_age_s", 0.5);
-  declare_parameter("memory_reset_report_s", 2.0);
-  declare_parameter("memory_jump_distance_m", 1.0);
-  declare_parameter("memory_jump_angle_rad", 0.7853981634);
+  declare_parameter("memory_max_range_m", 10.0, readOnly);
+  declare_parameter("tf_max_age_s", 0.5, readOnly);
+  declare_parameter("memory_reset_report_s", 2.0, readOnly);
+  declare_parameter("memory_jump_distance_m", 1.0, readOnly);
+  declare_parameter("memory_jump_angle_rad", 0.7853981634, readOnly);
   declare_parameter("points_timeout_s", 0.5);
   declare_parameter("scan_timeout_s", 0.5);
   declare_parameter("tf_timeout_s", 0.1);
-  declare_parameter("grid_size_m", defaults.gridSizeMeters);
-  declare_parameter("cell_size_m", defaults.cellSizeMeters);
-  declare_parameter("grid_origin_x_m", defaults.gridOriginXMeters);
-  declare_parameter("grid_origin_y_m", defaults.gridOriginYMeters);
+  declare_parameter("grid_size_m", defaults.gridSizeMeters, readOnly);
+  declare_parameter("cell_size_m", defaults.cellSizeMeters, readOnly);
+  declare_parameter("grid_origin_x_m", defaults.gridOriginXMeters, readOnly);
+  declare_parameter("grid_origin_y_m", defaults.gridOriginYMeters, readOnly);
   declare_parameter("z_max_m", defaults.zMaxMeters);
   declare_parameter("height_diff_threshold_m", defaults.heightDifferenceThresholdMeters);
-  declare_parameter("step_neighbor_radius_m", defaults.stepNeighborRadiusMeters);
+  declare_parameter("step_neighbor_radius_m", defaults.stepNeighborRadiusMeters, readOnly);
   declare_parameter("min_points_per_cell", defaults.minPointsPerCell);
   declare_parameter("scan_max_use_range_m", defaults.scanMaxUseRangeMeters);
   declare_parameter("inflation_radius_m", defaults.inflationRadiusMeters);
@@ -61,7 +66,138 @@ ObstacleMonitorNode::ObstacleMonitorNode(const rclcpp::NodeOptions & options)
   declare_parameter("min_cell_count", defaults.minCellCount);
   declare_parameter("occupied_min_frames", defaults.occupiedMinFrames);
   declare_parameter("clear_hold_s", defaults.clearHoldSeconds);
-  declare_parameter("watchdog_hz", 10.0);
+  declare_parameter("watchdog_hz", 10.0, readOnly);
+  for (const auto & name : list_parameters({}, 1).names) {
+    startupParameters_.emplace(name, get_parameter(name));
+  }
+  appliedParameters_ = startupParameters_;
+  validationHandle_ = add_on_set_parameters_callback(
+    [this](const std::vector<rclcpp::Parameter> & changes) {
+      auto result = validateParameters(changes, true);
+      if (!result.successful) {RCLCPP_WARN(get_logger(), "parameter rejected: %s", result.reason.c_str());}
+      return result;
+    });
+  applicationHandle_ = add_post_set_parameters_callback(
+    [this](const std::vector<rclcpp::Parameter> & changes) {applyParameters(changes);});
+}
+
+
+rcl_interfaces::msg::SetParametersResult ObstacleMonitorNode::validateParameters(
+  const std::vector<rclcpp::Parameter> & changes, bool runtime) const
+{
+  rcl_interfaces::msg::SetParametersResult result;
+  result.successful = false;
+  auto reject = [&](const std::string & reason) {result.reason = reason; return result;};
+  const std::set<std::string> increasing = {"z_max_m", "scan_max_use_range_m",
+    "inflation_radius_m", "stop_zone_x_m", "stop_zone_y_half_m", "slow_zone_x_m",
+    "slow_zone_y_half_m", "clear_hold_s", "blind_radius_m", "memory_max_age_s"};
+  const std::set<std::string> decreasing = {"height_diff_threshold_m", "min_points_per_cell",
+    "min_cell_count", "occupied_min_frames", "points_timeout_s", "scan_timeout_s", "tf_timeout_s"};
+  auto values = startupParameters_;
+  for (auto & entry : values) {entry.second = get_parameter(entry.first);}
+  for (const auto & parameter : changes) {
+    const auto & name = parameter.get_name();
+    if (name.rfind("qos_overrides.", 0) == 0 && !has_parameter(name)) {
+      continue;  // rclcpp declares read-only QoS overrides when subscriptions are created.
+    }
+    if (name == "use_sim_time") {return reject("use_sim_time is read-only after construction");}
+    if (!increasing.count(name) && !decreasing.count(name)) {
+      return reject(name + ": read-only parameter");
+    }
+    const auto & baseline = startupParameters_.at(name);
+    if (parameter.get_type() != baseline.get_type()) {return reject(name + ": wrong type");}
+    const double requested = parameter.get_type() == rclcpp::ParameterType::PARAMETER_INTEGER ?
+      static_cast<double>(parameter.as_int()) : parameter.as_double();
+    const double initial = baseline.get_type() == rclcpp::ParameterType::PARAMETER_INTEGER ?
+      static_cast<double>(baseline.as_int()) : baseline.as_double();
+    if (!(std::isfinite(requested) && std::isfinite(initial)) ||
+      (runtime && !((increasing.count(name) && requested >= initial) ||
+      (decreasing.count(name) && requested <= initial)))) {
+      return reject(name + ": must be finite and on the conservative side of startup value (baseline=" +
+        baseline.value_to_string() + ", requested=" + parameter.value_to_string() + ")");
+    }
+    values.insert_or_assign(name, parameter);
+  }
+  auto number = [&](const char * name) {
+      const auto & value = values.at(name);
+      return value.get_type() == rclcpp::ParameterType::PARAMETER_INTEGER ?
+             static_cast<double>(value.as_int()) : value.as_double();
+    };
+  for (const auto & name : increasing) {
+    if (!std::isfinite(number(name.c_str())) || number(name.c_str()) < 0.0) {
+      return reject(name + ": must be finite and nonnegative");
+    }
+  }
+  for (const auto & name : decreasing) {
+    const double value = number(name.c_str());
+    if (!std::isfinite(value) || value <= 0.0 || value > INT_MAX) {
+      return reject(name + ": must be finite and positive");
+    }
+  }
+  if (number("memory_max_age_s") <= 0.0) {
+    return reject("memory_max_age_s: must be positive");
+  }
+  const double size = number("grid_size_m"), cell = number("cell_size_m");
+  const double originX = number("grid_origin_x_m"), originY = number("grid_origin_y_m");
+  if (!(std::isfinite(size) && std::isfinite(cell) && std::isfinite(originX) &&
+    std::isfinite(originY) && size > 0 && cell > 0 && size / cell <= INT_MAX &&
+    originX <= 0 && originY <= -number("slow_zone_y_half_m") &&
+    originY + size >= number("slow_zone_y_half_m") &&
+    originX + size >= number("slow_zone_x_m") &&
+    number("stop_zone_x_m") <= number("slow_zone_x_m") &&
+    number("stop_zone_y_half_m") <= number("slow_zone_y_half_m"))) {
+    return reject("stop zone must fit inside slow zone and grid");
+  }
+  result.successful = true;
+  return result;
+}
+
+void ObstacleMonitorNode::applyParameters(const std::vector<rclcpp::Parameter> & changes)
+{
+  auto updated = parameters_;
+  auto pointsTimeout = pointsTimeoutSeconds_, scanTimeout = scanTimeoutSeconds_;
+  auto tfTimeout = tfTimeoutSeconds_;
+  for (const auto & value : changes) {
+    const auto & name = value.get_name();
+    if (name == "z_max_m") {updated.zMaxMeters = value.as_double();}
+    if (name == "height_diff_threshold_m") {updated.heightDifferenceThresholdMeters = value.as_double();}
+    if (name == "min_points_per_cell") {updated.minPointsPerCell = static_cast<int>(value.as_int());}
+    if (name == "scan_max_use_range_m") {updated.scanMaxUseRangeMeters = value.as_double();}
+    if (name == "inflation_radius_m") {updated.inflationRadiusMeters = value.as_double();}
+    if (name == "stop_zone_x_m") {updated.stopZoneXMeters = value.as_double();}
+    if (name == "stop_zone_y_half_m") {updated.stopZoneYHalfMeters = value.as_double();}
+    if (name == "slow_zone_x_m") {updated.slowZoneXMeters = value.as_double();}
+    if (name == "slow_zone_y_half_m") {updated.slowZoneYHalfMeters = value.as_double();}
+    if (name == "min_cell_count") {updated.minCellCount = static_cast<int>(value.as_int());}
+    if (name == "occupied_min_frames") {updated.occupiedMinFrames = static_cast<int>(value.as_int());}
+    if (name == "clear_hold_s") {updated.clearHoldSeconds = value.as_double();}
+    if (name == "points_timeout_s") {pointsTimeout = value.as_double();}
+    if (name == "scan_timeout_s") {scanTimeout = value.as_double();}
+    if (name == "tf_timeout_s") {tfTimeout = value.as_double();}
+    if (name == "blind_radius_m") {blindRadiusMeters_ = value.as_double();}
+    if (name == "memory_max_age_s") {memoryMaxAgeSeconds_ = value.as_double();}
+  }
+  parameters_ = updated;
+  pointsTimeoutSeconds_ = pointsTimeout;
+  scanTimeoutSeconds_ = scanTimeout;
+  tfTimeoutSeconds_ = tfTimeout;
+  if (memory_) {
+    memory_->updateSafetyParameters(blindRadiusMeters_, memoryMaxAgeSeconds_);
+  }
+  if (stopHysteresis_) {
+    stopHysteresis_->updateParameters(updated.minCellCount, updated.occupiedMinFrames, updated.clearHoldSeconds);
+    slowHysteresis_->updateParameters(updated.minCellCount, updated.occupiedMinFrames, updated.clearHoldSeconds);
+  }
+  for (const auto & value : changes) {
+    auto previousEntry = appliedParameters_.find(value.get_name());
+    if (previousEntry == appliedParameters_.end()) {continue;}
+    auto & previous = previousEntry->second;
+    if (previous != value) {
+      RCLCPP_INFO(get_logger(), "parameter changed: %s %s -> %s", value.get_name().c_str(),
+        previous.value_to_string().c_str(), value.value_to_string().c_str());
+      previous = value;
+    }
+  }
 }
 
 ObstacleMonitorNode::CallbackReturn ObstacleMonitorNode::on_configure(const rclcpp_lifecycle::State &)
@@ -99,6 +235,12 @@ ObstacleMonitorNode::CallbackReturn ObstacleMonitorNode::on_configure(const rclc
   scanTimeoutSeconds_ = get_parameter("scan_timeout_s").as_double();
   tfTimeoutSeconds_ = get_parameter("tf_timeout_s").as_double();
   watchdogHz_ = get_parameter("watchdog_hz").as_double();
+
+  const auto validation = validateParameters({}, false);
+  if (!validation.successful) {
+    RCLCPP_ERROR(get_logger(), "invalid parameters: %s", validation.reason.c_str());
+    return CallbackReturn::FAILURE;
+  }
 
   rclcpp::QoS pointsQos(5);
   if (pointsQosReliability == "reliable") {

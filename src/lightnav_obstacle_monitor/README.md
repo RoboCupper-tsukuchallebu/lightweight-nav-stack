@@ -25,7 +25,7 @@
 |---|---|---|
 | `height_diff_threshold_m` | 0.15 | セル内高低差と近傍段差の共通閾値（m、厳密に超えた場合） |
 | `min_points_per_cell` | 2 | 対象セル・地面候補セルの最低点数 |
-| `step_neighbor_radius_m` | 0.5 | 近傍探索の円の半径（m）。0 で段差判定を無効化。負・非有限値は lifecycle configure 時に拒否 |
+| `step_neighbor_radius_m` | 0.5 | 近傍探索の円の半径（m）。0 で段差判定を無効化。read_only。負・非有限値は lifecycle configure 時に拒否 |
 
 ## 処理時間の実測
 
@@ -69,3 +69,48 @@ LiDAR 高さ 0.7 m、80×80 セル、`step_neighbor_radius_m = 0.5`。ctest の�
 近傍の最小 z を基準にするので、点数条件を満たす近傍セルの低い外れ値 1 点で半径内のセルが占有になり得る（止まる側の誤り）。
 
 入力が途絶している間は `/lightnav/local_grid` を publish しない（controller の `grid_timeout_s` を発火させるため）。status だけを 10 Hz で出し続ける。
+
+実行時パラメータは起動時の値を基準に安全側にのみ変更できます。変更は再起動後には残りません。停止ゾーン ⊂ 減速ゾーン ⊂ グリッドの制約を満たさない設定は configure 時にも拒否します。
+
+## 実行時パラメータ
+
+| パラメータ | 種類 | 保守方向 | 実行時に変更可 |
+|---|---|---|---|
+| `z_max_m` | safety | ↑ | はい |
+| `scan_max_use_range_m` | safety | ↑ | はい |
+| `inflation_radius_m` | safety | ↑ | はい |
+| `stop_zone_x_m` | safety | ↑ | はい |
+| `stop_zone_y_half_m` | safety | ↑ | はい |
+| `slow_zone_x_m` | safety | ↑ | はい |
+| `slow_zone_y_half_m` | safety | ↑ | はい |
+| `clear_hold_s` | safety | ↑ | はい |
+| `blind_radius_m` | safety | ↑ | はい |
+| `memory_max_age_s` | safety | ↑ | はい |
+| `height_diff_threshold_m` | safety | ↓ | はい |
+| `min_points_per_cell` | safety | ↓ | はい |
+| `min_cell_count` | safety | ↓ | はい |
+| `occupied_min_frames` | safety | ↓ | はい |
+| `points_timeout_s` | safety | ↓ | はい |
+| `scan_timeout_s` | safety | ↓ | はい |
+| `tf_timeout_s` | safety | ↓ | はい |
+| `step_neighbor_radius_m` | read_only | なし | いいえ |
+| `grid_size_m` | read_only | なし | いいえ |
+| `cell_size_m` | read_only | なし | いいえ |
+| `grid_origin_x_m` | read_only | なし | いいえ |
+| `grid_origin_y_m` | read_only | なし | いいえ |
+| `points_topic` | read_only | なし | いいえ |
+| `scan_topic` | read_only | なし | いいえ |
+| `points_qos_reliability` | read_only | なし | いいえ |
+| `base_frame` | read_only | なし | いいえ |
+| `memory_frame` | read_only | なし | いいえ |
+| `memory_max_range_m` | read_only | なし | いいえ |
+| `tf_max_age_s` | read_only | なし | いいえ |
+| `memory_reset_report_s` | read_only | なし | いいえ |
+| `memory_jump_distance_m` | read_only | なし | いいえ |
+| `memory_jump_angle_rad` | read_only | なし | いいえ |
+| `watchdog_hz` | read_only | なし | いいえ |
+| `use_sim_time` | read_only | なし | いいえ |
+
+`tf_timeout_s` は現状 TF の取得処理では未使用のため、変更しても動作は変わりません。
+
+構造パラメータの read_only 拒否は rclcpp が行うためノードの WARN は出ませんが、reason は返ります。

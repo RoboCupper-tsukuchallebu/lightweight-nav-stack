@@ -2,16 +2,21 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <cstdarg>
+#include <cstdio>
 #include <functional>
 #include <limits>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <lifecycle_msgs/msg/state.hpp>
 #include <lightnav_msgs/msg/obstacle_status.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <rcutils/logging.h>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/point_cloud2_iterator.hpp>
 #include <tf2_ros/static_transform_broadcaster.h>
@@ -27,6 +32,37 @@ using std::chrono::milliseconds;
 using ObstacleStatus = lightnav_msgs::msg::ObstacleStatus;
 constexpr auto kWaitLimit = std::chrono::seconds(10);
 const char kSensorFrame[] = "test_sensor";
+
+class LogCapture
+{
+public:
+  struct Entry {int severity; std::string message;};
+  LogCapture() : previous_(rcutils_logging_get_output_handler())
+  {
+    current_ = this;
+    rcutils_logging_set_output_handler(&capture);
+  }
+  ~LogCapture() {rcutils_logging_set_output_handler(previous_); current_ = nullptr;}
+  bool contains(int severity, const std::string & message) const
+  {
+    for (const auto & entry : entries_) {
+      if (entry.severity == severity && entry.message.find(message) != std::string::npos) {return true;}
+    }
+    return false;
+  }
+private:
+  static void capture(const rcutils_log_location_t *, int severity, const char *,
+    rcutils_time_point_value_t, const char * format, va_list * arguments)
+  {
+    char message[2048];
+    vsnprintf(message, sizeof(message), format, *arguments);
+    if (current_) {current_->entries_.push_back({severity, message});}
+  }
+  static LogCapture * current_;
+  rcutils_logging_output_handler_t previous_;
+  std::vector<Entry> entries_;
+};
+LogCapture * LogCapture::current_ = nullptr;
 
 // Runs the node under test and a helper node in one executor.
 class ObstacleMonitorNodeTest : public ::testing::Test
@@ -157,19 +193,301 @@ protected:
 };
 }  // namespace
 
-TEST_F(ObstacleMonitorNodeTest, NegativeStepNeighborRadiusIsRejected)
+TEST_F(ObstacleMonitorNodeTest, StructuralParametersAreReadOnly)
 {
-  ASSERT_TRUE(monitor_->set_parameter(rclcpp::Parameter("step_neighbor_radius_m", -0.1)).successful);
-  EXPECT_EQ(
-    monitor_->configure().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED);
+  const auto result = monitor_->set_parameter(rclcpp::Parameter("step_neighbor_radius_m", 0.1));
+  EXPECT_FALSE(result.successful);
+  EXPECT_NE(result.reason.find("read-only"), std::string::npos);
+  EXPECT_FALSE(monitor_->set_parameter(rclcpp::Parameter("use_sim_time", true)).successful);
 }
 
-TEST_F(ObstacleMonitorNodeTest, NaNStepNeighborRadiusIsRejected)
+TEST_F(ObstacleMonitorNodeTest, MemoryParametersRespectStartupAndAreApplied)
 {
-  ASSERT_TRUE(monitor_->set_parameter(rclcpp::Parameter(
-    "step_neighbor_radius_m", std::numeric_limits<double>::quiet_NaN())).successful);
-  EXPECT_EQ(
-    monitor_->configure().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED);
+  bringUp();
+  for (const auto & name : {"blind_radius_m", "memory_max_age_s"}) {
+    const double initial = monitor_->get_parameter(name).as_double();
+    EXPECT_TRUE(monitor_->set_parameter(rclcpp::Parameter(name, initial + 1.0)).successful);
+    EXPECT_FALSE(monitor_->set_parameter(rclcpp::Parameter(name, initial - 0.1)).successful);
+    for (double invalid : {std::numeric_limits<double>::quiet_NaN(),
+        std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity()}) {
+      EXPECT_FALSE(monitor_->set_parameter(rclcpp::Parameter(name, invalid)).successful);
+    }
+    EXPECT_DOUBLE_EQ(monitor_->get_parameter(name).as_double(), initial + 1.0);
+    EXPECT_TRUE(monitor_->set_parameter(rclcpp::Parameter(name, initial)).successful);
+  }
+  for (const auto & name : {"base_frame", "memory_frame"}) {
+    EXPECT_TRUE(monitor_->describe_parameter(name).read_only);
+    EXPECT_FALSE(monitor_->set_parameter(rclcpp::Parameter(name, "other_frame")).successful);
+  }
+  for (const auto & name : {"memory_max_range_m", "tf_max_age_s", "memory_reset_report_s",
+      "memory_jump_distance_m", "memory_jump_angle_rad"}) {
+    EXPECT_TRUE(monitor_->describe_parameter(name).read_only);
+    EXPECT_FALSE(monitor_->set_parameter(rclcpp::Parameter(name, 2.0)).successful);
+  }
+}
+
+TEST_F(ObstacleMonitorNodeTest, IncreasedMemoryAgeKeepsObservableCell)
+{
+  executor_.remove_node(monitor_->get_node_base_interface());
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({{"points_timeout_s", 0.3}, {"watchdog_hz", 20.0},
+    {"memory_max_age_s", 0.2}, {"inflation_radius_m", 0.0}});
+  monitor_ = std::make_shared<ObstacleMonitorNode>(options);
+  executor_.add_node(monitor_->get_node_base_interface());
+  bringUp();
+  publishIdentityTransform();
+
+  auto cloud = makeObstacleCloud();
+  sensor_msgs::PointCloud2Modifier modifier(cloud);
+  modifier.resize(2);
+  sensor_msgs::PointCloud2Iterator<float> x(cloud, "x"), y(cloud, "y");
+  for (int index = 0; index < 2; ++index, ++x, ++y) {*x = 0.75F; *y = 0.55F;}
+  const auto gridCell = [this](double cellX, double cellY) {
+      const auto column = static_cast<std::size_t>((cellX - lastGrid_.info.origin.position.x) /
+        lastGrid_.info.resolution);
+      const auto row = static_cast<std::size_t>((cellY - lastGrid_.info.origin.position.y) /
+        lastGrid_.info.resolution);
+      return lastGrid_.data.at(row * lastGrid_.info.width + column);
+    };
+  const auto observationStart = std::chrono::steady_clock::now();
+  ASSERT_TRUE(waitUntil([this, &cloud] {
+    cloud.header.stamp = helper_->now();
+    pointsPublisher_->publish(cloud);
+    return gridCount_ > 0;
+  }, false));
+  ASSERT_GT(gridCell(0.75, 0.55), 0);
+  ASSERT_TRUE(monitor_->set_parameter(rclcpp::Parameter("memory_max_age_s", 60.0)).successful);
+  spinFor(milliseconds(500));  // Past the original 0.2 s, well before 60 s.
+
+  // Rotation makes the observed local cell map to a different world key, so its
+  // reinsertion cannot mask expiration of the original key at (0.75, 0.55).
+  geometry_msgs::msg::TransformStamped pose;
+  pose.header.stamp = helper_->now();
+  pose.header.frame_id = "odom";
+  pose.child_frame_id = "base_link";
+  pose.transform.rotation.z = std::sin(0.2);
+  pose.transform.rotation.w = std::cos(0.2);
+  broadcaster_->sendTransform(pose);
+  spinFor(milliseconds(100));
+  sensor_msgs::PointCloud2Iterator<float> rotatedX(cloud, "x"), rotatedY(cloud, "y");
+  for (int index = 0; index < 2; ++index, ++rotatedX, ++rotatedY) {
+    *rotatedX = 0.92F; *rotatedY = 0.22F;
+  }
+  ASSERT_LT(std::chrono::steady_clock::now() - observationStart, std::chrono::seconds(60));
+  cloud.header.stamp = helper_->now();
+  pointsPublisher_->publish(cloud);
+  spinFor(milliseconds(150));
+
+  pose.header.stamp = helper_->now();
+  pose.transform.rotation.z = 0.0;
+  pose.transform.rotation.w = 1.0;
+  broadcaster_->sendTransform(pose);
+  spinFor(milliseconds(100));
+  modifier.resize(0);
+  const int previousGridCount = gridCount_;
+  cloud.header.stamp = helper_->now();
+  pointsPublisher_->publish(cloud);
+  spinFor(milliseconds(150));
+  ASSERT_GT(gridCount_, previousGridCount);
+  EXPECT_FALSE(lastStatus_.is_input_stale);
+  ASSERT_GT(gridCell(0.75, 0.65), 0);  // The rotated observation was processed.
+  EXPECT_GT(gridCell(0.75, 0.55), 0);
+}
+
+TEST_F(ObstacleMonitorNodeTest, InvalidMemoryStartupValuesFailConfigure)
+{
+  for (const auto & name : {"blind_radius_m", "memory_max_age_s"}) {
+    for (double invalid : {-1.0, std::numeric_limits<double>::quiet_NaN(),
+        std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity()}) {
+      rclcpp::NodeOptions options;
+      options.parameter_overrides({rclcpp::Parameter(name, invalid)});
+      auto node = std::make_shared<ObstacleMonitorNode>(options);
+      EXPECT_EQ(node->configure().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED);
+    }
+  }
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({{"memory_max_age_s", 0.0}});
+  auto node = std::make_shared<ObstacleMonitorNode>(options);
+  EXPECT_EQ(node->configure().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED);
+}
+
+TEST_F(ObstacleMonitorNodeTest, InvalidStepNeighborOverridesFailConfigure)
+{
+  for (double value : {-0.1, std::numeric_limits<double>::quiet_NaN()}) {
+    // Arrange
+    rclcpp::NodeOptions options;
+    options.parameter_overrides({{"step_neighbor_radius_m", value}});
+    auto node = std::make_shared<ObstacleMonitorNode>(options);
+    // Act
+    const auto state = node->configure().id();
+    // Assert
+    EXPECT_EQ(state, lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED);
+  }
+}
+
+TEST_F(ObstacleMonitorNodeTest, LogsAcceptedAndRejectedChanges)
+{
+  // Arrange
+  bringUp();
+  LogCapture logs;
+  // Act
+  const auto accepted = monitor_->set_parameter(rclcpp::Parameter("stop_zone_x_m", 1.2));
+  const auto reversed = monitor_->set_parameter(rclcpp::Parameter("stop_zone_x_m", 0.9));
+  const auto nan = monitor_->set_parameter(rclcpp::Parameter(
+    "clear_hold_s", std::numeric_limits<double>::quiet_NaN()));
+  const auto readOnly = monitor_->set_parameter(rclcpp::Parameter("use_sim_time", true));
+  // Assert
+  EXPECT_TRUE(accepted.successful);
+  EXPECT_FALSE(reversed.successful);
+  EXPECT_FALSE(nan.successful);
+  EXPECT_FALSE(readOnly.successful);
+  EXPECT_NE(reversed.reason.find("baseline="), std::string::npos);
+  EXPECT_NE(reversed.reason.find("requested="), std::string::npos);
+  EXPECT_TRUE(logs.contains(RCUTILS_LOG_SEVERITY_INFO, "parameter changed: stop_zone_x_m"));
+  EXPECT_TRUE(logs.contains(RCUTILS_LOG_SEVERITY_WARN, reversed.reason));
+  EXPECT_TRUE(logs.contains(RCUTILS_LOG_SEVERITY_WARN, nan.reason));
+  EXPECT_TRUE(logs.contains(RCUTILS_LOG_SEVERITY_WARN, readOnly.reason));
+}
+
+TEST_F(ObstacleMonitorNodeTest, UseSimTimeIsRejectedInEveryLifecycleState)
+{
+  // Arrange and act / assert in each state
+  EXPECT_FALSE(monitor_->set_parameter(rclcpp::Parameter("use_sim_time", true)).successful);
+  ASSERT_EQ(monitor_->configure().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE);
+  EXPECT_FALSE(monitor_->set_parameter(rclcpp::Parameter("use_sim_time", true)).successful);
+  ASSERT_EQ(monitor_->activate().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE);
+  EXPECT_FALSE(monitor_->set_parameter(rclcpp::Parameter("use_sim_time", true)).successful);
+}
+
+TEST_F(ObstacleMonitorNodeTest, SafetyValuesRespectStartupAndConstraints)
+{
+  bringUp();
+  EXPECT_TRUE(monitor_->set_parameter(rclcpp::Parameter("stop_zone_x_m", 1.2)).successful);
+  EXPECT_TRUE(monitor_->set_parameter(rclcpp::Parameter("stop_zone_x_m", 1.0)).successful);
+  EXPECT_FALSE(monitor_->set_parameter(rclcpp::Parameter("stop_zone_x_m", 0.9)).successful);
+  EXPECT_FALSE(monitor_->set_parameter(rclcpp::Parameter("stop_zone_x_m", 3.0)).successful);
+  EXPECT_TRUE(monitor_->set_parameter(rclcpp::Parameter("min_cell_count", 1)).successful);
+  EXPECT_FALSE(monitor_->set_parameter(rclcpp::Parameter("min_cell_count", 3)).successful);
+  for (double value : {std::numeric_limits<double>::quiet_NaN(),
+      std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity()}) {
+    const auto result = monitor_->set_parameter(rclcpp::Parameter("clear_hold_s", value));
+    EXPECT_FALSE(result.successful);
+    EXPECT_FALSE(result.reason.empty());
+  }
+  EXPECT_EQ(monitor_->get_parameter("stop_zone_x_m").as_double(), 1.0);
+  monitor_->deactivate();
+  monitor_->cleanup();
+  EXPECT_FALSE(monitor_->set_parameter(rclcpp::Parameter("stop_zone_x_m", 0.9)).successful);
+  EXPECT_EQ(monitor_->configure().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE);
+}
+
+TEST_F(ObstacleMonitorNodeTest, NonFiniteStartupAndWrongTypesAreRejected)
+{
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({{"clear_hold_s", std::numeric_limits<double>::quiet_NaN()}});
+  auto node = std::make_shared<ObstacleMonitorNode>(options);
+  const auto invalidBaseline = node->set_parameter(rclcpp::Parameter("clear_hold_s", 1.0));
+  EXPECT_FALSE(invalidBaseline.successful);
+  EXPECT_FALSE(invalidBaseline.reason.empty());
+  EXPECT_EQ(node->configure().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED);
+
+  const auto wrongType = monitor_->set_parameter(rclcpp::Parameter("min_cell_count", "invalid"));
+  EXPECT_FALSE(wrongType.successful);
+  EXPECT_FALSE(wrongType.reason.empty());
+}
+
+TEST_F(ObstacleMonitorNodeTest, AtomicChangesApplyTogetherAndRejectTogether)
+{
+  bringUp();
+  const auto accepted = monitor_->set_parameters_atomically({
+    rclcpp::Parameter("stop_zone_x_m", 1.2), rclcpp::Parameter("slow_zone_x_m", 2.6)});
+  EXPECT_TRUE(accepted.successful);
+  EXPECT_DOUBLE_EQ(monitor_->get_parameter("stop_zone_x_m").as_double(), 1.2);
+  EXPECT_DOUBLE_EQ(monitor_->get_parameter("slow_zone_x_m").as_double(), 2.6);
+
+  const auto rejected = monitor_->set_parameters_atomically({
+    rclcpp::Parameter("stop_zone_x_m", 1.3), rclcpp::Parameter("slow_zone_x_m", 2.0)});
+  EXPECT_FALSE(rejected.successful);
+  EXPECT_FALSE(rejected.reason.empty());
+  EXPECT_DOUBLE_EQ(monitor_->get_parameter("stop_zone_x_m").as_double(), 1.2);
+  EXPECT_DOUBLE_EQ(monitor_->get_parameter("slow_zone_x_m").as_double(), 2.6);
+}
+
+TEST_F(ObstacleMonitorNodeTest, ParameterServiceValidatesEachValueSeparately)
+{
+  bringUp();
+  auto client = std::make_shared<rclcpp::AsyncParametersClient>(helper_, "obstacle_monitor");
+  ASSERT_TRUE(waitUntil([&client] {return client->service_is_ready();}, false));
+  auto future = client->set_parameters({
+    rclcpp::Parameter("stop_zone_x_m", 1.2), rclcpp::Parameter("slow_zone_x_m", 2.0)});
+  ASSERT_TRUE(waitUntil([&future] {
+    return future.wait_for(milliseconds(0)) == std::future_status::ready;
+  }, false));
+  const auto results = future.get();
+  ASSERT_EQ(results.size(), 2u);
+  EXPECT_TRUE(results[0].successful);
+  EXPECT_FALSE(results[1].successful);
+  EXPECT_FALSE(results[1].reason.empty());
+  EXPECT_DOUBLE_EQ(monitor_->get_parameter("stop_zone_x_m").as_double(), 1.2);
+  EXPECT_DOUBLE_EQ(monitor_->get_parameter("slow_zone_x_m").as_double(), 2.5);
+}
+
+TEST_F(ObstacleMonitorNodeTest, InvalidStartupZoneFailsConfigure)
+{
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({{"stop_zone_x_m", 4.0}});
+  auto node = std::make_shared<ObstacleMonitorNode>(options);
+  EXPECT_EQ(node->configure().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED);
+}
+
+TEST_F(ObstacleMonitorNodeTest, UpdatingThresholdPreservesOccupiedState)
+{
+  // Arrange: observed ground can clear the remembered obstacle in this test.
+  executor_.remove_node(monitor_->get_node_base_interface());
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({{"points_timeout_s", 0.3}, {"clear_hold_s", 0.2},
+    {"watchdog_hz", 20.0}, {"blind_radius_m", 0.0}});
+  monitor_ = std::make_shared<ObstacleMonitorNode>(options);
+  executor_.add_node(monitor_->get_node_base_interface());
+  bringUp();
+  publishIdentityTransform();
+  ASSERT_TRUE(waitUntil([this] {return lastStatus_.is_stop_zone_occupied;}, true));
+  const int previousCount = statusCount_;
+  // Act
+  ASSERT_TRUE(monitor_->set_parameter(rclcpp::Parameter("clear_hold_s", 1.0)).successful);
+  // Assert: the occupied state survives the update.
+  EXPECT_DOUBLE_EQ(monitor_->get_parameter("clear_hold_s").as_double(), 1.0);
+  ASSERT_TRUE(waitUntil([this, previousCount] {return statusCount_ > previousCount;}, false));
+  EXPECT_TRUE(lastStatus_.is_stop_zone_occupied);
+
+  // Continue sending valid empty clouds so the hysteresis advances without stale input.
+  auto emptyCloud = makeObstacleCloud();
+  sensor_msgs::PointCloud2Modifier modifier(emptyCloud);
+  modifier.resize(0);
+  const auto start = std::chrono::steady_clock::now();
+  while (std::chrono::steady_clock::now() - start < milliseconds(500)) {
+    emptyCloud.header.stamp = helper_->now();
+    pointsPublisher_->publish(emptyCloud);
+    spinFor(milliseconds(50));
+  }
+  EXPECT_FALSE(lastStatus_.is_input_stale);
+  EXPECT_TRUE(lastStatus_.is_stop_zone_occupied);
+  // Ground observations clear the memory, then the updated hold time expires.
+  auto groundCloud = makeObstacleCloud();
+  sensor_msgs::PointCloud2Iterator<float> z(groundCloud, "z");
+  for (int index = 0; index < 6; ++index, ++z) {*z = 0.0F;}
+  const auto groundStart = std::chrono::steady_clock::now();
+  while (std::chrono::steady_clock::now() - groundStart < milliseconds(500)) {
+    groundCloud.header.stamp = helper_->now();
+    pointsPublisher_->publish(groundCloud);
+    spinFor(milliseconds(50));
+  }
+  EXPECT_TRUE(lastStatus_.is_stop_zone_occupied);
+  ASSERT_TRUE(waitUntil([this, &groundCloud] {
+    groundCloud.header.stamp = helper_->now();
+    pointsPublisher_->publish(groundCloud);
+    return !lastStatus_.is_stop_zone_occupied;
+  }, false));
 }
 
 TEST_F(ObstacleMonitorNodeTest, DefaultPointsQoSReliabilityAcceptsReliablePublisher)
@@ -183,11 +501,10 @@ TEST_F(ObstacleMonitorNodeTest, DefaultPointsQoSReliabilityAcceptsReliablePublis
 
 TEST_F(ObstacleMonitorNodeTest, InvalidPointsQoSReliabilityIsRejected)
 {
-  ASSERT_TRUE(
-    monitor_->set_parameter(
-      rclcpp::Parameter("points_qos_reliability", "unreliable")).successful);
-  EXPECT_EQ(
-    monitor_->configure().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED);
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({{"points_qos_reliability", "unreliable"}});
+  auto node = std::make_shared<ObstacleMonitorNode>(options);
+  EXPECT_EQ(node->configure().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED);
 }
 
 TEST_F(ObstacleMonitorNodeTest, WatchdogPublishesStaleStatusWithoutGridWhenNoInput)
@@ -260,7 +577,12 @@ TEST_F(ObstacleMonitorNodeTest, InvalidCloudIsDroppedAndBecomesStale)
 
 TEST_F(ObstacleMonitorNodeTest, BlindMemoryKeepsStopAndGridPastAge)
 {
-  ASSERT_TRUE(monitor_->set_parameter(rclcpp::Parameter("memory_max_age_s", 0.1)).successful);
+  executor_.remove_node(monitor_->get_node_base_interface());
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({{"points_timeout_s", 0.3}, {"clear_hold_s", 0.2},
+    {"watchdog_hz", 20.0}, {"memory_max_age_s", 0.1}});
+  monitor_ = std::make_shared<ObstacleMonitorNode>(options);
+  executor_.add_node(monitor_->get_node_base_interface());
   bringUp();
   publishIdentityTransform();
   geometry_msgs::msg::TransformStamped approach;

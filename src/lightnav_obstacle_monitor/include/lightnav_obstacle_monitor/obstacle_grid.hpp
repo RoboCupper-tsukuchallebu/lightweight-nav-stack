@@ -95,6 +95,13 @@ class ZoneHysteresis
 public:
   ZoneHysteresis(int minCellCount, int occupiedMinFrames, double clearHoldSeconds);
 
+  void updateParameters(int minCellCount, int occupiedMinFrames, double clearHoldSeconds)
+  {
+    minCellCount_ = minCellCount;
+    occupiedMinFrames_ = occupiedMinFrames;
+    clearHoldSeconds_ = clearHoldSeconds;
+  }
+
   bool update(std::uint32_t cellCount, double nowSeconds);
   bool isOccupied() const {return isOccupied_;}
 

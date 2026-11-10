@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <memory>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -57,6 +58,14 @@ private:
     const builtin_interfaces::msg::Time & stamp, bool & memoryTfStale);
   void publishResult(SteadyClock::time_point frameStart, bool shouldUpdateHysteresis);
   void releaseActiveResources();
+
+  rcl_interfaces::msg::SetParametersResult validateParameters(
+    const std::vector<rclcpp::Parameter> & changes, bool runtime) const;
+  void applyParameters(const std::vector<rclcpp::Parameter> & changes);
+  std::map<std::string, rclcpp::Parameter> startupParameters_;
+  std::map<std::string, rclcpp::Parameter> appliedParameters_;
+  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr validationHandle_;
+  rclcpp::node_interfaces::PostSetParametersCallbackHandle::SharedPtr applicationHandle_;
 
   ObstacleMonitorParameters parameters_;
   GridGeometry geometry_{};

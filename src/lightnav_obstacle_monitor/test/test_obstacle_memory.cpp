@@ -122,6 +122,22 @@ TEST(ObstacleMemoryTest, UnobservedAndBlindGroundDoNotClear)
   memory.cells(pose(0), 30);
   EXPECT_EQ(memory.size(), 1U);
 }
+TEST(ObstacleMemoryTest, SafetyParameterUpdateKeepsExistingMemory)
+{
+  ObstacleMonitorParameters parameters;
+  const auto geometry = GridGeometry::fromParameters(parameters);
+  ObstacleMemory memory(geometry, 0.6, 30, 1, 0.785);
+  std::vector<std::uint8_t> occupied(geometry.cellCount(), 0), ground(geometry.cellCount(), 0);
+  const auto index = *geometry.cellIndex(1.05, 0.05);
+  occupied[index] = 1;
+  memory.update(occupied, ground, pose(0), Eigen::Vector3d::Zero(), 0);
+  memory.updateSafetyParameters(1.5, 60);
+  EXPECT_EQ(memory.size(), 1U);
+  occupied[index] = 0;
+  ground[index] = 1;
+  memory.update(occupied, ground, pose(0), Eigen::Vector3d::Zero(), 40);
+  EXPECT_EQ(memory.size(), 1U);
+}
 TEST(ObstacleMemoryTest, RotationJumpClears)
 {
   ObstacleMonitorParameters parameters;

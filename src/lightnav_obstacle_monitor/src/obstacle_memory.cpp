@@ -9,6 +9,12 @@ ObstacleMemory::ObstacleMemory(const GridGeometry & geometry, double blindRadius
 : geometry_(geometry), blindRadiusMeters_(blindRadiusMeters), maxAgeSeconds_(maxAgeSeconds),
   jumpDistanceMeters_(jumpDistanceMeters), jumpAngleRadians_(jumpAngleRadians), maxRangeMeters_(maxRangeMeters) {}
 
+void ObstacleMemory::updateSafetyParameters(double blindRadiusMeters, double maxAgeSeconds)
+{
+  blindRadiusMeters_ = blindRadiusMeters;
+  maxAgeSeconds_ = maxAgeSeconds;
+}
+
 ObstacleMemory::Key ObstacleMemory::key(double x, double y) const
 {
   return {static_cast<long long>(std::floor(x / geometry_.cellSizeMeters)),
