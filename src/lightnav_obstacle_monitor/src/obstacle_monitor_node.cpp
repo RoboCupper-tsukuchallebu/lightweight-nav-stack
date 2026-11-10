@@ -147,6 +147,8 @@ ObstacleMonitorNode::CallbackReturn ObstacleMonitorNode::on_configure(const rclc
     "/lightnav/obstacle_status", rclcpp::QoS(10).reliable().durability_volatile());
   gridPublisher_ = create_publisher<nav_msgs::msg::OccupancyGrid>(
     "/lightnav/local_grid", rclcpp::QoS(1).reliable().durability_volatile());
+  rawGridPublisher_ = create_publisher<nav_msgs::msg::OccupancyGrid>(
+    "/lightnav/local_grid_raw", rclcpp::QoS(1).reliable().durability_volatile());
   if (!pointsTopic_.empty()) {
     pointsSubscription_ = create_subscription<sensor_msgs::msg::PointCloud2>(
       pointsTopic_, pointsQos,
@@ -164,6 +166,7 @@ ObstacleMonitorNode::CallbackReturn ObstacleMonitorNode::on_activate(const rclcp
 {
   statusPublisher_->on_activate();
   gridPublisher_->on_activate();
+  rawGridPublisher_->on_activate();
   watchdogTimer_ = create_wall_timer(
     std::chrono::duration_cast<std::chrono::nanoseconds>(
       std::chrono::duration<double>(1.0 / watchdogHz_)),
@@ -176,6 +179,9 @@ void ObstacleMonitorNode::releaseActiveResources()
   watchdogTimer_.reset();
   if (statusPublisher_) {
     statusPublisher_->on_deactivate();
+  }
+  if (rawGridPublisher_) {
+    rawGridPublisher_->on_deactivate();
   }
   if (gridPublisher_) {
     gridPublisher_->on_deactivate();
@@ -194,6 +200,7 @@ ObstacleMonitorNode::CallbackReturn ObstacleMonitorNode::on_cleanup(const rclcpp
   scanSubscription_.reset();
   statusPublisher_.reset();
   gridPublisher_.reset();
+  rawGridPublisher_.reset();
   memory_.reset();
   worldFromBase_.reset();
   tfListener_.reset();
@@ -382,6 +389,9 @@ void ObstacleMonitorNode::publishResult(
     auto gridMessage = buildOccupancyGridMessage(summary.inflatedCells, geometry_, baseFrame_);
     gridMessage.header.stamp = status.header.stamp;
     gridPublisher_->publish(gridMessage);
+    auto rawGridMessage = buildOccupancyGridMessage(occupiedCells, geometry_, baseFrame_);
+    rawGridMessage.header.stamp = status.header.stamp;
+    rawGridPublisher_->publish(rawGridMessage);
   }
   // While an input is stale no grid is published, so the controller's grid timeout fires.
   status.is_stop_zone_occupied = stopHysteresis_->isOccupied();

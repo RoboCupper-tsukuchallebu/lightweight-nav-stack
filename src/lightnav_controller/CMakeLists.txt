@@ -6,6 +6,7 @@ find_package(rclcpp REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
 find_package(visualization_msgs REQUIRED)
 find_package(lightnav_msgs REQUIRED)
 
@@ -31,6 +32,7 @@ set(controller_ros_libraries
   rclcpp::rclcpp
   rclcpp_lifecycle::rclcpp_lifecycle
   geometry_msgs::geometry_msgs__rosidl_typesupport_cpp
+  std_msgs::std_msgs__rosidl_typesupport_cpp
   nav_msgs::nav_msgs__rosidl_typesupport_cpp
   visualization_msgs::visualization_msgs__rosidl_typesupport_cpp
   lightnav_msgs::lightnav_msgs__rosidl_typesupport_cpp)

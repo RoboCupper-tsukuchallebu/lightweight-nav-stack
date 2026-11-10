@@ -392,3 +392,57 @@ TEST_F(ControllerNodeAvoidWiring, RuntimeSpeedLimitChangesNextPublishedCommand) 
   ASSERT_TRUE(last_status_.has_value());
   EXPECT_NEAR(last_status_->commanded_linear_mps, 0.3, 1e-5);
 }
+
+TEST(RawGridMatching, RejectsStaleMismatchedAndInvalidGeometry) {
+  lightnav_controller::LocalGrid grid;
+  auto raw = grid;
+  EXPECT_TRUE(lightnav_controller::rawGridMatches(grid, raw, true, 0.1, 0.5));
+  EXPECT_FALSE(lightnav_controller::rawGridMatches(grid, raw, false, 0.1, 0.5));
+  EXPECT_FALSE(lightnav_controller::rawGridMatches(grid, raw, true, 0.6, 0.5));
+  EXPECT_FALSE(lightnav_controller::rawGridMatches(grid, raw, true, -0.1, 0.5));
+  raw.origin_x_m = 1.0;
+  EXPECT_FALSE(lightnav_controller::rawGridMatches(grid, raw, true, 0.1, 0.5));
+}
+
+TEST(RawGridMatching, BufferMatchesEitherDeliveryOrderAndEvictsOldFrames) {
+  lightnav_controller::RawGridBuffer buffer;
+  lightnav_controller::ReceivedGrid inflated;
+  inflated.received_at = rclcpp::Time(1000000000LL);
+  inflated.stamp.sec = 1;
+  auto raw = inflated;
+  // Inflated arriving first has no matching raw until the raw frame arrives.
+  EXPECT_EQ(buffer.match(inflated, inflated.received_at, 1.0), nullptr);
+  buffer.push(raw);
+  EXPECT_NE(buffer.match(inflated, inflated.received_at, 1.0), nullptr);
+  // A newer raw frame must not hide the matching previous frame.
+  raw.stamp.sec = 2;
+  buffer.push(raw);
+  EXPECT_NE(buffer.match(inflated, inflated.received_at, 1.0), nullptr);
+  inflated.stamp.sec = 9;
+  EXPECT_EQ(buffer.match(inflated, inflated.received_at, 1.0), nullptr);
+  for (int i = 3; i <= 5; ++i) { raw.stamp.sec = i; buffer.push(raw); }
+  inflated.stamp.sec = 1;
+  EXPECT_EQ(buffer.match(inflated, inflated.received_at, 1.0), nullptr);
+  inflated.stamp.sec = 5;
+  EXPECT_EQ(buffer.match(inflated, rclcpp::Time(3000000000LL), 1.0), nullptr);
+}
+
+TEST(RawGridMatching, DiagnosticExplainsFallback) {
+  lightnav_controller::RawGridBuffer buffer;
+  lightnav_controller::ReceivedGrid inflated;
+  inflated.received_at = rclcpp::Time(1000000000LL);
+  inflated.stamp.sec = 1;
+  auto raw = inflated;
+  EXPECT_STREQ(buffer.reason(inflated, inflated.received_at, 1.0), "missing");
+  raw.stamp.sec = 2;
+  buffer.push(raw);
+  EXPECT_STREQ(buffer.reason(inflated, inflated.received_at, 1.0), "stamp_mismatch");
+  raw.stamp.sec = 1;
+  raw.grid.origin_x_m = 1.0;
+  buffer.push(raw);
+  EXPECT_STREQ(buffer.reason(inflated, inflated.received_at, 1.0), "shape_mismatch");
+  raw.grid.origin_x_m = 0.0;
+  buffer.push(raw);
+  EXPECT_STREQ(buffer.reason(inflated, inflated.received_at, 1.0), "match");
+  EXPECT_STREQ(buffer.reason(inflated, rclcpp::Time(3000000000LL), 1.0), "expired");
+}

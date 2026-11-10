@@ -128,9 +128,10 @@ std::vector<ArcCandidate> evaluateArcCandidates(const LocalGrid& grid, const Pos
                                                 const std::vector<Point2D>& path_points,
                                                 std::size_t closest_index,
                                                 double previous_curvature_per_m,
-                                                const AvoidParameters& parameters) {
+                                                const AvoidParameters& parameters, const LocalGrid* raw_grid) {
   std::vector<ArcCandidate> candidates;
   if (parameters.arc_candidate_count < 1 || path_points.empty() ||
+      !std::isfinite(grid.resolution_m) || grid.resolution_m <= 0.0 ||
       !std::isfinite(parameters.arc_length_m) || parameters.arc_length_m <= 0.0 ||
       !std::isfinite(parameters.arc_step_m) || parameters.arc_step_m <= 0.0 ||
       !std::isfinite(parameters.max_path_deviation_m) || parameters.max_path_deviation_m <= 0.0) {
@@ -142,6 +143,10 @@ std::vector<ArcCandidate> evaluateArcCandidates(const LocalGrid& grid, const Pos
       path_points, first_index, parameters.arc_length_m + 2.0 * parameters.max_path_deviation_m);
   const Point2D target = pathPointAhead(path_points, closest_index, parameters.arc_length_m);
   candidates.reserve(static_cast<std::size_t>(parameters.arc_candidate_count));
+  const LocalGrid& footprint_grid = raw_grid != nullptr ? *raw_grid : grid;
+  const double spacing_m = footprint_grid.resolution_m / 2.0;
+  const int forward_steps = static_cast<int>(std::ceil(parameters.stop_zone_x_m / spacing_m));
+  const int lateral_steps = static_cast<int>(std::ceil(parameters.stop_zone_y_half_m / spacing_m));
 
   for (int candidate_index = 0; candidate_index < parameters.arc_candidate_count; ++candidate_index) {
     const double ratio = parameters.arc_candidate_count == 1
@@ -155,7 +160,22 @@ std::vector<ArcCandidate> evaluateArcCandidates(const LocalGrid& grid, const Pos
     for (double travelled_m = parameters.arc_step_m;
          travelled_m <= parameters.arc_length_m + 1e-9; travelled_m += parameters.arc_step_m) {
       const Point2D sample = arcPointInBody(candidate.curvature_per_m, travelled_m);
-      if (grid.isOccupiedInBody(sample.x_m, sample.y_m)) {
+      bool occupied = grid.isOccupiedInBody(sample.x_m, sample.y_m);
+      // Scan the forward rectangular stop zone in the orientation of this arc.
+      // Half-cell spacing avoids gaps when the rectangle is rotated.
+      const double heading_rad = candidate.curvature_per_m * travelled_m;
+      const double cosine = std::cos(heading_rad);
+      const double sine = std::sin(heading_rad);
+      for (int forward_index = 0; forward_index <= forward_steps && !occupied; ++forward_index) {
+        const double forward_m = std::min(parameters.stop_zone_x_m, forward_index * spacing_m);
+        for (int lateral_index = -lateral_steps; lateral_index <= lateral_steps && !occupied; ++lateral_index) {
+          const double lateral_m = std::clamp(lateral_index * spacing_m,
+                                               -parameters.stop_zone_y_half_m, parameters.stop_zone_y_half_m);
+          occupied = footprint_grid.isOccupiedInBody(sample.x_m + cosine * forward_m - sine * lateral_m,
+                                           sample.y_m + sine * forward_m + cosine * lateral_m);
+        }
+      }
+      if (occupied) {
         candidate.is_feasible = false;
         candidate.rejection_reason = "collision";
         break;
@@ -205,7 +225,7 @@ ArcAvoidLayer::ArcAvoidLayer(const AvoidParameters& parameters) : parameters_(pa
 void ArcAvoidLayer::reset() {
   is_avoiding_ = false;
   release_since_s_.reset();
-  waiting_since_s_.reset();
+  resetWaiting();
   previous_curvature_per_m_ = 0.0;
 }
 
@@ -248,13 +268,16 @@ LayerOutput ArcAvoidLayer::compute(const AvoidContext& context) {
     return LayerOutput{};
   }
   if (!context.is_obstacle_status_fresh) {
-    waiting_since_s_.reset();
+    resetWaiting();
     LayerOutput output;
     output.is_asserted = true;
     output.reason = StopReason::kObstacleStale;
     return output;
   }
   if (context.is_stop_zone_occupied || is_at_path_end) {
+    progress_since_s_.reset();
+    progress_pose_.reset();
+    recovery_yaw_.reset();
     return makeWaiting(context.now_s, context.is_obstacle_status_fresh
                                           ? StopReason::kBlocked
                                           : StopReason::kObstacleStale);
@@ -262,13 +285,49 @@ LayerOutput ArcAvoidLayer::compute(const AvoidContext& context) {
 
   candidates_ = evaluateArcCandidates(
       grid, context.pose, context.path_points, context.closest_index, previous_curvature_per_m_,
-      parameters_);
+      parameters_, context.raw_grid);
   const auto best = selectBestCandidate(candidates_);
   selected_candidate_ = best;
   LayerOutput output;
   output.is_asserted = true;
   if (best.has_value()) {
+    const Point2D current{context.pose.x_m, context.pose.y_m};
+    if (!progress_since_s_ || context.now_s < *progress_since_s_) {
+      progress_since_s_ = context.now_s;
+      progress_pose_ = current;
+      progress_remaining_m_ = context.remaining_distance_m;
+    }
+    constexpr double kProgressDistanceM = 0.1;
+    const bool path_progress = std::isfinite(progress_remaining_m_) &&
+        progress_remaining_m_ - context.remaining_distance_m >= kProgressDistanceM;
+    const bool position_progress = distanceBetween(*progress_pose_, current) >= kProgressDistanceM;
+    if (path_progress || position_progress) {
+      progress_since_s_ = context.now_s;
+      progress_pose_ = current;
+      progress_remaining_m_ = context.remaining_distance_m;
+      waiting_since_s_.reset();
+      recovery_yaw_.reset();
+    }
+    if (context.now_s - *progress_since_s_ >= parameters_.stuck_timeout_s) {
+      // Retry only after the stuck rotation actually changes heading. The
+      // newly evaluated arc still has to pass all collision checks.
+      if (waiting_since_s_ && context.now_s - *waiting_since_s_ >=
+          parameters_.stuck_timeout_s + parameters_.stuck_rotate_after_s && !recovery_yaw_) {
+        recovery_yaw_ = context.pose.yaw_rad;
+      }
+      if (recovery_yaw_ && std::fabs(std::remainder(context.pose.yaw_rad - *recovery_yaw_,
+                                                   2.0 * std::acos(-1.0))) >= 0.3) {
+        progress_since_s_ = context.now_s;
+        progress_pose_ = current;
+        progress_remaining_m_ = context.remaining_distance_m;
+        waiting_since_s_.reset();
+        recovery_yaw_.reset();
+      } else {
+        return makeWaiting(context.now_s, StopReason::kBlocked);
+      }
+    }
     waiting_since_s_.reset();
+    recovery_yaw_.reset();
     previous_curvature_per_m_ = best->curvature_per_m;
     const double linear_mps = std::min(parameters_.v_avoid_mps,
                                        parameters_.k_end_per_s * context.remaining_distance_m);
@@ -276,6 +335,9 @@ LayerOutput ArcAvoidLayer::compute(const AvoidContext& context) {
     output.reason = StopReason::kOk;
     return output;
   }
+  progress_since_s_.reset();
+  progress_pose_.reset();
+  recovery_yaw_.reset();
   return makeWaiting(context.now_s, StopReason::kBlocked);
 }
 

@@ -86,6 +86,7 @@ private:
   rclcpp_lifecycle::LifecyclePublisher<lightnav_msgs::msg::ObstacleStatus>::SharedPtr
     statusPublisher_;
   rclcpp_lifecycle::LifecyclePublisher<nav_msgs::msg::OccupancyGrid>::SharedPtr gridPublisher_;
+  rclcpp_lifecycle::LifecyclePublisher<nav_msgs::msg::OccupancyGrid>::SharedPtr rawGridPublisher_;
   rclcpp::TimerBase::SharedPtr watchdogTimer_;
 };
 

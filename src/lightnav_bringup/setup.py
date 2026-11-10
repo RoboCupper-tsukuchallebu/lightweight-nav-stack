@@ -15,6 +15,7 @@ setup(
     ],
     install_requires=["setuptools"],
     extras_require={"test": ["pytest"]},
+    entry_points={"console_scripts": ["lifecycle_start = lightnav_bringup.lifecycle_start:main"]},
     zip_safe=True,
     maintainer="lightnav maintainers",
     maintainer_email="maintainers@example.com",

@@ -85,6 +85,49 @@ TEST(EvaluateArcCandidates, OccupiedCellOnArcRejectsIt) {
   EXPECT_NE(candidates[7].curvature_per_m, best->curvature_per_m);
 }
 
+TEST(EvaluateArcCandidates, RejectsOccupiedGridBesideArcWithinStopZoneMargin) {
+  LocalGrid grid = makeEmptyGrid();
+  fillRectangle(grid, 1.0, 1.1, 0.15, 0.19);
+  AvoidParameters parameters = makeAvoidParameters();
+  EXPECT_TRUE(evaluateArcCandidates(grid, kOrigin, makeStraightPath(), 0, 0.0, parameters)[7].is_feasible);
+  parameters.stop_zone_y_half_m = 0.05;
+  EXPECT_TRUE(evaluateArcCandidates(grid, kOrigin, makeStraightPath(), 0, 0.0, parameters)[7].is_feasible);
+  parameters.stop_zone_y_half_m = 0.2;
+  EXPECT_FALSE(evaluateArcCandidates(grid, kOrigin, makeStraightPath(), 0, 0.0, parameters)[7].is_feasible);
+}
+
+TEST(EvaluateArcCandidates, StopZoneDoesNotBlockPointsBehindOrOutsideItsWidth) {
+  AvoidParameters parameters = makeAvoidParameters();
+  parameters.arc_candidate_count = 1;
+  parameters.arc_length_m = 0.1;
+  parameters.arc_step_m = 0.1;
+  parameters.stop_zone_x_m = 0.3;
+  parameters.stop_zone_y_half_m = 0.2;
+  LocalGrid grid = makeEmptyGrid();
+  fillRectangle(grid, -0.5, -0.5, 0.0, 0.0);
+  fillRectangle(grid, 0.2, 0.2, 0.5, 0.5);
+  EXPECT_TRUE(evaluateArcCandidates(grid, kOrigin, makeStraightPath(), 0, 0.0, parameters)[0].is_feasible);
+  fillRectangle(grid, 0.2, 0.2, 0.1, 0.1);
+  EXPECT_FALSE(evaluateArcCandidates(grid, kOrigin, makeStraightPath(), 0, 0.0, parameters)[0].is_feasible);
+}
+
+TEST(EvaluateArcCandidates, RawFootprintAvoidsDoubleInflationAndDetectsCorner) {
+  auto inflated = makeEmptyGrid();
+  auto raw = makeEmptyGrid();
+  auto parameters = makeAvoidParameters();
+  parameters.arc_candidate_count = 1;
+  parameters.arc_length_m = 0.1;
+  parameters.arc_step_m = 0.1;
+  parameters.stop_zone_x_m = 0.3;
+  parameters.stop_zone_y_half_m = 0.6;
+  fillRectangle(inflated, 0.3, 0.3, 0.55, 0.55);
+  const auto path = makeStraightPath();
+  EXPECT_TRUE(evaluateArcCandidates(inflated, kOrigin, path, 0, 0.0, parameters, &raw)[0].is_feasible);
+  EXPECT_FALSE(evaluateArcCandidates(inflated, kOrigin, path, 0, 0.0, parameters)[0].is_feasible);
+  fillRectangle(raw, 0.39, 0.39, 0.59, 0.59);
+  EXPECT_FALSE(evaluateArcCandidates(inflated, kOrigin, path, 0, 0.0, parameters, &raw)[0].is_feasible);
+}
+
 TEST(EvaluateArcCandidates, ArcsEndingBeyondMaxPathDeviationAreRejected) {
   AvoidParameters parameters = makeAvoidParameters();
   parameters.max_path_deviation_m = 0.2;
@@ -427,13 +470,35 @@ TEST(ArcAvoidLayer, CycleWithFifteenArcsOnEightyByEightyGridIsFast) {
   const int iterations = 1000;
   const auto start = std::chrono::steady_clock::now();
   double sink = 0.0;
+  double max_ms = 0.0;
   for (int iteration = 0; iteration < iterations; ++iteration) {
+    const auto cycle_start = std::chrono::steady_clock::now();
     ArcAvoidLayer layer{parameters};
     sink += layer.compute(makeContext(path, &grid, 0.0)).twist.angular_rps;
+    max_ms = std::max(max_ms, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - cycle_start).count());
   }
   const double mean_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count() / iterations;
   RecordProperty("mean_ms", std::to_string(mean_ms));
-  std::cout << "avoid cycle mean_ms=" << mean_ms << " sink=" << sink << std::endl;
+  std::cout << "avoid cycle mean_ms=" << mean_ms << " max_ms=" << max_ms << " sink=" << sink << std::endl;
+  EXPECT_LT(mean_ms, 10.0);
+}
+
+TEST(EvaluateArcCandidates, RawFootprintCycleTiming) {
+  auto parameters = makeAvoidParameters();
+  parameters.stop_zone_x_m = 0.3;
+  parameters.stop_zone_y_half_m = 0.4;
+  const auto grid = makeEmptyGrid();
+  const auto path = makeStraightPath();
+  const auto start = std::chrono::steady_clock::now();
+  double max_ms = 0.0;
+  for (int iteration = 0; iteration < 1000; ++iteration) {
+    const auto cycle_start = std::chrono::steady_clock::now();
+    EXPECT_EQ(evaluateArcCandidates(grid, kOrigin, path, 0, 0.0, parameters, &grid).size(), 15U);
+    max_ms = std::max(max_ms, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - cycle_start).count());
+  }
+  const double mean_ms = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - start).count() / 1000;
+  std::cout << "raw footprint cycle mean_ms=" << mean_ms << " max_ms=" << max_ms << std::endl;
   EXPECT_LT(mean_ms, 10.0);
 }
 
@@ -454,6 +519,72 @@ TEST(ArcAvoidLayer, ConservativeUpdatePreservesAvoidanceAndReleaseTimer) {
   EXPECT_TRUE(layer.compute(makeContext(path, &clear, 2.4)).is_asserted);
   EXPECT_FALSE(layer.compute(makeContext(path, &clear, 2.5)).is_asserted);
   EXPECT_FALSE(layer.isAvoiding());
+}
+
+TEST(ArcAvoidLayer, FeasibleArcWithoutProgressWaitsAndBecomesStuck) {
+  ArcAvoidLayer layer{makeAvoidParameters()};
+  const auto path = makeStraightPath();
+  LocalGrid grid = makeEmptyGrid();
+  fillRectangle(grid, 1.0, 1.4, -0.3, 0.3);
+  EXPECT_EQ(layer.compute(makeContext(path, &grid, 0.0)).reason, StopReason::kOk);
+  const auto waiting = layer.compute(makeContext(path, &grid, 10.0));
+  EXPECT_EQ(waiting.reason, StopReason::kBlocked);
+  EXPECT_DOUBLE_EQ(waiting.twist.linear_mps, 0.0);
+  const auto stuck = layer.compute(makeContext(path, &grid, 20.0));
+  EXPECT_EQ(stuck.reason, StopReason::kStuck);
+  EXPECT_DOUBLE_EQ(stuck.twist.linear_mps, 0.0);
+}
+
+TEST(ArcAvoidLayer, PathProgressKeepsFeasibleArcMoving) {
+  ArcAvoidLayer layer{makeAvoidParameters()};
+  const auto path = makeStraightPath();
+  LocalGrid grid = makeEmptyGrid();
+  fillRectangle(grid, 1.0, 1.4, -0.3, 0.3);
+  auto context = makeContext(path, &grid, 0.0);
+  context.remaining_distance_m = 10.0;
+  EXPECT_EQ(layer.compute(context).reason, StopReason::kOk);
+  context.now_s = 9.0;
+  context.remaining_distance_m = 9.8;
+  EXPECT_EQ(layer.compute(context).reason, StopReason::kOk);
+  context.now_s = 18.0;
+  context.remaining_distance_m = 9.6;
+  EXPECT_EQ(layer.compute(context).reason, StopReason::kOk);
+}
+
+TEST(ArcAvoidLayer, PositionProgressCountsWhenRemainingDistanceIsFinite) {
+  ArcAvoidLayer layer{makeAvoidParameters()};
+  const auto path = makeStraightPath();
+  LocalGrid grid = makeEmptyGrid();
+  fillRectangle(grid, 1.0, 1.4, -0.3, 0.3);
+  auto context = makeContext(path, &grid, 0.0);
+  context.remaining_distance_m = 10.0;
+  EXPECT_EQ(layer.compute(context).reason, StopReason::kOk);
+  context.now_s = 9.0;
+  context.pose.y_m = 0.11;
+  EXPECT_EQ(layer.compute(context).reason, StopReason::kOk);
+  context.now_s = 18.0;
+  context.pose.y_m = 0.22;
+  EXPECT_EQ(layer.compute(context).reason, StopReason::kOk);
+}
+
+TEST(ArcAvoidLayer, ProgressStallRetriesAfterMeasuredRotation) {
+  ArcAvoidLayer layer{makeAvoidParameters()};
+  const auto path = makeStraightPath();
+  LocalGrid grid = makeEmptyGrid();
+  fillRectangle(grid, 1.0, 1.4, -0.3, 0.3);
+  auto context = makeContext(path, &grid, 0.0);
+  EXPECT_EQ(layer.compute(context).reason, StopReason::kOk);
+  context.now_s = 10.0;
+  EXPECT_EQ(layer.compute(context).reason, StopReason::kBlocked);
+  context.now_s = 22.0;
+  EXPECT_EQ(layer.compute(context).reason, StopReason::kStuck);
+  context.now_s = 23.0;
+  EXPECT_EQ(layer.compute(context).reason, StopReason::kStuck);
+  context.pose.yaw_rad = 0.31;
+  EXPECT_EQ(layer.compute(context).reason, StopReason::kOk);
+  context.pose.yaw_rad = 0.0;
+  context.now_s = 33.0;
+  EXPECT_EQ(layer.compute(context).reason, StopReason::kBlocked);
 }
 
 TEST(ArcAvoidLayer, RotatesAfterStuckDelayAndResumesWhenArcIsFeasible) {

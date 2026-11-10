@@ -1,5 +1,7 @@
 #pragma once
 
+#include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -26,6 +28,8 @@ struct LocalGrid {
 };
 
 struct AvoidParameters {
+  double stop_zone_x_m{0.0};
+  double stop_zone_y_half_m{0.0};
   double v_avoid_mps{0.25};
   double w_max_rps{0.4};
   int arc_candidate_count{15};
@@ -63,7 +67,8 @@ std::vector<ArcCandidate> evaluateArcCandidates(const LocalGrid& grid, const Pos
                                                 const std::vector<Point2D>& path_points,
                                                 std::size_t closest_index,
                                                 double previous_curvature_per_m,
-                                                const AvoidParameters& parameters);
+                                                const AvoidParameters& parameters,
+                                                const LocalGrid* raw_grid = nullptr);
 
 // Lowest-score feasible candidate; nullopt when none is feasible.
 std::optional<ArcCandidate> selectBestCandidate(const std::vector<ArcCandidate>& candidates);
@@ -78,6 +83,7 @@ struct AvoidContext {
   double remaining_distance_m{std::numeric_limits<double>::infinity()};
   bool is_stop_zone_occupied{false};
   bool is_obstacle_status_fresh{true};
+  const LocalGrid* raw_grid{nullptr};
 };
 
 // Priority 1 layer.
@@ -108,7 +114,7 @@ class ArcAvoidLayer final : public AvoidLayer {
   LayerOutput compute(const AvoidContext& context) override;
 
   bool isAvoiding() const { return is_avoiding_; }
-  void resetWaiting() { waiting_since_s_.reset(); }
+  void resetWaiting() { waiting_since_s_.reset(); progress_since_s_.reset(); progress_pose_.reset(); recovery_yaw_.reset(); }
   const std::vector<ArcCandidate>& candidates() const { return candidates_; }
   const std::optional<ArcCandidate>& selectedCandidate() const { return selected_candidate_; }
 
@@ -123,6 +129,10 @@ class ArcAvoidLayer final : public AvoidLayer {
   bool is_avoiding_{false};
   std::optional<double> release_since_s_;
   std::optional<double> waiting_since_s_;
+  std::optional<double> progress_since_s_;
+  std::optional<Point2D> progress_pose_;
+  std::optional<double> recovery_yaw_;
+  double progress_remaining_m_{std::numeric_limits<double>::infinity()};
   double previous_curvature_per_m_{0.0};
   double rotation_sign_{-1.0};
 };

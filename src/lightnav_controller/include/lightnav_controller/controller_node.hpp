@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <deque>
 #include <cmath>
 #include <limits>
 #include <memory>
@@ -8,6 +9,8 @@
 #include <climits>
 #include <optional>
 #include <string>
+#include <sstream>
+#include "std_msgs/msg/string.hpp"
 #include <vector>
 
 #include "geometry_msgs/msg/pose_stamped.hpp"
@@ -26,9 +29,52 @@
 
 namespace lightnav_controller {
 
-namespace {
-
 using CallbackReturn = rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn;
+
+inline bool rawGridMatches(const LocalGrid& inflated, const LocalGrid& raw, bool stamp_matches,
+                    double age_s, double timeout_s) {
+  return stamp_matches && age_s >= 0.0 && age_s <= timeout_s &&
+         raw.width_cells == inflated.width_cells && raw.height_cells == inflated.height_cells &&
+         raw.resolution_m == inflated.resolution_m && raw.origin_x_m == inflated.origin_x_m &&
+         raw.origin_y_m == inflated.origin_y_m;
+}
+
+struct ReceivedGrid {
+  LocalGrid grid;
+  rclcpp::Time received_at;
+  builtin_interfaces::msg::Time stamp;
+};
+
+class RawGridBuffer {
+ public:
+  void clear() { grids_.clear(); }
+  void push(ReceivedGrid grid) {
+    grids_.push_back(std::move(grid));
+    if (grids_.size() > 4) grids_.pop_front();
+  }
+  const char* reason(const ReceivedGrid& inflated, const rclcpp::Time& now, double timeout) const {
+    if (grids_.empty()) return "missing";
+    if (match(inflated, now, timeout)) return "match";
+    for (auto it = grids_.rbegin(); it != grids_.rend(); ++it) {
+      if (it->stamp != inflated.stamp) continue;
+      double age = (now - it->received_at).seconds();
+      if (age < 0.0 || age > timeout) return "expired";
+      return rawGridMatches(inflated.grid, it->grid, true, age, timeout) ? "match" : "shape_mismatch";
+    }
+    return "stamp_mismatch";
+  }
+  const LocalGrid* match(const ReceivedGrid& inflated, const rclcpp::Time& now, double timeout) const {
+    for (auto it = grids_.rbegin(); it != grids_.rend(); ++it) {
+      if (rawGridMatches(inflated.grid, it->grid, it->stamp == inflated.stamp,
+                         (now - it->received_at).seconds(), timeout)) return &it->grid;
+    }
+    return nullptr;
+  }
+ private:
+  std::deque<ReceivedGrid> grids_;
+};
+
+namespace {
 
 double yawFromQuaternion(const geometry_msgs::msg::Quaternion& quaternion) {
   return std::atan2(2.0 * (quaternion.w * quaternion.z + quaternion.x * quaternion.y),
@@ -46,7 +92,10 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
     structural.description = "Structural parameter fixed at construction";
     declare_parameter("grid_frame", "base_link", structural);
     declare_parameter("control_hz", 20.0, structural);
+    declare_parameter("stop_zone_x_m", 1.0, structural);
+    declare_parameter("stop_zone_y_half_m", 0.4, structural);
     declare_parameter("arc_markers_rate_hz", 2.0, structural);
+    declare_parameter("grid_diagnostic_enabled", false, structural);
     declare_parameter("lookahead_m", 1.0);
     declare_parameter("search_window_m", 5.0);
     declare_parameter("v_max", 0.6);
@@ -107,7 +156,7 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
       return CallbackReturn::FAILURE;
     }
     const std::vector<std::string> positive_names = {
-        "control_hz", "lookahead_m", "search_window_m", "v_max", "v_min", "v_slow",
+        "control_hz", "stop_zone_x_m", "stop_zone_y_half_m", "lookahead_m", "search_window_m", "v_max", "v_min", "v_slow",
         "w_max", "w_rotate", "k_end", "goal_tolerance_m", "rotate_in_place_heading_threshold_rad",
         "pose_timeout_s", "obstacle_status_timeout_s", "grid_timeout_s",
         "v_avoid", "arc_length_m", "arc_step_m", "w_path", "w_heading",
@@ -138,6 +187,8 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
 
     follow_layer_ = std::make_unique<FollowLayer>(follow_parameters);
     AvoidParameters avoid_parameters;
+    avoid_parameters.stop_zone_x_m = get_parameter("stop_zone_x_m").as_double();
+    avoid_parameters.stop_zone_y_half_m = get_parameter("stop_zone_y_half_m").as_double();
     avoid_parameters.v_avoid_mps = get_parameter("v_avoid").as_double();
     avoid_parameters.w_max_rps = follow_parameters.w_max_rps;
     avoid_parameters.arc_candidate_count = static_cast<int>(get_parameter("arc_candidate_count").as_int());
@@ -163,9 +214,13 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
     avoid_parameters.k_end_per_s = follow_parameters.k_end_per_s;
     avoid_layer_ = std::make_unique<ArcAvoidLayer>(avoid_parameters);
     last_grid_.reset();
+    raw_grids_.clear();
     last_pose_.reset();
     last_obstacle_status_.reset();
 
+    if (get_parameter("grid_diagnostic_enabled").as_bool()) {
+      diagnostic_publisher_ = create_publisher<std_msgs::msg::String>("/lightnav/controller/grid_diagnostic", rclcpp::QoS(10));
+    }
     marker_publisher_ = create_publisher<visualization_msgs::msg::MarkerArray>(
         "/lightnav/controller/arc_candidates", rclcpp::QoS(1).reliable());
     command_publisher_ = create_publisher<lightnav_msgs::msg::VelocityCommand>(
@@ -185,6 +240,9 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
         [this](lightnav_msgs::msg::ObstacleStatus::ConstSharedPtr message) {
           last_obstacle_status_ = ReceivedObstacleStatus{*message, now()};
         });
+    raw_grid_subscription_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
+        "/lightnav/local_grid_raw", rclcpp::QoS(1).reliable(),
+        [this](nav_msgs::msg::OccupancyGrid::ConstSharedPtr message) { onGrid(*message, true); });
     grid_subscription_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
         "/lightnav/local_grid", rclcpp::QoS(1).reliable(),
         [this](nav_msgs::msg::OccupancyGrid::ConstSharedPtr message) { onGrid(*message); });
@@ -302,6 +360,8 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
       follow.goal_tolerance_m = get_parameter("goal_tolerance_m").as_double();
       follow.rotate_in_place_heading_rad = get_parameter("rotate_in_place_heading_threshold_rad").as_double();
       AvoidParameters avoid;
+      avoid.stop_zone_x_m = get_parameter("stop_zone_x_m").as_double();
+      avoid.stop_zone_y_half_m = get_parameter("stop_zone_y_half_m").as_double();
       avoid.v_avoid_mps = get_parameter("v_avoid").as_double();
       avoid.w_max_rps = follow.w_max_rps;
       avoid.arc_candidate_count = static_cast<int>(get_parameter("arc_candidate_count").as_int());
@@ -340,6 +400,8 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
     pose_subscription_.reset();
     obstacle_subscription_.reset();
     grid_subscription_.reset();
+    raw_grid_subscription_.reset();
+    diagnostic_publisher_.reset();
     marker_publisher_.reset();
     command_publisher_.reset();
     status_publisher_.reset();
@@ -351,16 +413,13 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
     geometry_msgs::msg::PoseStamped message;
     rclcpp::Time received_at;
   };
-  struct ReceivedGrid {
-    LocalGrid grid;
-    rclcpp::Time received_at;
-  };
   struct ReceivedObstacleStatus {
     lightnav_msgs::msg::ObstacleStatus message;
     rclcpp::Time received_at;
   };
 
-  void onGrid(const nav_msgs::msg::OccupancyGrid& message) {
+  void onGrid(const nav_msgs::msg::OccupancyGrid& message, bool raw = false) {
+    auto invalidate = [&]() { if (raw) raw_grids_.clear(); else last_grid_.reset(); };
     const auto& orientation = message.info.origin.orientation;
     const bool is_unrotated = std::fabs(orientation.x) < 1e-6 && std::fabs(orientation.y) < 1e-6 &&
                               std::fabs(orientation.z) < 1e-6 && std::fabs(orientation.w - 1.0) < 1e-6;
@@ -369,7 +428,7 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
         !std::isfinite(message.info.origin.position.y)) {
       RCLCPP_WARN(get_logger(), "rejected local_grid: need frame %s, unrotated finite origin",
                   grid_frame_.c_str());
-      last_grid_.reset();
+      invalidate();
       return;
     }
     LocalGrid grid;
@@ -379,12 +438,20 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
     grid.origin_x_m = message.info.origin.position.x;
     grid.origin_y_m = message.info.origin.position.y;
     grid.cells = message.data;
-    if (grid.resolution_m <= 0.0 || grid.cells.size() != grid.width_cells * grid.height_cells) {
+    if (grid.resolution_m <= 0.0 || grid.width_cells == 0 || grid.height_cells == 0 ||
+        grid.cells.size() != grid.width_cells * grid.height_cells ||
+        (raw && std::any_of(grid.cells.begin(), grid.cells.end(),
+                            [](auto cell) { return cell != 0 && cell != 100; }))) {
       RCLCPP_WARN(get_logger(), "ignored malformed local_grid");
-      last_grid_.reset();
+      invalidate();
       return;
     }
-    last_grid_ = ReceivedGrid{std::move(grid), now()};
+    ReceivedGrid received{std::move(grid), now(), message.header.stamp};
+    if (raw) {
+      raw_grids_.push(std::move(received));
+    } else {
+      last_grid_ = std::move(received);
+    }
   }
 
   void onPath(const lightnav_msgs::msg::PathWithId& message) {
@@ -424,6 +491,8 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
     arbitration_input.is_pose_fresh = is_pose_fresh;
     arbitration_input.is_grid_fresh = is_grid_fresh;
     FollowResult follow_result;
+    const char* grid_reason = "inflated_missing_or_expired";
+    bool used_raw = false;
     if (is_pose_fresh) {
       const auto& pose_message = last_pose_->message.pose;
       const Pose2D pose{pose_message.position.x, pose_message.position.y,
@@ -436,12 +505,35 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
       }
       follow_result = follow_layer_->compute(pose, follow_inputs);
       arbitration_input.follow = follow_result.output;
+      const LocalGrid* raw_grid = nullptr;
+      if (is_grid_fresh) {
+        raw_grid = raw_grids_.match(*last_grid_, current_time, timeouts_.grid_timeout_s);
+        if (diagnostic_publisher_ && diagnostic_publisher_->get_subscription_count() > 0) {
+          grid_reason = raw_grids_.reason(*last_grid_, current_time, timeouts_.grid_timeout_s);
+        }
+        used_raw = raw_grid != nullptr;
+      }
       arbitration_input.avoid = avoid_layer_->compute(AvoidContext{
           pose, follow_layer_->pathPoints(), follow_result.closest_index,
           arbitration_input.is_grid_fresh, is_grid_fresh ? &last_grid_->grid : nullptr,
           current_time.seconds(),
           follow_result.remaining_distance_m, follow_inputs.is_stop_zone_occupied,
-          follow_inputs.is_obstacle_status_fresh});
+          follow_inputs.is_obstacle_status_fresh, raw_grid});
+    }
+    if (diagnostic_publisher_ && diagnostic_publisher_->get_subscription_count() > 0) {
+      std_msgs::msg::String diagnostic;
+      std::ostringstream out;
+      out << "grid=" << (used_raw ? "raw" : "inflated_fallback") << " reason=" << grid_reason;
+      const auto& selected = avoid_layer_->selectedCandidate();
+      if (selected && is_pose_fresh) out << " curvature=" << selected->curvature_per_m;
+      else out << " curvature=none";
+      out << " stop=" << (is_obstacle_status_fresh && last_obstacle_status_->message.is_stop_zone_occupied)
+          << " candidates=";
+      for (const auto& candidate : avoid_layer_->candidates()) {
+        out << (candidate.is_feasible ? "ok" : candidate.rejection_reason) << ",";
+      }
+      diagnostic.data = out.str();
+      diagnostic_publisher_->publish(diagnostic);
     }
     if (!is_pose_fresh) {
       avoid_layer_->resetWaiting();
@@ -508,16 +600,19 @@ class ControllerNode : public rclcpp_lifecycle::LifecycleNode {
   FreshnessTimeouts timeouts_;
   std::string grid_frame_;
   std::optional<ReceivedGrid> last_grid_;
+  RawGridBuffer raw_grids_;
   std::optional<ReceivedPose> last_pose_;
   std::optional<ReceivedObstacleStatus> last_obstacle_status_;
   double arc_markers_rate_hz_{0.0};
   ArcMarkerRate marker_rate_;
+  rclcpp_lifecycle::LifecyclePublisher<std_msgs::msg::String>::SharedPtr diagnostic_publisher_;
   rclcpp_lifecycle::LifecyclePublisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_publisher_;
   rclcpp::TimerBase::SharedPtr timer_;
   rclcpp::Subscription<lightnav_msgs::msg::PathWithId>::SharedPtr path_subscription_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr pose_subscription_;
   rclcpp::Subscription<lightnav_msgs::msg::ObstacleStatus>::SharedPtr obstacle_subscription_;
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr grid_subscription_;
+  rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr raw_grid_subscription_;
   rclcpp_lifecycle::LifecyclePublisher<lightnav_msgs::msg::VelocityCommand>::SharedPtr
       command_publisher_;
   rclcpp_lifecycle::LifecyclePublisher<lightnav_msgs::msg::FollowStatus>::SharedPtr
