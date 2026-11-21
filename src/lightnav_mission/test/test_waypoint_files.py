@@ -12,6 +12,7 @@ from lightnav_mission.waypoint_files import (
     parse_waypoints_document,
     refine_waypoints,
     select_recorded_samples,
+    trajectory_rows_to_samples,
 )
 
 
@@ -101,3 +102,9 @@ def test_valid_document_ignores_stamp_and_yaw_extras():
     records = parse_waypoints_document(
         {"frame_id": "map", "waypoints": [{"x": 1, "y": 2, "yaw": 0.1, "stamp": 5.0}]})
     assert records[0].x == 1.0 and records[0].stamp == 5.0
+
+
+def test_trajectory_rows_become_pose_samples_with_the_same_values():
+    rows = [TrajectoryRow(stamp_sec=10.0, x=1.0, y=2.0, yaw=0.3), TrajectoryRow(stamp_sec=11.0, x=4.0, y=5.0, yaw=-0.6)]
+    assert trajectory_rows_to_samples(rows) == [PoseSample(10.0, 1.0, 2.0, 0.3), PoseSample(11.0, 4.0, 5.0, -0.6)]
+    assert trajectory_rows_to_samples([]) == []
