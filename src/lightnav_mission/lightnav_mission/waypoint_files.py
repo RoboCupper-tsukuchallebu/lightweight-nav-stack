@@ -150,6 +150,11 @@ def samples_to_records(samples: Sequence[PoseSample]) -> list[WaypointRecord]:
     ]
 
 
+def trajectory_rows_to_samples(rows: Sequence[TrajectoryRow]) -> list[PoseSample]:
+    """trajectory.csv の行を、record_waypoints と同じ間引き（select_recorded_samples）に渡せる形にする。"""
+    return [PoseSample(stamp=row.stamp_sec, x=row.x, y=row.y, yaw=row.yaw) for row in rows]
+
+
 # ---- refine_waypoints の補正 ----
 
 def load_trajectory_csv(path: str) -> list[TrajectoryRow]:

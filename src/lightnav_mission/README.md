@@ -34,3 +34,19 @@ ROS_DOMAIN_ID=48 を使用し、実機用の domain 42 は使用しません。
 | structural | `use_sim_time` | `false` | コンストラクタ後は不可 |
 
 安全パラメータは起動時の値が有限でなければ変更をすべて拒否します。
+
+## mapping の走行から waypoint を作る（`trajectory_to_waypoints`）
+
+mapping（`lightnav_localization` の `mode: mapping`）が保存する `trajectory.csv` を間引いて、`send_waypoints` が読める
+`waypoints.yaml` を書きます（Issue #86）。mapping の手動走行がそのままティーチ走行になり、`record_waypoints` と
+`refine_waypoints` を別に走らせる必要がありません。ROS には依存しません。
+
+```
+ros2 run lightnav_mission trajectory_to_waypoints <trajectory.csv> [--spacing-m 2.0] [--output waypoints.yaml] [--overwrite]
+```
+
+- 間引きは `record_waypoints` と同じ規則です。最初の点は必ず使い、前に使った点から `--spacing-m` 以上離れるたびに使い、最後の点（停止位置）は必ず使います。`trajectory.csv` の行はキーフレームごと（既定で約 1 m または 1 秒）なので、点の間隔は `--spacing-m` より少し長くなります。
+- 出力は `frame_id: map`、`recorded_with: trajectory`、`source_trajectory`（入力のパス）と、各点の `x`・`y`・`yaw`・`stamp` です。座標は、その `trajectory.csv` と一緒に保存された地図のものです。mapping をやり直したら、waypoint も作り直してください。
+- 出力が既にあると書かずに終わります（上書きは `--overwrite`）。出力先が入力と同じファイルなら、`--overwrite` を付けても書きません。
+- 終了コードは 0（書き出した）か 1（入力不正: 読めない、列が無い、データ行が無い、非有限値、引数の誤り、出力の問題）です。
+- 走った軌跡をそのまま使うので、切り返しや後退をした場所も waypoint になります。走らせる前に中身を確かめてください。

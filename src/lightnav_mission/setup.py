@@ -23,6 +23,7 @@ setup(
             "send_waypoints = lightnav_mission.send_waypoints:main",
             "record_waypoints = lightnav_mission.record_waypoints:main",
             "refine_waypoints = lightnav_mission.refine_waypoints:main",
+            "trajectory_to_waypoints = lightnav_mission.trajectory_to_waypoints:main",
         ],
     },
 )
