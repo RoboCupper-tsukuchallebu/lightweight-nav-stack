@@ -5,9 +5,10 @@
 // reserve copied all the points assembled so far: 15 s for that drive, growing with the square of the
 // keyframe count.
 //
-// The requested bytes are counted instead of the time: they are the same on every machine and under any
-// load. This file is a test binary of its own because it replaces the global operator new, which no other
-// test should run with.
+// The requested bytes are counted instead of the time: their ratio between two keyframe counts does not
+// depend on the load of the machine. (The byte counts themselves depend on the build: the aligned operator
+// new is not replaced, so allocations that use it are not counted.) This file is a test binary of its own
+// because it replaces the global operator new, which no other test should run with.
 
 #include <gtest/gtest.h>
 
@@ -28,7 +29,9 @@ std::atomic<std::size_t> allocated_byte_count{0};
 
 }  // namespace
 
-void* operator new(std::size_t size) {
+// noinline: gcc warns (-Wmismatched-new-delete, an error here) when it inlines only one side of a replaced
+// new/delete pair and then sees free() called on the result of operator new.
+__attribute__((noinline)) void* operator new(std::size_t size) {
   if (is_counting_allocations.load(std::memory_order_relaxed)) {
     allocated_byte_count.fetch_add(size, std::memory_order_relaxed);
   }
@@ -37,8 +40,10 @@ void* operator new(std::size_t size) {
   return memory;
 }
 
-void operator delete(void* memory) noexcept { std::free(memory); }
-void operator delete(void* memory, std::size_t /*size*/) noexcept { std::free(memory); }
+__attribute__((noinline)) void operator delete(void* memory) noexcept { std::free(memory); }
+__attribute__((noinline)) void operator delete(void* memory, std::size_t /*size*/) noexcept {
+  std::free(memory);
+}
 
 namespace lightnav_localization {
 namespace {
@@ -74,6 +79,9 @@ std::vector<KeyframeCloud> make_keyframes_along_a_line(int keyframe_count,
 }
 
 // Bytes requested through operator new while the map of `keyframe_count` keyframes is built.
+// Nothing in this file may allocate between the two store() calls: gcc 15 assumes that a replaced operator
+// new does not touch global variables (-fassume-sane-operators-new-delete), which the counter does. Every
+// counted allocation happens inside build_map_points(), in another translation unit.
 std::size_t bytes_requested_to_build_map(int keyframe_count) {
   std::vector<TrajectoryPoint> trajectory;
   const std::vector<KeyframeCloud> keyframes = make_keyframes_along_a_line(keyframe_count, trajectory);

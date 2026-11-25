@@ -788,13 +788,13 @@ void make_map_inputs(int keyframe_count, std::vector<KeyframeCloud>& keyframes,
 
 }  // namespace
 
-// build_map_points() counts the points first and then copies them: both passes must leave out the same
-// keyframes, and an empty input is not an error.
+// A keyframe without a pose does not enter the map, and no keyframes (or no poses) give an empty map.
 TEST(MapBuilder, KeyframesWithoutAPoseAreLeftOutAndNoKeyframesGiveAnEmptyMap) {
   std::vector<KeyframeCloud> keyframes;
   std::vector<TrajectoryPoint> trajectory;
   make_map_inputs(3, keyframes, trajectory);
   const PointList full_map = build_map_points(keyframes, trajectory, 0.2);
+  ASSERT_EQ(full_map.size(), 3U);
 
   KeyframeCloud keyframe_without_pose = keyframes.front();
   keyframe_without_pose.node_index = 1000;
