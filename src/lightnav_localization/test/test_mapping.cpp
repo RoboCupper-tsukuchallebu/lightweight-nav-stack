@@ -789,6 +789,65 @@ void make_map_inputs(int keyframe_count, std::vector<KeyframeCloud>& keyframes,
 }  // namespace
 
 // Issue #43 D7 (3): a failure while writing must not leave a new map.pcd next to an old map.yaml.
+// Keyframes of a drive along a line, `points_per_keyframe` points around each pose.
+std::vector<KeyframeCloud> make_scattered_keyframes(int keyframe_count, int points_per_keyframe,
+                                                    std::vector<TrajectoryPoint>& trajectory) {
+  std::mt19937 random_generator(7);
+  std::uniform_real_distribution<float> horizontal_offset_m(-20.0F, 20.0F);
+  std::uniform_real_distribution<float> height_m(0.0F, 3.0F);
+  std::vector<KeyframeCloud> keyframes;
+  keyframes.reserve(static_cast<std::size_t>(keyframe_count));
+  trajectory.clear();
+  for (int index = 0; index < keyframe_count; ++index) {
+    KeyframeCloud keyframe;
+    keyframe.node_index = index;
+    keyframe.stamp_sec = static_cast<double>(index);
+    keyframe.points_in_base.reserve(static_cast<std::size_t>(points_per_keyframe));
+    for (int point = 0; point < points_per_keyframe; ++point) {
+      keyframe.points_in_base.emplace_back(horizontal_offset_m(random_generator),
+                                           horizontal_offset_m(random_generator), height_m(random_generator));
+    }
+    keyframes.push_back(std::move(keyframe));
+    TrajectoryPoint pose;
+    pose.node_index = index;
+    pose.stamp_sec = static_cast<double>(index);
+    pose.map_to_base.translation() = Eigen::Vector3d(0.3 * index, 0.0, 0.0);
+    trajectory.push_back(pose);
+  }
+  return keyframes;
+}
+
+// Best of three, so that one slow run on a busy machine does not decide the result.
+double seconds_to_build_map(int keyframe_count, int points_per_keyframe) {
+  std::vector<TrajectoryPoint> trajectory;
+  const std::vector<KeyframeCloud> keyframes =
+      make_scattered_keyframes(keyframe_count, points_per_keyframe, trajectory);
+  double best_seconds = std::numeric_limits<double>::infinity();
+  for (int attempt = 0; attempt < 3; ++attempt) {
+    const auto started = std::chrono::steady_clock::now();
+    const PointList map_points = build_map_points(keyframes, trajectory, 0.2);
+    best_seconds = std::min(
+        best_seconds, std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count());
+    EXPECT_FALSE(map_points.empty());
+  }
+  return best_seconds;
+}
+
+// The stop-time save of a 37 min drive (1900 keyframes, 7 million points) took about 100 s and was killed
+// by the 45 s stop limit, so no map was left (2026-11-25). build_map_points copied everything assembled so
+// far at every keyframe: the time grew with the square of the keyframe count. Four times the keyframes must
+// take about four times as long (16 times with the old behaviour); the ratio does not depend on the machine.
+TEST(MapBuilder, MapBuildTimeGrowsLinearlyWithTheKeyframeCount) {
+  constexpr int kPointsPerKeyframe = 500;
+  constexpr int kFewKeyframes = 1500;
+  constexpr int kManyKeyframes = 4 * kFewKeyframes;
+  const double few_seconds = seconds_to_build_map(kFewKeyframes, kPointsPerKeyframe);
+  const double many_seconds = seconds_to_build_map(kManyKeyframes, kPointsPerKeyframe);
+  std::printf("[ MAP_BUILD_TIME ] keyframes=%d seconds=%.3f keyframes=%d seconds=%.3f ratio=%.2f\n",
+              kFewKeyframes, few_seconds, kManyKeyframes, many_seconds, many_seconds / few_seconds);
+  EXPECT_LT(many_seconds, 8.0 * few_seconds);
+}
+
 TEST(MapBuilder, FailedWriteKeepsThePreviousThreeFiles) {
   const std::string output_directory = unique_directory("atomic");
   MapOutputParameters parameters;
