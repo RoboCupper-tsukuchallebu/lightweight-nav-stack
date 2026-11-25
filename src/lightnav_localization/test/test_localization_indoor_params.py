@@ -10,7 +10,7 @@ import yaml
 
 # <repository>/src/lightnav_localization/test/<this file>
 INDOOR_PARAMS_PATH = Path(__file__).resolve().parents[3] / "docker" / "config" / "localization_indoor.yaml"
-GNSS_TOPICS_IN_USE = ("/gps/fix", "/rtk/fix_all")
+GNSS_TOPICS_IN_USE = ("/gps/fix", "/fix", "/fix_all", "/rtk/fix", "/rtk/fix_all")
 
 
 def read_indoor_parameters():

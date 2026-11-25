@@ -160,7 +160,7 @@ performance は直近のスキャン処理時間とプロセスの CPU・メモ�
 
 ## GNSS の入力と `/diagnostics`
 
-`gps_topic`（`robot.yaml` は `/rtk/fix_all`）の fix は、購読コールバックで次の順に扱う: 最後に受けた fix の
+`gps_topic`（`robot.yaml` は `/fix`。CLAS 用ファームの受信機が出す Float / Fix。Issue #88）の fix は、購読コールバックで次の順に扱う: 最後に受けた fix の
 `gps_status`・`gps_std_m`（status の表の σ）を記録 → `gps_min_status` 未満なら捨てる → 初期化・mapping の原点 →
 `gps_min_interval_s` で間引く → `Localizer::on_gps`（Mahalanobis ゲート）。`LocalizationStatus` の
 `gps_status`・`gps_std_m` は、落とす前に記録した**最後に受けた fix** の値（Float から Single に落ちたことが見える）。
