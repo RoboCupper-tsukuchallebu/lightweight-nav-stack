@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstdint>
 #include <exception>
+#include <optional>
 #include <stdexcept>
 
 namespace lightnav_localization {
@@ -41,6 +42,42 @@ class HorizontalGpsFactor final : public gtsam::NoiseModelFactor1<gtsam::Pose3> 
 
  private:
   gtsam::Point2 position_;
+};
+
+// Pulls the body z axis towards the map z axis: the error is the horizontal part of "up" seen from
+// the body, which is zero when the vehicle is level and about (-pitch, roll) for small angles.
+class LevelAttitudeFactor final : public gtsam::NoiseModelFactor1<gtsam::Pose3> {
+ public:
+  LevelAttitudeFactor(gtsam::Key key, const gtsam::SharedNoiseModel& noise)
+      : gtsam::NoiseModelFactor1<gtsam::Pose3>(noise, key) {}
+
+  gtsam::Vector evaluateError(const gtsam::Pose3& pose,
+                             boost::optional<gtsam::Matrix&> jacobian = boost::none) const override {
+    gtsam::Matrix36 rotation_jacobian;
+    gtsam::Matrix33 unrotate_jacobian;
+    const gtsam::Rot3 rotation = pose.rotation(rotation_jacobian);
+    const gtsam::Point3 up_in_body = rotation.unrotate(gtsam::Point3(0.0, 0.0, 1.0), unrotate_jacobian);
+    if (jacobian) *jacobian = (unrotate_jacobian * rotation_jacobian).topRows<2>();
+    return up_in_body.head<2>();
+  }
+};
+
+// Keeps the map-frame height near a reference height (the first node), loosely enough for real terrain.
+class HeightFactor final : public gtsam::NoiseModelFactor1<gtsam::Pose3> {
+ public:
+  HeightFactor(gtsam::Key key, double reference_height_m, const gtsam::SharedNoiseModel& noise)
+      : gtsam::NoiseModelFactor1<gtsam::Pose3>(noise, key), reference_height_m_(reference_height_m) {}
+
+  gtsam::Vector evaluateError(const gtsam::Pose3& pose,
+                             boost::optional<gtsam::Matrix&> jacobian = boost::none) const override {
+    gtsam::Matrix36 translation_jacobian;
+    const gtsam::Point3 translation = pose.translation(translation_jacobian);
+    if (jacobian) *jacobian = translation_jacobian.row(2);
+    return gtsam::Vector1(translation.z() - reference_height_m_);
+  }
+
+ private:
+  double reference_height_m_;
 };
 
 gtsam::Key key_of(int index) { return gtsam::Symbol('x', static_cast<std::uint64_t>(index)); }
@@ -83,8 +120,30 @@ struct PoseGraph::Implementation {
         !std::isfinite(parameters.wheel_yaw_slip_threshold_rad) || parameters.wheel_yaw_slip_threshold_rad < 0.0) {
       throw std::invalid_argument("invalid wheel noise parameters");
     }
+    if (!std::isfinite(parameters.absolute_sigma_tilt_rad) || parameters.absolute_sigma_tilt_rad < 0.0 ||
+        !std::isfinite(parameters.absolute_sigma_z_m) || parameters.absolute_sigma_z_m < 0.0) {
+      throw std::invalid_argument("invalid absolute tilt / height sigmas");
+    }
   }
+
+  // Absolute level-attitude and height factors of one node (each only when its sigma is positive).
+  void add_ground_vehicle_factors(int index, bool should_record_history) {
+    if (parameters.absolute_sigma_tilt_rad > 0.0) {
+      boost::shared_ptr<LevelAttitudeFactor> factor(new LevelAttitudeFactor(
+          key_of(index), Diagonal::Sigmas(gtsam::Vector2::Constant(parameters.absolute_sigma_tilt_rad))));
+      pending_factors.push_back(factor);
+      if (should_record_history) history_factors.push_back(factor);
+    }
+    if (parameters.absolute_sigma_z_m > 0.0 && reference_height_m) {
+      boost::shared_ptr<HeightFactor> factor(new HeightFactor(
+          key_of(index), *reference_height_m, Diagonal::Sigmas(gtsam::Vector1(parameters.absolute_sigma_z_m))));
+      pending_factors.push_back(factor);
+      if (should_record_history) history_factors.push_back(factor);
+    }
+  }
+
   PoseGraphParameters parameters;
+  std::optional<double> reference_height_m;  // height of the first node; kept across restart_window()
   std::unique_ptr<gtsam::IncrementalFixedLagSmoother> smoother;
   gtsam::NonlinearFactorGraph pending_factors;
   gtsam::Values pending_values;
@@ -95,6 +154,7 @@ struct PoseGraph::Implementation {
   gtsam::Values history_values;
   std::map<int, double> history_stamps;
   std::vector<BatchPose> batch_poses;
+  gtsam::Values batch_values;  // result of the last batch_optimize(); initial guess of the next one
 };
 
 PoseGraph::PoseGraph(const PoseGraphParameters& parameters)
@@ -120,6 +180,8 @@ int PoseGraph::add_first_node(double stamp_sec, const Eigen::Isometry3d& pose, d
     graph.history_values.insert(key_of(0), to_gtsam(pose));
     graph.history_stamps[0] = stamp_sec;
   }
+  graph.reference_height_m = pose.translation().z();
+  graph.add_ground_vehicle_factors(0, graph.parameters.record_history);
   return 0;
 }
 
@@ -152,6 +214,8 @@ int PoseGraph::restart_window(double stamp_sec, const Eigen::Isometry3d& pose,
     graph.history_values.insert(key_of(index), to_gtsam(pose));
     graph.history_stamps[index] = stamp_sec;
   }
+  if (!graph.reference_height_m) graph.reference_height_m = pose.translation().z();
+  graph.add_ground_vehicle_factors(index, graph.parameters.record_history);
 
   if (previous_index >= 0) {
     const Eigen::Isometry3d inverse_previous = invert_isometry(previous_pose);
@@ -214,6 +278,7 @@ int PoseGraph::add_node_with_wheel_factor(double stamp_sec, const Eigen::Isometr
     graph.history_values.insert(key_of(index), to_gtsam(guess));
     graph.history_stamps[index] = stamp_sec;
   }
+  graph.add_ground_vehicle_factors(index, graph.parameters.record_history);
   return index;
 }
 
@@ -289,7 +354,20 @@ bool PoseGraph::optimize() {
   return true;
 }
 
-bool PoseGraph::batch_optimize(int max_iterations) {
+void PoseGraph::add_loop_closure_factor(int from_index, int to_index, const Eigen::Isometry3d& relative,
+                                        double sigma_translation_m, double sigma_rotation_rad) {
+  Implementation& graph = *implementation_;
+  if (!graph.parameters.record_history) return;
+  boost::shared_ptr<gtsam::BetweenFactor<gtsam::Pose3>> factor(
+      new gtsam::BetweenFactor<gtsam::Pose3>(
+          key_of(from_index), key_of(to_index), to_gtsam(relative),
+          robust(pose_noise(gtsam::Vector3::Constant(sigma_rotation_rad),
+                            gtsam::Vector3::Constant(sigma_translation_m)),
+                 graph.parameters.huber_k)));
+  graph.history_factors.push_back(factor);
+}
+
+bool PoseGraph::batch_optimize(int max_iterations, bool should_compute_marginals) {
   Implementation& graph = *implementation_;
   if (!graph.parameters.record_history) {
     last_error_ = "batch optimization requires record_history";
@@ -306,9 +384,14 @@ bool PoseGraph::batch_optimize(int max_iterations) {
   try {
     gtsam::LevenbergMarquardtParams optimizer_parameters;
     optimizer_parameters.maxIterations = max_iterations;
-    gtsam::LevenbergMarquardtOptimizer optimizer(graph.history_factors, graph.history_values,
+    gtsam::Values initial_values = graph.history_values;
+    for (const gtsam::Key key : graph.batch_values.keys()) {
+      if (initial_values.exists(key)) initial_values.update(key, graph.batch_values.at(key));
+    }
+    gtsam::LevenbergMarquardtOptimizer optimizer(graph.history_factors, initial_values,
                                                  optimizer_parameters);
     const gtsam::Values result = optimizer.optimize();
+    graph.batch_values = result;
     graph.batch_poses.clear();
     graph.batch_poses.reserve(graph.history_stamps.size());
     std::unique_ptr<gtsam::Marginals> marginals;
@@ -317,6 +400,10 @@ bool PoseGraph::batch_optimize(int max_iterations) {
       batch_pose.index = entry.first;
       batch_pose.stamp_sec = entry.second;
       batch_pose.map_to_base = from_gtsam(result.at<gtsam::Pose3>(key_of(entry.first)));
+      if (!should_compute_marginals) {
+        graph.batch_poses.push_back(std::move(batch_pose));
+        continue;
+      }
       try {
         if (!marginals) {
           marginals = std::make_unique<gtsam::Marginals>(graph.history_factors, result);
@@ -343,6 +430,22 @@ bool PoseGraph::batch_optimize(int max_iterations) {
 
 const std::vector<BatchPose>& PoseGraph::batch_poses() const {
   return implementation_->batch_poses;
+}
+
+std::vector<BatchPose> PoseGraph::recorded_poses() const {
+  const Implementation& graph = *implementation_;
+  std::vector<BatchPose> poses;
+  poses.reserve(graph.history_stamps.size());
+  for (const auto& entry : graph.history_stamps) {
+    const gtsam::Key key = key_of(entry.first);
+    if (!graph.history_values.exists(key)) continue;
+    BatchPose pose;
+    pose.index = entry.first;
+    pose.stamp_sec = entry.second;
+    pose.map_to_base = from_gtsam(graph.history_values.at<gtsam::Pose3>(key));
+    poses.push_back(std::move(pose));
+  }
+  return poses;
 }
 
 std::optional<Eigen::Isometry3d> PoseGraph::pose(int index) const {

@@ -36,11 +36,16 @@ struct MapOutputParameters {
   bool has_gps_origin = false;
   GpsOrigin gps_origin;
   std::string created;  // ISO-8601 UTC, e.g. 2026-01-02T03:04:05Z
+  // Also writes keyframes.bin (every keyframe cloud in its base frame). Large: about 100 MB per 30 min.
+  bool should_write_keyframe_clouds = false;
 };
 
 struct MapOutputResult {
   std::size_t keyframe_count = 0;
   std::size_t map_point_count = 0;
+  std::size_t loop_closure_count = 0;
+  std::string loop_closure_report;  // one line per detection round; empty when detection is off
+  std::string stage_report;  // when each stage of Localizer::save_map() reached the disk
 };
 
 // Transforms every keyframe cloud by its trajectory pose, concatenates them and voxel-downsamples
@@ -52,6 +57,13 @@ PointList build_map_points(const std::vector<KeyframeCloud>& keyframes,
 // Writes the contract header and one row per keyframe. Throws std::runtime_error on I/O failure.
 void write_trajectory_csv(const std::string& file_path,
                           const std::vector<TrajectoryPoint>& trajectory);
+
+// keyframes.bin: "LNKF1\n", uint64 keyframe count, then per keyframe int32 node index, float64 stamp,
+// uint64 point count and the points as float32 x y z (little endian). Throws std::runtime_error on I/O failure.
+void write_keyframe_clouds(const std::string& file_path, const std::vector<KeyframeCloud>& keyframes);
+std::vector<KeyframeCloud> read_keyframe_clouds(const std::string& file_path);
+// Reads the rows written by write_trajectory_csv (position_std_m "nan" is accepted).
+std::vector<TrajectoryPoint> read_trajectory_csv(const std::string& file_path);
 
 // Appended to each output name while it is being written.
 constexpr const char* kTemporarySuffix = ".tmp";

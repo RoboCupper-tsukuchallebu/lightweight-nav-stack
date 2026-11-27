@@ -12,6 +12,7 @@
 #include "lightnav_localization/deskew.hpp"
 #include "lightnav_localization/gps_input.hpp"
 #include "lightnav_localization/lidar_odometry.hpp"
+#include "lightnav_localization/loop_closure.hpp"
 #include "lightnav_localization/map_builder.hpp"
 #include "lightnav_localization/match_information.hpp"
 #include "lightnav_localization/pose_buffer.hpp"
@@ -19,6 +20,9 @@
 #include "lightnav_localization/state_machine.hpp"
 
 namespace lightnav_localization {
+
+// Receives one line per finished stage of Localizer::save_map().
+using MapSaveProgress = std::function<void(const std::string&)>;
 
 struct LocalizerParameters {
   PoseGraphParameters graph;
@@ -46,6 +50,8 @@ struct LocalizerParameters {
   // keyframe cloud after deskewing and enables the full factor history for the batch save.
   bool mapping = false;
   double keyframe_cloud_voxel_m = 0.25;
+  // Mapping only: closes loops in the batch optimisation of save_map().
+  LoopClosureParameters loop_closure;
 };
 
 struct LocalizerOutput {
@@ -141,9 +147,16 @@ class Localizer {
   std::size_t accepted_gps_factor_count() const;
   // Stops keeping new keyframe clouds after a LOST; the retained partial map can still be saved.
   void interrupt_mapping();
-  // Batch re-optimizes every retained factor and writes map.pcd / map.yaml / trajectory.csv.
+  // Writes map.pcd / map.yaml / trajectory.csv in three stages, each replacing the files of the one
+  // before, so a save that is cut short (the stop time limit of the container) leaves the latest
+  // finished stage instead of nothing:
+  //   1. preliminary: the poses as the online estimate left them (map.yaml batch_optimized: false),
+  //   2. optimized: after the batch optimisation of every retained factor (position_std_m is nan),
+  //   3. final: after the loop closures (when enabled) and with the standard deviations.
+  // `report_progress` is called with one line as soon as a stage is on disk.
+  // On failure the files of the stages that finished stay; `error` says what failed.
   bool save_map(const MapOutputParameters& parameters, MapOutputResult& result,
-                std::string& error);
+                std::string& error, const MapSaveProgress& report_progress = {});
 
  private:
   struct Implementation;

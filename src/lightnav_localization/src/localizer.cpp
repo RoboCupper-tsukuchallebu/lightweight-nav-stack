@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <future>
 #include <limits>
 #include <map>
@@ -11,6 +12,7 @@
 #include <system_error>
 
 #include "lightnav_localization/downsample.hpp"
+#include "lightnav_localization/map_save.hpp"
 
 namespace lightnav_localization {
 namespace {
@@ -18,6 +20,7 @@ namespace {
 constexpr double kMapSubmapRadiusM = 100.0;
 constexpr double kWheelBufferSec = 3.0;
 constexpr double kNeverSec = -1e9;
+constexpr double kMillisecondsPerSecond = 1000.0;
 constexpr std::size_t kMaxPendingScans = 20;
 constexpr std::size_t kMaxPendingGps = 20;
 const std::string kUnknownNodeError = "internal: pose requested for unknown node ";
@@ -661,47 +664,57 @@ std::size_t Localizer::accepted_gps_factor_count() const {
 void Localizer::interrupt_mapping() { implementation_->mapping_paused = true; }
 
 bool Localizer::save_map(const MapOutputParameters& parameters, MapOutputResult& result,
-                         std::string& error) {
+                         std::string& error, const MapSaveProgress& report_progress) {
   Implementation& self = *implementation_;
   if (!self.parameters.mapping) {
     error = "save_map requires mapping mode";
     return false;
   }
-  if (!self.graph->batch_optimize(parameters.batch_max_iterations)) {
-    error = "batch optimization failed: " + self.graph->last_error();
-    return false;
-  }
-  std::map<int, const BatchPose*> poses;
-  for (const BatchPose& pose : self.graph->batch_poses()) poses[pose.index] = &pose;
-  std::vector<TrajectoryPoint> trajectory;
-  trajectory.reserve(self.mapping_keyframes.size());
-  for (const KeyframeCloud& keyframe : self.mapping_keyframes) {
-    const auto found = poses.find(keyframe.node_index);
-    if (found == poses.end()) continue;
-    TrajectoryPoint point;
-    point.node_index = keyframe.node_index;
-    point.stamp_sec = keyframe.stamp_sec;
-    point.map_to_base = found->second->map_to_base;
-    if (found->second->position_and_yaw_std) {
-      point.position_std_m =
-          std::max((*found->second->position_and_yaw_std)[0],
-                   (*found->second->position_and_yaw_std)[1]);
-    } else {
-      // A failed marginal solve must be visible in trajectory.csv, not read as a perfect 0 m.
-      point.position_std_m = std::numeric_limits<double>::quiet_NaN();
-    }
-    trajectory.push_back(point);
-  }
+  const Clock::time_point start = Clock::now();
   MapOutputParameters output_parameters = parameters;
-  output_parameters.batch_optimized = true;
   output_parameters.has_gps_origin = self.gps_origin.has_value();
   if (self.gps_origin) output_parameters.gps_origin = *self.gps_origin;
+  std::string stage_report;
+  const auto write_stage = [&](const char* stage_name, bool is_batch_optimized,
+                               const std::vector<BatchPose>& poses) {
+    output_parameters.batch_optimized = is_batch_optimized;
+    result = write_map_outputs(output_parameters, self.mapping_keyframes,
+                               make_trajectory(self.mapping_keyframes, poses));
+    // The keyframe clouds do not depend on the poses: the first stage has written them.
+    output_parameters.should_write_keyframe_clouds = false;
+    char line[128];
+    std::snprintf(line, sizeof(line), "%s map written %.1f s after the start of the save", stage_name,
+                  elapsed_ms(start) / kMillisecondsPerSecond);
+    stage_report += std::string(stage_report.empty() ? "" : "; ") + line;
+    if (report_progress) report_progress(line);
+  };
+  std::vector<LoopClosure> closures;
+  std::string closure_report;
   try {
-    result = write_map_outputs(output_parameters, self.mapping_keyframes, trajectory);
+    write_stage("preliminary", false, self.graph->recorded_poses());
+    if (!self.graph->batch_optimize(parameters.batch_max_iterations, false)) {
+      error = "batch optimization failed: " + self.graph->last_error();
+      return false;
+    }
+    write_stage("optimized", true, self.graph->batch_poses());
+    if (self.parameters.loop_closure.enabled &&
+        !close_loops(*self.graph, self.mapping_keyframes, self.parameters.loop_closure,
+                     parameters.batch_max_iterations, closures, closure_report, error)) {
+      return false;
+    }
+    // The standard deviations (marginals) are computed once, on the last result.
+    if (!self.graph->batch_optimize(parameters.batch_max_iterations, true)) {
+      error = "batch optimization failed: " + self.graph->last_error();
+      return false;
+    }
+    write_stage("final", true, self.graph->batch_poses());
   } catch (const std::exception& exception) {
     error = exception.what();
     return false;
   }
+  result.loop_closure_count = closures.size();
+  result.loop_closure_report = closure_report;
+  result.stage_report = stage_report;
   return true;
 }
 

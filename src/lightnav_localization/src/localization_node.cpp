@@ -287,6 +287,16 @@ void LocalizationNode::declare_parameters() {
   declare_parameter<double>("wheel_sigma_yaw_per_m", 0.01);
   declare_parameter<double>("planar_sigma_z_per_m", 0.05);
   declare_parameter<double>("planar_sigma_tilt_rad", 0.05);
+  declare_parameter<double>("absolute_sigma_tilt_rad", 0.0);
+  declare_parameter<double>("absolute_sigma_z_m", 0.0);
+  declare_parameter<bool>("loop_closure_enabled", false);
+  declare_parameter<bool>("map_save_keyframe_clouds", false);
+  declare_parameter<double>("loop_closure_min_path_gap_m", 50.0);
+  declare_parameter<double>("loop_closure_query_spacing_m", 10.0);
+  declare_parameter<double>("loop_closure_search_radius_m", 5.0);
+  declare_parameter<double>("loop_closure_search_radius_per_m", 0.05);
+  declare_parameter<double>("loop_closure_max_search_radius_m", 20.0);
+  declare_parameter<int>("loop_closure_max_rounds", 3);
   declare_parameter<double>("map_submap_rebuild_distance_m", 50.0);
   declare_parameter<double>("keyframe_distance_m", 1.0);
   declare_parameter<double>("keyframe_time_s", 1.0);
@@ -461,6 +471,22 @@ bool LocalizationNode::read_parameters(std::string& error) {
       get_parameter("planar_sigma_z_per_m").as_double();
   localizer_parameters_.graph.planar_sigma_tilt_rad =
       get_parameter("planar_sigma_tilt_rad").as_double();
+  localizer_parameters_.graph.absolute_sigma_tilt_rad =
+      get_parameter("absolute_sigma_tilt_rad").as_double();
+  localizer_parameters_.graph.absolute_sigma_z_m = get_parameter("absolute_sigma_z_m").as_double();
+  localizer_parameters_.loop_closure.enabled = get_parameter("loop_closure_enabled").as_bool();
+  localizer_parameters_.loop_closure.minimum_path_gap_m =
+      get_parameter("loop_closure_min_path_gap_m").as_double();
+  localizer_parameters_.loop_closure.query_spacing_m =
+      get_parameter("loop_closure_query_spacing_m").as_double();
+  localizer_parameters_.loop_closure.search_radius_m =
+      get_parameter("loop_closure_search_radius_m").as_double();
+  localizer_parameters_.loop_closure.search_radius_per_m =
+      get_parameter("loop_closure_search_radius_per_m").as_double();
+  localizer_parameters_.loop_closure.maximum_search_radius_m =
+      get_parameter("loop_closure_max_search_radius_m").as_double();
+  localizer_parameters_.loop_closure.maximum_rounds =
+      static_cast<int>(get_parameter("loop_closure_max_rounds").as_int());
 
   localizer_parameters_.lidar_odometry.submap_keyframes =
       static_cast<int>(get_parameter("submap_keyframes").as_int());
@@ -1548,17 +1574,27 @@ bool LocalizationNode::save_mapping_outputs(std::string& message) {
   parameters.map_voxel_size_m = map_voxel_size_m_;
   parameters.batch_max_iterations = batch_max_iterations_;
   parameters.created = utc_now_iso8601();
+  parameters.should_write_keyframe_clouds = get_parameter("map_save_keyframe_clouds").as_bool();
   parameters.has_gps_origin = mapping_has_gps_origin_ && gps_origin_.has_value();
   if (parameters.has_gps_origin) parameters.gps_origin = *gps_origin_;
   MapOutputResult result;
   std::string error;
-  if (!localizer_->save_map(parameters, result, error)) {
+  // Logged as each stage reaches the disk: when the stop time limit kills the process in the middle of
+  // the save, the log still says which map is in map_output_dir.
+  const MapSaveProgress log_progress = [this](const std::string& line) {
+    RCLCPP_INFO(get_logger(), "map save: %s", line.c_str());
+  };
+  if (!localizer_->save_map(parameters, result, error, log_progress)) {
     message = "save_map failed: " + error;
     return false;
   }
   message = "saved " + std::to_string(result.keyframe_count) + " keyframes, " +
             std::to_string(result.map_point_count) + " map points to " + map_output_dir_;
   RCLCPP_INFO(get_logger(), "%s", message.c_str());
+  if (!result.loop_closure_report.empty()) {
+    RCLCPP_INFO(get_logger(), "loop closures: %zu in total; %s", result.loop_closure_count,
+                result.loop_closure_report.c_str());
+  }
   return true;
 }
 

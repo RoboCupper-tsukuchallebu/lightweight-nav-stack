@@ -68,6 +68,8 @@ def parse_arguments(argv=None):
     parser.add_argument("--status-rate-hz", type=float, default=10.0, help="LocalizationStatus rate (more samples for scan_ms)")
     parser.add_argument("--node-param", action="append", default=[], metavar="NAME:=VALUE",
                         help="extra localization_node parameter (repeatable)")
+    parser.add_argument("--extra-topic", action="append", default=[], metavar="TOPIC",
+                        help="bag topic to play besides the sensor topics, e.g. /fix_all for GNSS (repeatable)")
     parser.add_argument("--foxglove", action="store_true", help="start foxglove_bridge (no authentication: use on a trusted network)")
     parser.add_argument("--foxglove-port", type=int, default=8765)
     parser.add_argument("--hold-seconds", type=float, default=0.0,
@@ -221,7 +223,7 @@ def start_foxglove(arguments, log_file):
 def start_player(arguments, log_file):
     command = ["ros2", "bag", "play", str(arguments.bag), "--clock", "100", "--rate", str(arguments.rate),
                "--start-offset", str(arguments.start_offset), "--read-ahead-queue-size", "2000",
-               "--disable-keyboard-controls", "--topics", *PLAYED_TOPICS]
+               "--disable-keyboard-controls", "--topics", *PLAYED_TOPICS, *arguments.extra_topic]
     if arguments.duration > 0.0:
         command += ["--playback-duration", str(arguments.duration)]
     return subprocess.Popen(command, stdout=log_file, stderr=subprocess.STDOUT)

@@ -6,6 +6,12 @@ LiDAR・車輪オドメトリ・GPSをGTSAMの固定長窓の姿勢グラフで�
 - `localization`: 事前地図（`map.pcd`）と照合して、`map` 座標の姿勢を出す。
 - `mapping`: 地図を作る。`~/save_map`（か deactivate / shutdown）で全キーフレームをバッチ再最適化し、
   `map_output_dir` に `map.pcd` / `map.yaml` / `trajectory.csv` を書く。
+  保存は 3 段階で、段階ごとに 3 つのファイルをそろえて置き換える。停止の制限時間で途中で打ち切られても、
+  最後に終わった段階の地図が残る（どの段階まで進んだかはログの `map save: ...` と `map.yaml` の `batch_optimized` で分かる）。
+  1. 仮の地図: オンライン推定の姿勢のまま書く（最適化を待たない。`batch_optimized: false`、`position_std_m` は `nan`）。
+  2. 最適化後: バッチ再最適化の結果で書く（`batch_optimized: true`、`position_std_m` は `nan`）。
+  3. 最終: ループ閉じ込み（有効な場合）のあと、標準偏差つきで書く。
+  最適化が失敗したときも、それまでに終わった段階の地図は残る（`save_map` は失敗を返す）。
 
 ## 起動
 
@@ -118,6 +124,12 @@ W-1 は既定で無効。スリップ判定の根拠は LiDAR の照合だけな
 | `publish_tf` / `status_rate_hz` | true / 2.0 | |
 | `wheel_yaw_slip_threshold_rad` / `wheel_sigma_yaw_per_rad` / `wheel_sigma_yaw_per_m` | 0.0 / 0.1 / 0.01 | 既定では無効。閾値を正の値にすると、受理された LiDAR 照合と車輪のキーフレーム間の相対 yaw の差が閾値を超えた場合に限り、車輪 yaw の標準偏差をその差以上に広げる。それ以外は従来の式を使う |
 | `wheel_robust_kernel` / `wheel_robust_k` | huber / 8.0 | スリップと判定した車輪因子の白色化残差に適用する Huber または cauchy。地図・GPS の `huber_k` とは独立。σ を不一致の大きさまで広げるため白色化残差はおよそ 1σ 以下になり、カーネルは追加の保険で、現状ほぼ効かない。8.0 は暫定値 |
+| `absolute_sigma_tilt_rad` / `absolute_sigma_z_m` | 0.0 / 0.0 | 既定では無効（0）。正の値にすると、すべてのノードに「車体は水平に近い」「高さは最初のノードに近い」という弱い絶対の拘束を入れる。LiDAR オドメトリの roll / pitch / z は相対の拘束だけだと積み上がり、GNSS なしの 650 m の走行で高さが ±8 m 流れた（2026-11-25）。小さすぎると坂が潰れる: 0.05 rad では 10° の坂が平らになる。実走で試した値は 0.3 rad / 2.0 m（高さの流れ ±0.3 m。2 m 程度の高低差は残る） |
+| `loop_closure_enabled` | false | mapping の保存時（最終段階）に、同じ場所へ戻ったキーフレームの組を探してバッチ最適化に入れる。候補は「推定上で近い組」と「見え方が似ている組（推定が大きく外れていても見つかる）」。照合は大域初期化と同じ 2D 探索 + 3D 検証。37 分の走行で数分かかるので、停止の制限時間内には終わらない（その場合も前の段階の地図は残る） |
+| `loop_closure_min_path_gap_m` / `loop_closure_query_spacing_m` | 50.0 / 10.0 | 経路に沿ってこれ以上離れた組だけを候補にする / 経路に沿ってこの間隔で照合する |
+| `loop_closure_search_radius_m` / `loop_closure_search_radius_per_m` / `loop_closure_max_search_radius_m` | 5.0 / 0.05 / 20.0 | 推定上で近い組を探す半径。基本 + 経路長 × 係数、上限つき |
+| `loop_closure_max_rounds` | 3 | 検出と最適化を繰り返す最大回数（1 回目の補正で次の候補が見つかる） |
+| `map_save_keyframe_clouds` | false | 保存時に `keyframes.bin`（全キーフレームの点群。30 分で約 100 MB）も書く。`loop_closure_probe` でループ検出を後から試すためのもの |
 | `lidar_odom_slip_gate_yaw_rad` | 0.0 | 既定では拡張ゲートは無効。既存ゲートより大きい値を設定すると有効になる。直進中・停止中とスリップを区別する独立の根拠がないため。有効にすると直進中に最大この値まで yaw の誤照合を通す。車輪 yaw レートが閾値未満の場合に既存ゲートとこの値の大きい方を使い、収束・inlier・並進ゲートも必要 |
 | `lidar_odom_slip_wheel_yaw_rate_rad_s` / `lidar_odom_slip_wheel_rate_window_s` | 0.05 / 0.05 | 拡張ゲートの車輪 yaw レート閾値（rad/s）と、その計測窓（秒、有限かつ正） |
 | `visualization_enabled` | true | `map_cloud` と `path` を出す。false で両方とも作らない |
