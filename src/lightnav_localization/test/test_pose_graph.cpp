@@ -562,3 +562,26 @@ TEST(PoseGraph, RotationFactorRejectsInvalidMeasurements) {
   EXPECT_THROW(graph.add_rotation_factor(0, index, 0.1, 0.0), std::invalid_argument);
   EXPECT_THROW(graph.add_rotation_factor(0, index, 0.1, std::numeric_limits<double>::infinity()), std::invalid_argument);
 }
+
+// Issue #92 (version 3.1): where a gyro rotation factor is added, a small steady wheel yaw bias must
+// not weigh as much as the gyro. A wheel bias of 0.0016 rad, a true rotation factor of 0.005 rad sigma.
+namespace {
+double yaw_error_with_wheel_sigma_floor(double minimum_yaw_sigma_rad) {
+  constexpr double kWheelBiasRad = 0.0016;
+  const PoseGraphParameters parameters;
+  PoseGraph graph(parameters);
+  graph.add_first_node(0.0, Eigen::Isometry3d::Identity(), 0.05, 0.01);
+  EXPECT_TRUE(graph.optimize());
+  const Eigen::Isometry3d wheel_relative = yaw_translation(0.6, 0.0, kWheelBiasRad);
+  const int index = graph.add_node_with_wheel_factor(1.0, wheel_relative, wheel_relative, 0.0, minimum_yaw_sigma_rad);
+  graph.add_rotation_factor(0, index, 0.0, parameters.sigma_floor_rad);
+  EXPECT_TRUE(graph.optimize());
+  return std::abs(std::atan2(graph.pose(index)->linear()(1, 0), graph.pose(index)->linear()(0, 0)));
+}
+}  // namespace
+
+TEST(PoseGraph, WheelYawSigmaFloorLetsTheGyroDecideOverASmallWheelBias) {
+  const PoseGraphParameters parameters;
+  EXPECT_GT(yaw_error_with_wheel_sigma_floor(0.0), 5.0e-4);
+  EXPECT_LT(yaw_error_with_wheel_sigma_floor(10.0 * parameters.sigma_floor_rad), 1.0e-4);
+}

@@ -2099,24 +2099,40 @@ TEST(LocalizerGyroDrive, T10b_AWheelSpinningInPlaceWhileLidarIsAcceptedKeepsTheG
   EXPECT_LT(result.max_yaw_error_deg(spin_begin, spin_begin + 3.0), 2.0);
 }
 
-// DISABLED: the Issue's criterion is not met on this synthetic drive (measured 3.44 deg with the gyro
-// against 3.11 deg without: both drift at 0.012 deg/s, a floor set by the LiDAR odometry, not by the
-// wheel or the gyro). Kept, with the Issue's numbers unchanged, until the coordinator decides.
-TEST(LocalizerGyroDrive, DISABLED_T3_ALongDriveWithATripledWheelYawBiasEndsAsWellAsTheGyroAllows) {
+// T3 (Issue #92 version 3.1): the first leg is short so that the first turn verifies the gyro early;
+// the long straight legs afterwards then run with the gyro active.
+GyroDriveResult run_t3(double first_leg_m, double gyro_bias_rad_per_s, bool has_gyro) {
   GyroDriveOptions options;
-  options.course = SegmentedCourse({30.0, 30.0, 30.0, 30.0, 30.0}, {1.0, 1.0, -1.0, 1.0}, 0.6, 0.4);
+  options.course = SegmentedCourse({first_leg_m, 30.0, 30.0, 30.0, 30.0, 30.0}, {1.0, 1.0, -1.0, 1.0, -1.0}, 0.6, 0.4);
   options.wheel_yaw_drift_rad_per_m = 1.5 * M_PI / 180.0 / 10.0;  // three times the Issue's wheel model
-  GyroDriveOptions wheel_only = options;
-  wheel_only.has_gyro = false;
-  const GyroDriveResult reference = run_gyro_drive(wheel_only);
-  const GyroDriveResult with_gyro = run_gyro_drive(options);
+  options.has_gyro = has_gyro;
+  if (gyro_bias_rad_per_s != 2.0e-4) {
+    // The standard increment contains 2e-4 rad/s of bias; replace it by the requested one.
+    options.gyro_transform = [gyro_bias_rad_per_s](double, double standard) {
+      return std::optional<double>(standard + (gyro_bias_rad_per_s - 2.0e-4) * kDt);
+    };
+  }
+  return run_gyro_drive(options);
+}
+
+TEST(LocalizerGyroDrive, T3_ALongDriveWithATripledWheelYawBiasEndsAsWellAsTheGyroAllows) {
+  const GyroDriveResult reference = run_t3(5.0, 2.0e-4, false);
+  const GyroDriveResult with_gyro = run_t3(5.0, 2.0e-4, true);
   const double wheel_only_final = reference.samples.back().yaw_error_deg;
   const double gyro_final = with_gyro.samples.back().yaw_error_deg;
-  std::printf("[ MEASURED ] T3 final yaw error without gyro %.3f deg, with gyro %.3f deg\n", wheel_only_final, gyro_final);
-  std::printf("[ MEASURED ] T3 gyro: active=%d added=%zu skipped=%zu slip=%zu outvoted=%zu max_error=%.3f (wheel only max %.3f)\n",
-              with_gyro.first_active_sec.has_value(), with_gyro.status.rotation_factors_added_total,
-              with_gyro.status.rotation_factors_skipped_total, with_gyro.status.slip_detected_total,
-              with_gyro.status.consistency_outvoted_total, with_gyro.max_yaw_error_deg(), reference.max_yaw_error_deg());
+  std::printf("[ MEASURED ] T3 final yaw error without gyro %.3f deg, with gyro %.3f deg (limit %.3f)\n",
+              wheel_only_final, gyro_final, std::max(1.0, 0.5 * wheel_only_final));
   EXPECT_LE(gyro_final, std::max(1.0, 0.5 * wheel_only_final));
   EXPECT_EQ(with_gyro.status.consistency_outvoted_total, 0U);
+}
+
+// Measurements for the PR (no pass / fail): without the gyro bias, and with the first leg left at 30 m.
+TEST(LocalizerGyroDrive, T3_MeasurementsForThePullRequest) {
+  const GyroDriveResult no_bias = run_t3(5.0, 0.0, true);
+  const GyroDriveResult long_first_leg = run_t3(30.0, 2.0e-4, true);
+  const GyroDriveResult long_first_leg_reference = run_t3(30.0, 2.0e-4, false);
+  std::printf("[ MEASURED ] T3 gyro bias 0: final yaw error %.3f deg\n", no_bias.samples.back().yaw_error_deg);
+  std::printf("[ MEASURED ] T3 first leg 30 m: final yaw error %.3f deg with gyro, %.3f deg without\n",
+              long_first_leg.samples.back().yaw_error_deg, long_first_leg_reference.samples.back().yaw_error_deg);
+  SUCCEED();
 }

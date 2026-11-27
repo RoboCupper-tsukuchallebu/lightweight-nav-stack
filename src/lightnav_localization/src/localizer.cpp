@@ -23,6 +23,10 @@ constexpr double kWheelBufferSec = 3.0;
 constexpr double kMinimumGyroCoverageRatio = 0.95;
 // A keyframe interval where the raw wheel yaw and the gyro differ by more than this counts as a slip.
 constexpr double kSlipDifferenceRad = 0.05;
+// Where a rotation factor is added, the wheel factor's yaw standard deviation is at least this many
+// times the gyro's: the gyro is preferred over the wheel yaw, and a small steady wheel bias must not
+// weigh as much as the gyro (Issue #92, section 3.3 step 5, version 3.1).
+constexpr double kWheelYawSigmaPerGyroSigma = 10.0;
 // Wheel samples older than this are dropped even if no keyframe has consumed them.
 constexpr double kMaximumWheelSampleAgeSec = 30.0;
 constexpr double kNeverSec = -1e9;
@@ -589,9 +593,16 @@ struct Localizer::Implementation {
       const bool should_add_rotation_factor = is_gyro_active && interval.is_sufficiently_covered();
       const double wheel_gyro_difference_rad =
           should_add_rotation_factor ? std::abs(interval.raw_wheel_yaw_sum_rad - gyro_yaw_rad) : 0.0;
+      // The gyro standard deviation of this interval alone, computed before the wheel factor is added.
+      const double interval_gyro_sigma_rad = should_add_rotation_factor
+          ? gyro_yaw_sigma(parameters.graph, interval.total_sec, gyro_yaw_rad,
+                           std::abs(interval.uncovered_wheel_yaw_sum_rad))
+          : 0.0;
+      const double minimum_wheel_yaw_sigma_rad =
+          std::max(wheel_gyro_difference_rad, kWheelYawSigmaPerGyroSigma * interval_gyro_sigma_rad);
       if (is_gyro_active && !should_add_rotation_factor) ++gyro_status.rotation_factors_skipped_total;
       const int index = graph->add_node_with_wheel_factor(pending.stamp, best, wheel_relative, yaw_disagreement,
-                                                          wheel_gyro_difference_rad);
+                                                          minimum_wheel_yaw_sigma_rad);
       if (lidar_result) {
         graph->add_lidar_odometry_factor(
             last.index, index, invert_isometry(*last_pose) * best,
