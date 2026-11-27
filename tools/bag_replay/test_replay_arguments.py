@@ -3,6 +3,7 @@
 import math
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -62,6 +63,87 @@ def test_played_topics_add_the_gnss_topic_once():
 
     assert replay_arguments.played_topics(sensors, ["/fix_all"], "/fix_all") == ["/velodyne_points", "/tf", "/fix_all"]
     assert replay_arguments.played_topics(sensors, ["/x"], None) == ["/velodyne_points", "/tf", "/x"]
+
+
+SENSORS = ("/velodyne_points", "/wheel/odom", "/tf", "/tf_static")
+
+
+def make_status(name, **values):
+    return SimpleNamespace(name=name, values=[SimpleNamespace(key=key, value=value) for key, value in values.items()])
+
+
+def test_imu_topic_defaults_to_empty_and_gives_the_node_no_parameter():
+    arguments = parse()
+
+    assert arguments.imu_topic == ""
+    assert replay_arguments.imu_node_parameters(arguments.imu_topic) == []
+
+
+def test_imu_topic_is_played_and_given_to_the_node():
+    arguments = parse("--imu-topic", "/imu/data_raw")
+
+    assert replay_arguments.played_topics(SENSORS, arguments.extra_topic, arguments.record_gnss_topic, arguments.imu_topic) == [
+        *SENSORS, "/imu/data_raw"]
+    assert replay_arguments.imu_node_parameters(arguments.imu_topic) == ["imu_topic:=/imu/data_raw"]
+
+
+def test_without_an_imu_topic_the_played_topics_are_the_same_as_before():
+    assert replay_arguments.played_topics(SENSORS, ["/fix_all"], None) == [*SENSORS, "/fix_all"]
+    assert replay_arguments.played_topics(SENSORS, ["/fix_all"], None, "") == [*SENSORS, "/fix_all"]
+
+
+def test_an_imu_topic_already_asked_for_as_extra_is_played_once():
+    assert replay_arguments.played_topics(SENSORS, ["/imu/data_raw"], None, "/imu/data_raw") == [*SENSORS, "/imu/data_raw"]
+
+
+def test_a_topic_missing_from_the_bag_is_not_played_and_is_reported():
+    played, missing = replay_arguments.split_by_recorded_topics(SENSORS, [], None, "/imu/data_raw", [*SENSORS, "/other"])
+
+    assert played == list(SENSORS)
+    assert missing == ["/imu/data_raw"]
+
+
+def test_a_topic_in_the_bag_is_played_and_not_reported():
+    played, missing = replay_arguments.split_by_recorded_topics(SENSORS, [], None, "/imu/data_raw", [*SENSORS, "/imu/data_raw"])
+
+    assert played == [*SENSORS, "/imu/data_raw"]
+    assert missing == []
+
+
+def test_extra_and_gnss_topics_missing_from_the_bag_are_reported_in_request_order():
+    played, missing = replay_arguments.split_by_recorded_topics(
+        SENSORS, ["/a", "/b"], "/fix_all", "/imu/data_raw", [*SENSORS, "/b", "/fix_all"])
+
+    assert played == [*SENSORS, "/b", "/fix_all"]
+    assert missing == ["/a", "/imu/data_raw"]
+
+
+def test_sensor_topics_are_played_even_when_the_bag_lacks_them():
+    played, missing = replay_arguments.split_by_recorded_topics(SENSORS, [], None, "", [])
+
+    assert played == list(SENSORS)
+    assert missing == []
+
+
+def test_nothing_is_reported_missing_without_extra_requests():
+    assert replay_arguments.split_by_recorded_topics(SENSORS, [], None, "", list(SENSORS)) == (list(SENSORS), [])
+
+
+def test_the_imu_diagnostic_values_are_taken_from_the_array():
+    statuses = [make_status("other"), make_status("localization_node: IMU", state="ready", sample_rate_hz="966.0")]
+
+    assert replay_arguments.find_diagnostic_values(statuses) == {"state": "ready", "sample_rate_hz": "966.0"}
+
+
+def test_the_imu_diagnostic_is_none_when_the_array_does_not_hold_it():
+    assert replay_arguments.find_diagnostic_values([make_status("localization_node: Wheel", state="ok")]) is None
+    assert replay_arguments.find_diagnostic_values([]) is None
+
+
+def test_the_last_status_with_the_name_wins():
+    statuses = [make_status("localization_node: IMU", state="old"), make_status("localization_node: IMU", state="new")]
+
+    assert replay_arguments.find_diagnostic_values(statuses) == {"state": "new"}
 
 
 ROWS = [(100.0, 0.0, 0.0, 0.0), (101.0, 2.0, 4.0, 1.0), (102.0, 2.0, 4.0, 1.0)]
