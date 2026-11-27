@@ -1516,6 +1516,16 @@ TEST(GyroConsistencyJudge, ThirdOutvoteDisablesTheGyroForGood) {
   EXPECT_EQ(judge.state(), GyroConsistencyState::kDisabledInconsistent);
 }
 
+TEST(GyroConsistencyJudge, ASuspendedGyroIsStillVotedOnAndThreeLossesDisableIt) {
+  GyroConsistencyJudge judge = active_judge();
+  ASSERT_EQ(judge.observe_interval(covered_interval(0.3, 0.6, 0.3)).event, GyroConsistencyEvent::kOutvoted);
+  EXPECT_EQ(judge.observe_interval(covered_interval(0.3, 0.6, 0.3)).event, GyroConsistencyEvent::kOutvoted);
+  EXPECT_EQ(judge.state(), GyroConsistencyState::kSuspended);
+  EXPECT_EQ(judge.observe_interval(covered_interval(0.3, 0.6, 0.3)).event, GyroConsistencyEvent::kOutvoted);
+  EXPECT_EQ(judge.state(), GyroConsistencyState::kDisabledInconsistent);
+  EXPECT_EQ(judge.outvoted_total(), 3U);
+}
+
 TEST(GyroConsistencyJudge, SumsOfTheVerificationAreReportedPerKind) {
   GyroConsistencyJudge judge;
   judge.observe_interval(covered_interval(0.05, 0.04, 0.045));
@@ -1564,4 +1574,405 @@ TEST(LocalizerGyro, NoGyroIncrementsLeaveTheJudgeUntouched) {
   EXPECT_EQ(result.status.consistency, GyroConsistencyState::kUnverified);
   EXPECT_EQ(result.status.consistency_rejected_total, 0U);
   EXPECT_EQ(result.status.consistency_confirmed_total, 0U);
+}
+
+// ---- Effects of the gyro on a drive (Issue #92, section 4.3). ----
+namespace {
+
+using TimeWindow = std::pair<double, double>;
+// The gyro increment of one wheel sample from the standard one (truth + bias + noise); nullopt = none.
+using GyroTransform = std::function<std::optional<double>(double time_sec, double standard_increment_rad)>;
+
+struct GyroDriveOptions {
+  SegmentedCourse course = make_long_drive_course();
+  double wheel_yaw_scale = 1.0;
+  double wheel_yaw_drift_rad_per_m = 0.5 * M_PI / 180.0 / 10.0;  // the Issue's wheel model
+  std::vector<TimeWindow> wheel_slip_windows;       // the wheel reports no rotation
+  TimeWindow wheel_spin_window{-1.0, -1.0};         // the wheel reports 0.5 rad/s, the truth does not turn
+  GyroTransform gyro_transform;                     // empty = the standard increment
+  bool has_gyro = true;                             // false: the two argument on_wheel_odom
+  std::vector<TimeWindow> lidar_rejected_windows;
+  GyroConsistencyState initial_state = GyroConsistencyState::kUnverified;
+  bool is_prediction_enabled = true;
+  double optimization_failure_sec = -1.0;
+  double wheel_time_backwards_sec = -1.0;
+  double initialize_sec = -1.0;
+  bool has_prior_map = false;  // false: mapping without a map or GNSS (never reaches TRACKING)
+};
+
+struct DriveSample {
+  double time_sec;
+  double yaw_error_deg;
+  LocalizationState state;
+  Eigen::Isometry3d map_to_base;
+};
+
+struct GyroDriveResult {
+  std::vector<DriveSample> samples;
+  GyroFusionStatus status;
+  std::optional<double> first_active_sec;
+  bool saw_suspended = false;
+  std::size_t scans_processed = 0;
+  std::size_t max_pending_scans = 0;
+  bool is_tracking_at_end = false;
+  double max_yaw_error_deg(double from_sec, double to_sec) const {
+    double maximum = 0.0;
+    for (const DriveSample& sample : samples) {
+      if (sample.time_sec >= from_sec && sample.time_sec <= to_sec) maximum = std::max(maximum, sample.yaw_error_deg);
+    }
+    return maximum;
+  }
+  double max_yaw_error_deg() const { return max_yaw_error_deg(0.0, 1.0e9); }
+};
+
+GyroDriveResult run_gyro_drive(const GyroDriveOptions& options) {
+  const SegmentedCourse& course = options.course;
+  const SyntheticWorld world(course.centerline(), true);
+  LocalizerParameters parameters;
+  parameters.mapping = !options.has_prior_map;
+  parameters.initial_gyro_consistency = options.initial_state;
+  parameters.gyro_yaw_prediction_enabled = options.is_prediction_enabled;
+  Localizer localizer(parameters, options.has_prior_map ? world.sample_map(0.2) : PointList{}, std::nullopt);
+  double current_time_sec = 0.0;
+  const auto is_in_any = [](const std::vector<TimeWindow>& windows, double time_sec) {
+    return std::any_of(windows.begin(), windows.end(),
+                       [&](const TimeWindow& window) { return time_sec >= window.first && time_sec <= window.second; });
+  };
+  localizer.set_lidar_match_hook_for_test([&](MatchResult& result) {
+    if (is_in_any(options.lidar_rejected_windows, current_time_sec)) result.is_accepted = false;
+  });
+  const auto truth_at = [&course](double time_sec) { return course.truth_at(time_sec); };
+  localizer.initialize(truth_at(0.0));
+  std::mt19937 random_generator(5);
+  std::normal_distribution<double> noise(0.0, 1.0);
+  constexpr double kBiasResidualRadPerSec = 2.0e-4;
+  constexpr double kNoiseDensity = 1.0e-3;
+
+  GyroDriveResult result;
+  Eigen::Isometry3d odom = Eigen::Isometry3d::Identity();
+  const int step_count = static_cast<int>(course.total_sec() / kDt);
+  const int steps_per_scan = static_cast<int>(0.1 / kDt);
+  bool has_failed_optimization = false;
+  bool has_gone_backwards = false;
+  bool has_initialized = false;
+  for (int step = 0; step <= step_count; ++step) {
+    const double time_sec = step * kDt;
+    current_time_sec = time_sec;
+    std::optional<double> gyro_increment;
+    if (step > 0) {
+      const Eigen::Isometry3d relative = truth_at(time_sec - kDt).inverse() * truth_at(time_sec);
+      const double true_yaw = std::atan2(relative.rotation()(1, 0), relative.rotation()(0, 0));
+      const double distance = relative.translation().norm();
+      double wheel_yaw = true_yaw * options.wheel_yaw_scale + distance * options.wheel_yaw_drift_rad_per_m;
+      if (is_in_any(options.wheel_slip_windows, time_sec)) wheel_yaw = 0.0;
+      if (time_sec >= options.wheel_spin_window.first && time_sec <= options.wheel_spin_window.second) {
+        wheel_yaw = 0.5 * kDt;
+      }
+      odom = odom * planar_step(distance, wheel_yaw);
+      const double standard = true_yaw + kBiasResidualRadPerSec * kDt +
+                              kNoiseDensity * std::sqrt(kDt) * noise(random_generator);
+      gyro_increment = options.gyro_transform ? options.gyro_transform(time_sec, standard) : standard;
+    }
+    if (step > 0 && step % steps_per_scan == 0 && time_sec >= kScanDuration) {
+      localizer.on_scan(time_sec, world.synthesize_scan(truth_at, time_sec - kScanDuration, kScanDuration, true, 360, 8));
+    }
+    if (options.optimization_failure_sec >= 0.0 && !has_failed_optimization && time_sec >= options.optimization_failure_sec) {
+      localizer.inject_optimization_failure_for_test();
+      has_failed_optimization = true;
+    }
+    if (options.initialize_sec >= 0.0 && !has_initialized && time_sec >= options.initialize_sec) {
+      localizer.initialize(truth_at(time_sec));
+      has_initialized = true;
+    }
+    if (options.wheel_time_backwards_sec >= 0.0 && !has_gone_backwards && time_sec >= options.wheel_time_backwards_sec) {
+      localizer.on_wheel_odom(time_sec - 1.0, odom, std::nullopt);  // one sample from the past
+      has_gone_backwards = true;
+    }
+    const auto output = options.has_gyro ? localizer.on_wheel_odom(time_sec, odom, gyro_increment)
+                                         : localizer.on_wheel_odom(time_sec, odom);
+    result.max_pending_scans = std::max(result.max_pending_scans, localizer.pending_scan_count());
+    const GyroFusionStatus status = localizer.gyro_fusion_status();
+    if (status.consistency == GyroConsistencyState::kActive && !result.first_active_sec) result.first_active_sec = time_sec;
+    result.saw_suspended |= status.consistency_outvoted_total > 0;
+    if (output) {
+      result.samples.push_back({time_sec, yaw_error_deg(output->map_to_base, truth_at(time_sec)), output->state,
+                                output->map_to_base});
+      result.is_tracking_at_end = output->state == LocalizationState::kTracking;
+    }
+  }
+  result.status = localizer.gyro_fusion_status();
+  result.scans_processed = localizer.take_scan_time_statistics().count;
+  return result;
+}
+
+// 5 m, stop, in-place 90 degree turn at 0.5 rad/s, then a leg long enough (8 m = 13 s) for the
+// "10 seconds after the turn" check; the Issue's 5 m would end 8 s after the turn.
+SegmentedCourse make_t1_course() {
+  return SegmentedCourse({5.0, 8.0}, {1.0}, 0.6, 0.5, 2.0);
+}
+
+GyroDriveOptions t1_options() {
+  GyroDriveOptions options;
+  options.course = make_t1_course();
+  const TimeWindow turn = options.course.turn_windows().front();
+  options.wheel_yaw_scale = 1.4;
+  options.lidar_rejected_windows = {{turn.first, turn.second + 0.5}};
+  return options;
+}
+
+TimeWindow slip_in_turn(const SegmentedCourse& course, std::size_t turn_index) {
+  const double begin_sec = course.turn_windows()[turn_index].first + 0.5;
+  return {begin_sec, begin_sec + 0.8};  // as in the existing slip scenario: 0.8 s without rotation
+}
+
+GyroDriveOptions long_drive_with_slip_in_turn(std::size_t turn_index) {
+  GyroDriveOptions options;
+  options.wheel_slip_windows = {slip_in_turn(options.course, turn_index)};
+  return options;
+}
+
+GyroTransform scaled_gyro(double scale) {
+  return [scale](double, double standard) { return std::optional<double>(standard * scale); };
+}
+
+}  // namespace
+
+TEST(LocalizerGyroDrive, T1_SlippingInPlaceTurnIsReproducedWithoutTheGyro) {
+  GyroDriveOptions options = t1_options();
+  options.has_gyro = false;
+  const GyroDriveResult result = run_gyro_drive(options);
+  std::printf("[ MEASURED ] T1 no gyro final yaw error %.3f deg\n", result.samples.back().yaw_error_deg);
+  EXPECT_GT(result.samples.back().yaw_error_deg, 15.0);
+}
+
+TEST(LocalizerGyroDrive, T1_ActiveWithinOneAndAHalfSecondsAndTheYawFollowsAfterTheTurn) {
+  const GyroDriveOptions options = t1_options();
+  const TimeWindow turn = options.course.turn_windows().front();
+  const GyroDriveResult result = run_gyro_drive(options);
+  ASSERT_TRUE(result.first_active_sec.has_value());
+  std::printf("[ MEASURED ] T1 active %.2f s after the turn began; error after turn+3 s %.3f deg\n",
+              *result.first_active_sec - turn.first, result.max_yaw_error_deg(turn.second + 3.0, 1.0e9));
+  EXPECT_LE(*result.first_active_sec, turn.first + 1.5);
+  EXPECT_LT(result.max_yaw_error_deg(turn.second + 3.0, 1.0e9), 2.0);
+  EXPECT_EQ(result.status.consistency_outvoted_total, 0U);  // T10
+}
+
+TEST(LocalizerGyroDrive, T1_WithoutPredictionTheRotationFactorsStillPullTheYawBack) {
+  GyroDriveOptions options = t1_options();
+  options.is_prediction_enabled = false;
+  const TimeWindow turn = options.course.turn_windows().front();
+  const GyroDriveResult result = run_gyro_drive(options);
+  ASSERT_GT(result.samples.back().time_sec, turn.second + 10.0);
+  std::printf("[ MEASURED ] T1 no prediction error after turn+10 s %.3f deg\n",
+              result.max_yaw_error_deg(turn.second + 10.0, 1.0e9));
+  EXPECT_LT(result.max_yaw_error_deg(turn.second + 10.0, 1.0e9), 2.0);
+}
+
+TEST(LocalizerGyroDrive, T1b_ASlipAfterAnEarlierCleanTurnIsCorrectedFromItsStart) {
+  GyroDriveOptions options;  // long drive: turn 0 clean (becomes active), turn 1 slips
+  options.wheel_slip_windows = {slip_in_turn(options.course, 1)};
+  const GyroDriveResult result = run_gyro_drive(options);
+  const double slip_begin = options.wheel_slip_windows.front().first;
+  EXPECT_LT(result.first_active_sec.value_or(1.0e9), slip_begin);
+  std::printf("[ MEASURED ] T1b/T2b max yaw error from slip start %.3f deg\n", result.max_yaw_error_deg(slip_begin, 1.0e9));
+  EXPECT_LT(result.max_yaw_error_deg(slip_begin, 1.0e9), 2.0);
+  // T6: the slip is counted although the gyro replaced the yaw (the raw wheel is used for w).
+  EXPECT_GE(result.status.slip_detected_total, 1U);
+  EXPECT_GE(result.status.slip_max_rad, 0.1);
+  // T10: a correct gyro is never outvoted.
+  EXPECT_EQ(result.status.consistency_outvoted_total, 0U);
+  EXPECT_EQ(result.status.consistency, GyroConsistencyState::kActive);
+}
+
+TEST(LocalizerGyroDrive, T2b_WithAPriorMapTheDriveStaysTrackingAndTheYawWithin2Degrees) {
+  GyroDriveOptions options = long_drive_with_slip_in_turn(1);
+  options.has_prior_map = true;
+  const GyroDriveResult result = run_gyro_drive(options);
+  const double slip_begin = options.wheel_slip_windows.front().first;
+  std::printf("[ MEASURED ] T2b (prior map) max yaw error from slip start %.3f deg\n", result.max_yaw_error_deg(slip_begin, 1.0e9));
+  EXPECT_LT(result.max_yaw_error_deg(slip_begin, 1.0e9), 2.0);
+  EXPECT_TRUE(result.is_tracking_at_end) << "final state " << static_cast<int>(result.samples.back().state);
+  EXPECT_EQ(result.status.consistency_outvoted_total, 0U);
+}
+
+TEST(LocalizerGyroDrive, T6_NoSlipMeansNoCountOnADriveWithAnAccurateWheel) {
+  GyroDriveOptions options;
+  options.wheel_yaw_drift_rad_per_m = 0.0;
+  const GyroDriveResult result = run_gyro_drive(options);
+  EXPECT_EQ(result.status.slip_detected_total, 0U);
+}
+
+TEST(LocalizerGyroDrive, T4b_ScatteredMissingIncrementsAreToleratedUpToFivePercent) {
+  GyroDriveOptions two_percent = long_drive_with_slip_in_turn(1);
+  int counter = 0;
+  two_percent.gyro_transform = [&counter](double, double standard) {
+    return ++counter % 50 == 0 ? std::nullopt : std::optional<double>(standard);
+  };
+  const GyroDriveResult tolerated = run_gyro_drive(two_percent);
+  EXPECT_EQ(tolerated.status.rotation_factors_skipped_total, 0U);
+  EXPECT_LT(tolerated.max_yaw_error_deg(slip_in_turn(two_percent.course, 1).first, 1.0e9), 2.0);
+
+  GyroDriveOptions ten_percent = long_drive_with_slip_in_turn(1);
+  int other_counter = 0;
+  ten_percent.initial_state = GyroConsistencyState::kActive;  // 10 % misses would never even verify
+  ten_percent.gyro_transform = [&other_counter](double, double standard) {
+    return ++other_counter % 10 == 0 ? std::nullopt : std::optional<double>(standard);
+  };
+  const GyroDriveResult skipped = run_gyro_drive(ten_percent);
+  EXPECT_EQ(skipped.status.rotation_factors_added_total, 0U);
+  EXPECT_GT(skipped.status.rotation_factors_skipped_total, 0U);
+}
+
+TEST(LocalizerGyroDrive, T4_AnOutageOfFiveSecondsDoesNotStopTheOutputOrHoldBackScans) {
+  GyroDriveOptions reference_options = long_drive_with_slip_in_turn(1);
+  const GyroDriveResult reference = run_gyro_drive(reference_options);
+  GyroDriveOptions options = long_drive_with_slip_in_turn(1);
+  const double outage_begin = slip_in_turn(options.course, 1).second + 8.0;
+  const double outage_end = outage_begin + 5.0;
+  options.gyro_transform = [=](double time_sec, double standard) {
+    return time_sec >= outage_begin && time_sec < outage_end ? std::nullopt : std::optional<double>(standard);
+  };
+  const GyroDriveResult result = run_gyro_drive(options);
+  EXPECT_EQ(result.scans_processed, reference.scans_processed);
+  EXPECT_LT(result.max_pending_scans, 20U);
+  EXPECT_GT(result.status.rotation_factors_skipped_total, 0U);
+  EXPECT_GT(result.status.rotation_factors_added_total, reference.status.rotation_factors_added_total - 8U);
+  double largest_jump_deg = 0.0;
+  for (std::size_t index = 1; index < result.samples.size(); ++index) {
+    const Eigen::Matrix3d difference = result.samples[index - 1].map_to_base.rotation().transpose() *
+                                       result.samples[index].map_to_base.rotation();
+    largest_jump_deg = std::max(largest_jump_deg, std::abs(std::atan2(difference(1, 0), difference(0, 0))) * 180.0 / M_PI);
+  }
+  // Turning at 0.4 rad/s moves 0.46 deg per 20 ms by itself; a jump is anything beyond that.
+  EXPECT_LT(largest_jump_deg, 0.5 + 0.46);
+}
+
+TEST(LocalizerGyroDrive, T5_AGyroIncrementDelayedByOneSampleStillHoldsTheYaw) {
+  GyroDriveOptions options = long_drive_with_slip_in_turn(1);
+  double previous = 0.0;
+  options.gyro_transform = [&previous](double, double standard) {
+    const double delayed = previous;
+    previous = standard;
+    return std::optional<double>(delayed);
+  };
+  const GyroDriveResult result = run_gyro_drive(options);
+  const TimeWindow slip = slip_in_turn(options.course, 1);
+  EXPECT_LT(result.max_yaw_error_deg(options.course.turn_windows()[1].second + 1.0, 1.0e9), 2.0);
+  (void)slip;
+}
+
+TEST(LocalizerGyroDrive, T7_ASignReversedGyroNeverActivatesAndTheOutputEqualsTheWheelOnlyRun) {
+  GyroDriveOptions wheel_only = long_drive_with_slip_in_turn(0);
+  wheel_only.has_gyro = false;
+  const GyroDriveResult reference = run_gyro_drive(wheel_only);
+  GyroDriveOptions options = long_drive_with_slip_in_turn(0);
+  options.gyro_transform = scaled_gyro(-1.0);
+  const GyroDriveResult result = run_gyro_drive(options);
+  EXPECT_FALSE(result.first_active_sec.has_value());
+  EXPECT_EQ(result.status.rotation_factors_added_total, 0U);
+  EXPECT_GE(result.status.consistency_rejected_total, 3U);
+  EXPECT_TRUE(result.status.is_inconsistent_warning);
+  ASSERT_EQ(result.samples.size(), reference.samples.size());
+  for (std::size_t index = 0; index < result.samples.size(); ++index) {
+    EXPECT_EQ(result.samples[index].map_to_base.matrix(), reference.samples[index].map_to_base.matrix()) << index;
+  }
+}
+
+TEST(LocalizerGyroDrive, T8_ADoubleScaleOrNoiseOnlyGyroNeverActivatesAndTheOutputEqualsTheWheelOnlyRun) {
+  GyroDriveOptions wheel_only = long_drive_with_slip_in_turn(0);
+  wheel_only.has_gyro = false;
+  const GyroDriveResult reference = run_gyro_drive(wheel_only);
+  const std::vector<GyroTransform> wrong_gyros = {
+      scaled_gyro(2.0),
+      [](double, double standard) { return std::optional<double>(standard * 0.0 + 1.0e-4); }};  // another axis
+  for (const GyroTransform& transform : wrong_gyros) {
+    GyroDriveOptions options = long_drive_with_slip_in_turn(0);
+    options.gyro_transform = transform;
+    const GyroDriveResult result = run_gyro_drive(options);
+    EXPECT_FALSE(result.first_active_sec.has_value());
+    EXPECT_EQ(result.status.rotation_factors_added_total, 0U);
+    ASSERT_EQ(result.samples.size(), reference.samples.size());
+    for (std::size_t index = 0; index < result.samples.size(); ++index) {
+      EXPECT_EQ(result.samples[index].map_to_base.matrix(), reference.samples[index].map_to_base.matrix()) << index;
+    }
+  }
+}
+
+TEST(LocalizerGyroDrive, T8b_TheKnownLimitIsMeasuredNotJudged) {
+  GyroDriveOptions options = t1_options();  // wheel 1.4x, no LiDAR during the turn
+  options.gyro_transform = scaled_gyro(2.0);
+  const GyroDriveResult result = run_gyro_drive(options);
+  ASSERT_FALSE(result.samples.empty());
+  std::printf("[ MEASURED ] T8b active=%d max_yaw_error_deg=%.3f outvoted_total=%zu final_state=%d\n",
+              result.first_active_sec.has_value(), result.max_yaw_error_deg(), result.status.consistency_outvoted_total,
+              static_cast<int>(result.status.consistency));
+  EXPECT_TRUE(result.first_active_sec.has_value());  // the known limit: passes without LiDAR
+}
+
+TEST(LocalizerGyroDrive, T9_AGyroThatGoesWrongLaterIsSuspendedAndEventuallyDisabled) {
+  GyroDriveOptions wheel_only;
+  wheel_only.has_gyro = false;
+  const GyroDriveResult reference = run_gyro_drive(wheel_only);
+  GyroDriveOptions options;
+  const double second_turn_begin = options.course.turn_windows()[1].first;
+  options.gyro_transform = [=](double time_sec, double standard) {
+    return std::optional<double>(time_sec >= second_turn_begin - 2.0 ? 2.0 * standard : standard);
+  };
+  const GyroDriveResult result = run_gyro_drive(options);
+  EXPECT_TRUE(result.first_active_sec.has_value());
+  EXPECT_TRUE(result.saw_suspended);
+  EXPECT_GE(result.status.consistency_outvoted_total, 1U);
+  const double suspended_after_sec = second_turn_begin;
+  EXPECT_LE(result.max_yaw_error_deg(suspended_after_sec + 5.0, 1.0e9),
+            reference.max_yaw_error_deg(suspended_after_sec + 5.0, 1.0e9) + 1.0);
+  std::printf("[ MEASURED ] T9 outvoted_total=%zu final_state=%d\n", result.status.consistency_outvoted_total,
+              static_cast<int>(result.status.consistency));
+}
+
+TEST(LocalizerGyroDrive, T10_AWheelSpinningInPlaceDoesNotStopACorrectGyro) {
+  GyroDriveOptions options;
+  const double spin_begin = options.course.turn_windows()[0].second + 3.0;
+  options.wheel_spin_window = {spin_begin, spin_begin + 3.0};
+  options.lidar_rejected_windows = {{spin_begin, spin_begin + 3.5}};
+  const GyroDriveResult result = run_gyro_drive(options);
+  EXPECT_EQ(result.status.consistency, GyroConsistencyState::kActive);
+  EXPECT_EQ(result.status.consistency_outvoted_total, 0U);
+  EXPECT_LT(result.max_yaw_error_deg(spin_begin, spin_begin + 3.0), 2.0);
+}
+
+TEST(LocalizerGyroDrive, DisabledInconsistentStartMatchesTheWheelOnlyRunExactly) {
+  GyroDriveOptions wheel_only = long_drive_with_slip_in_turn(0);
+  wheel_only.has_gyro = false;
+  const GyroDriveResult reference = run_gyro_drive(wheel_only);
+  GyroDriveOptions options = long_drive_with_slip_in_turn(0);
+  options.initial_state = GyroConsistencyState::kDisabledInconsistent;
+  const GyroDriveResult result = run_gyro_drive(options);
+  EXPECT_EQ(result.status.rotation_factors_added_total, 0U);
+  ASSERT_EQ(result.samples.size(), reference.samples.size());
+  for (std::size_t index = 0; index < result.samples.size(); ++index) {
+    EXPECT_EQ(result.samples[index].map_to_base.matrix(), reference.samples[index].map_to_base.matrix()) << index;
+  }
+}
+
+TEST(LocalizerGyroDrive, ActiveStateSurvivesInitializeAndFactorsContinueWithoutVerifyingAgain) {
+  GyroDriveOptions options = long_drive_with_slip_in_turn(1);
+  options.initialize_sec = options.course.turn_windows()[0].second + 3.0;
+  const GyroDriveResult result = run_gyro_drive(options);
+  EXPECT_EQ(result.status.consistency, GyroConsistencyState::kActive);
+  EXPECT_EQ(result.status.consistency_confirmed_total, 0U);  // no new confirmation after initialize()
+  EXPECT_GT(result.status.rotation_factors_added_total, 0U);
+}
+
+TEST(LocalizerGyroDrive, WindowRebuildAndTimeGoingBackwardsDoNotBreakTheFusion) {
+  GyroDriveOptions failure = long_drive_with_slip_in_turn(1);
+  failure.optimization_failure_sec = failure.course.turn_windows()[1].first - 3.0;
+  const GyroDriveResult rebuilt = run_gyro_drive(failure);
+  EXPECT_GT(rebuilt.status.rotation_factors_added_total, 0U);
+  EXPECT_LT(rebuilt.max_yaw_error_deg(), 3.0);
+
+  GyroDriveOptions backwards = long_drive_with_slip_in_turn(1);
+  backwards.wheel_time_backwards_sec = backwards.course.turn_windows()[1].first - 3.0;
+  const GyroDriveResult went_back = run_gyro_drive(backwards);
+  EXPECT_FALSE(went_back.samples.empty());
+  EXPECT_GT(went_back.samples.back().time_sec, backwards.wheel_time_backwards_sec);
 }

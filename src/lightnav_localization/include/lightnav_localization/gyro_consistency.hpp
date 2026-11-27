@@ -102,10 +102,7 @@ class GyroConsistencyJudge {
   }
 
   GyroConsistencyResult observe_while_active(const GyroIntervalObservation& interval) {
-    if (!interval.is_gyro_covered || !interval.lidar_yaw_rad) return {};
-    const bool does_wheel_agree = agrees(interval.wheel_yaw_rad, *interval.lidar_yaw_rad);
-    const bool does_gyro_agree = agrees(interval.gyro_yaw_rad, *interval.lidar_yaw_rad);
-    if (!does_wheel_agree || does_gyro_agree) return {};
+    if (!is_outvoted(interval)) return {};
     ++outvoted_total_;
     state_ = outvoted_total_ >= gyro_consistency_constants::kMaximumOutvotesBeforeDisabling
                  ? GyroConsistencyState::kDisabledInconsistent
@@ -114,8 +111,22 @@ class GyroConsistencyJudge {
     return {GyroConsistencyEvent::kOutvoted, 0.0, 0.0};
   }
 
+  // Wheel and LiDAR agree and the gyro does not (the vote against the gyro).
+  static bool is_outvoted(const GyroIntervalObservation& interval) {
+    return interval.is_gyro_covered && interval.lidar_yaw_rad &&
+           agrees(interval.wheel_yaw_rad, *interval.lidar_yaw_rad) &&
+           !agrees(interval.gyro_yaw_rad, *interval.lidar_yaw_rad);
+  }
+
   GyroConsistencyResult observe_while_verifying(const GyroIntervalObservation& interval) {
     using namespace gyro_consistency_constants;
+    // A suspended gyro keeps being voted on: the third loss in total disables it for good.
+    if (state_ == GyroConsistencyState::kSuspended && is_outvoted(interval)) {
+      ++outvoted_total_;
+      if (outvoted_total_ >= kMaximumOutvotesBeforeDisabling) state_ = GyroConsistencyState::kDisabledInconsistent;
+      restart_accumulation();
+      return {GyroConsistencyEvent::kOutvoted, 0.0, 0.0};
+    }
     if (!interval.is_gyro_covered) {
       restart_accumulation();
       return {};

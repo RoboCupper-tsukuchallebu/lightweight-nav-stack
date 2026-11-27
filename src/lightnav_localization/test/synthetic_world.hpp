@@ -7,6 +7,7 @@
 #include <cmath>
 #include <functional>
 #include <limits>
+#include <utility>
 #include <vector>
 
 #include "lightnav_localization/deskew.hpp"
@@ -271,6 +272,76 @@ inline Eigen::Isometry3d arc_pose(double time_sec, const Eigen::Vector2d& start_
                                        kSensorHeightM);
   pose.linear() = Eigen::AngleAxisd(yaw, Eigen::Vector3d::UnitZ()).toRotationMatrix();
   return pose;
+}
+
+// A drive made of constant-speed, constant-yaw-rate segments (straight legs, optional stops, in-place
+// 90 degree turns). `turn_windows` tells when each turn happens, for tests that slip one of them.
+struct PathSegment {
+  double duration_sec;
+  double speed_mps;
+  double yaw_rate_rps;
+};
+
+class SegmentedCourse {
+ public:
+  // Legs of `leg_lengths_m` joined by in-place 90 degree turns (sign +1 = left). `pause_before_turn_sec`
+  // stands still before each turn. There is one more leg than turns.
+  SegmentedCourse(const std::vector<double>& leg_lengths_m, const std::vector<double>& turn_signs,
+                  double speed_mps, double turn_rate_rps, double pause_before_turn_sec = 0.0) {
+    double time_sec = 0.0;
+    double heading = 0.0;
+    centerline_.push_back(Eigen::Vector2d::Zero());
+    for (std::size_t leg = 0; leg < leg_lengths_m.size(); ++leg) {
+      segments_.push_back({leg_lengths_m[leg] / speed_mps, speed_mps, 0.0});
+      time_sec += segments_.back().duration_sec;
+      centerline_.push_back(centerline_.back() +
+                            leg_lengths_m[leg] * Eigen::Vector2d(std::cos(heading), std::sin(heading)));
+      if (leg >= turn_signs.size()) break;
+      if (pause_before_turn_sec > 0.0) {
+        segments_.push_back({pause_before_turn_sec, 0.0, 0.0});
+        time_sec += pause_before_turn_sec;
+      }
+      const double turn_duration_sec = (M_PI / 2) / turn_rate_rps;
+      segments_.push_back({turn_duration_sec, 0.0, turn_signs[leg] * turn_rate_rps});
+      turn_windows_.push_back({time_sec, time_sec + turn_duration_sec});
+      time_sec += turn_duration_sec;
+      heading += turn_signs[leg] * M_PI / 2;
+    }
+    total_sec_ = time_sec;
+  }
+
+  double total_sec() const { return total_sec_; }
+  const std::vector<Eigen::Vector2d>& centerline() const { return centerline_; }
+  const std::vector<std::pair<double, double>>& turn_windows() const { return turn_windows_; }
+
+  Eigen::Isometry3d truth_at(double time_sec) const {
+    Eigen::Vector2d start = Eigen::Vector2d::Zero();
+    double heading = 0.0;
+    double remaining_sec = time_sec;
+    for (const PathSegment& segment : segments_) {
+      if (remaining_sec <= segment.duration_sec) {
+        return arc_pose(remaining_sec, start, heading, segment.speed_mps, segment.yaw_rate_rps);
+      }
+      const Eigen::Isometry3d end = arc_pose(segment.duration_sec, start, heading, segment.speed_mps,
+                                             segment.yaw_rate_rps);
+      start = end.translation().head<2>();
+      heading += segment.yaw_rate_rps * segment.duration_sec;
+      remaining_sec -= segment.duration_sec;
+    }
+    return arc_pose(0.0, start, heading, 0.0, 0.0);
+  }
+
+ private:
+  std::vector<PathSegment> segments_;
+  std::vector<Eigen::Vector2d> centerline_;
+  std::vector<std::pair<double, double>> turn_windows_;
+  double total_sec_ = 0.0;
+};
+
+// "Long drive": 6 m legs and four 90 degree turns (left, left, right, left) at 0.4 rad/s, so every
+// turn spans several 1 s keyframe intervals of 0.4 rad each.
+inline SegmentedCourse make_long_drive_course() {
+  return SegmentedCourse({6.0, 6.0, 6.0, 6.0, 6.0}, {1.0, 1.0, -1.0, 1.0}, 0.6, 0.4);
 }
 
 }  // namespace lightnav_localization::testing
