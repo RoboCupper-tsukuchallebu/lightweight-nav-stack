@@ -281,3 +281,162 @@ TEST(PoseGraph, DefaultWheelFactorIgnoresYawDisagreement) {
   };
   EXPECT_TRUE(estimate_with_disagreement(0.0).isApprox(estimate_with_disagreement(1.0), 1e-12));
 }
+
+namespace {
+double pitch_deg_of(const Eigen::Isometry3d& pose) {
+  return std::asin(-pose.rotation()(2, 0)) * 180.0 / M_PI;
+}
+
+// 60 steps of 1 m on level ground. The LiDAR odometry reports a false nose-down change of 0.5 deg per step,
+// and the wheel factor only limits the change between two nodes, so nothing holds the absolute attitude.
+Eigen::Isometry3d drive_with_biased_lidar_pitch(double absolute_sigma_tilt_rad, double absolute_sigma_z_m) {
+  PoseGraphParameters parameters;
+  parameters.absolute_sigma_tilt_rad = absolute_sigma_tilt_rad;
+  parameters.absolute_sigma_z_m = absolute_sigma_z_m;
+  PoseGraph graph(parameters);
+  graph.add_first_node(0.0, Eigen::Isometry3d::Identity(), 0.05, 0.01);
+  EXPECT_TRUE(graph.optimize());
+  const double pitch_bias_rad = 0.5 * M_PI / 180.0;
+  for (int step = 1; step <= kStepCount; ++step) {
+    const int previous = graph.latest_index();
+    const Eigen::Isometry3d wheel_relative = translation_pose(kStepM, 0.0);
+    Eigen::Isometry3d biased_relative = wheel_relative;
+    biased_relative.linear() = Eigen::AngleAxisd(pitch_bias_rad, Eigen::Vector3d::UnitY()).toRotationMatrix();
+    const int index = graph.add_node_with_wheel_factor(step, *graph.pose(previous) * wheel_relative, wheel_relative);
+    graph.add_lidar_odometry_factor(previous, index, biased_relative, diagonal_information(0.02, 0.005));
+    EXPECT_TRUE(graph.optimize());
+  }
+  return *graph.pose(graph.latest_index());
+}
+}  // namespace
+
+TEST(PoseGraph, AbsoluteLevelAndHeightReferencesBoundTheDriftOfABiasedLidarOdometry) {
+  const Eigen::Isometry3d without_references = drive_with_biased_lidar_pitch(0.0, 0.0);
+  EXPECT_GT(std::abs(pitch_deg_of(without_references)), 15.0);
+  EXPECT_GT(std::abs(without_references.translation().z()), 5.0);
+
+  const Eigen::Isometry3d with_references = drive_with_biased_lidar_pitch(0.05, 2.0);
+  EXPECT_LT(std::abs(pitch_deg_of(with_references)), 5.0);
+  EXPECT_LT(std::abs(with_references.translation().z()), 3.0);
+}
+
+TEST(PoseGraph, AbsoluteLevelReferenceKeepsASlopeVisibleOnAMostlyLevelDrive) {
+  // 40 m level, then a 10 deg slope for 10 m. The level reference pulls every node towards level, and the
+  // LiDAR odometry links between nodes are stiff but not rigid: a tight reference (0.05 rad) bends the chain
+  // and flattens this slope to under 4 deg. A loose one (0.3 rad) only removes the slow drift.
+  PoseGraphParameters parameters;
+  parameters.absolute_sigma_tilt_rad = 0.3;
+  PoseGraph graph(parameters);
+  graph.add_first_node(0.0, Eigen::Isometry3d::Identity(), 0.05, 0.01);
+  graph.optimize();
+  const double slope_rad = 10.0 * M_PI / 180.0;
+  constexpr int kLevelSteps = 40;
+  constexpr int kSlopeSteps = 10;
+  for (int step = 1; step <= kLevelSteps + kSlopeSteps; ++step) {
+    Eigen::Isometry3d true_relative = translation_pose(kStepM, 0.0);
+    if (step == kLevelSteps + 1) {
+      true_relative.linear() = Eigen::AngleAxisd(-slope_rad, Eigen::Vector3d::UnitY()).toRotationMatrix();
+    }
+    const int previous = graph.latest_index();
+    const Eigen::Isometry3d wheel_relative = translation_pose(kStepM, 0.0);
+    const int index = graph.add_node_with_wheel_factor(step, *graph.pose(previous) * wheel_relative, wheel_relative);
+    graph.add_lidar_odometry_factor(previous, index, true_relative, diagonal_information(0.02, 0.005));
+    ASSERT_TRUE(graph.optimize());
+  }
+  const double pitch_deg = std::abs(pitch_deg_of(*graph.pose(graph.latest_index())));
+  EXPECT_GT(pitch_deg, 6.0);
+  EXPECT_LT(pitch_deg, 10.5);
+}
+
+TEST(PoseGraph, RejectsNegativeOrNonfiniteAbsoluteReferenceSigmas) {
+  for (const double invalid : {-0.1, std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN()}) {
+    PoseGraphParameters tilt;
+    tilt.absolute_sigma_tilt_rad = invalid;
+    EXPECT_THROW(PoseGraph{tilt}, std::invalid_argument) << invalid;
+    PoseGraphParameters height;
+    height.absolute_sigma_z_m = invalid;
+    EXPECT_THROW(PoseGraph{height}, std::invalid_argument) << invalid;
+  }
+}
+
+TEST(PoseGraph, LoopClosureFactorBringsTheBatchResultBackToTheStart) {
+  // A 10 m square driven once. The wheel odometry under-reports every left turn by 4 deg, so the dead-reckoned
+  // end is far from the start although the drive really returned to it.
+  const auto drive_square = [](bool should_close_loop) {
+    PoseGraphParameters parameters;
+    parameters.record_history = true;
+    PoseGraph graph(parameters);
+    graph.add_first_node(0.0, Eigen::Isometry3d::Identity(), 0.05, 0.01);
+    EXPECT_TRUE(graph.optimize());
+    const double measured_turn_rad = (90.0 - 4.0) * M_PI / 180.0;
+    int step = 0;
+    for (int side = 0; side < 4; ++side) {
+      for (int segment = 0; segment < 10; ++segment) {
+        const bool is_corner = segment == 9;
+        const Eigen::Isometry3d wheel_relative = yaw_translation(kStepM, 0.0, is_corner ? measured_turn_rad : 0.0);
+        const int previous = graph.latest_index();
+        graph.add_node_with_wheel_factor(++step, *graph.pose(previous) * wheel_relative, wheel_relative);
+        EXPECT_TRUE(graph.optimize());
+      }
+    }
+    if (should_close_loop) {
+      graph.add_loop_closure_factor(0, graph.latest_index(), Eigen::Isometry3d::Identity(), 0.05, 0.01);
+    }
+    EXPECT_TRUE(graph.batch_optimize(100, false));
+    return graph.batch_poses().back().map_to_base;
+  };
+  EXPECT_GT(drive_square(false).translation().head<2>().norm(), 2.0);
+  EXPECT_LT(drive_square(true).translation().head<2>().norm(), 0.3);
+}
+
+TEST(PoseGraph, BatchOptimizeWithoutMarginalsLeavesTheStandardDeviationEmpty) {
+  PoseGraphParameters parameters;
+  parameters.record_history = true;
+  PoseGraph graph(parameters);
+  graph.add_first_node(0.0, Eigen::Isometry3d::Identity(), 0.05, 0.01);
+  EXPECT_TRUE(graph.optimize());
+  const Eigen::Isometry3d wheel_relative = translation_pose(kStepM, 0.0);
+  graph.add_node_with_wheel_factor(1.0, wheel_relative, wheel_relative);
+  EXPECT_TRUE(graph.optimize());
+  ASSERT_TRUE(graph.batch_optimize(10, false));
+  EXPECT_FALSE(graph.batch_poses().back().position_and_yaw_std.has_value());
+  ASSERT_TRUE(graph.batch_optimize(10, true));
+  EXPECT_TRUE(graph.batch_poses().back().position_and_yaw_std.has_value());
+}
+
+// The first stage of the stop-time save writes the map from these poses, before any batch optimisation.
+TEST(PoseGraph, RecordedPosesHoldEveryNodeIncludingThoseThatLeftTheWindow) {
+  PoseGraphParameters parameters;
+  parameters.record_history = true;
+  parameters.window_s = 5.0;
+  PoseGraph graph(parameters);
+  graph.add_first_node(0.0, Eigen::Isometry3d::Identity(), 0.05, 0.01);
+  EXPECT_TRUE(graph.optimize());
+  const Eigen::Isometry3d wheel_relative = translation_pose(kStepM, 0.0);
+  const int node_count = 20;
+  Eigen::Isometry3d guess = Eigen::Isometry3d::Identity();
+  for (int index = 1; index < node_count; ++index) {
+    guess = guess * wheel_relative;
+    graph.add_node_with_wheel_factor(static_cast<double>(index), guess, wheel_relative);
+    EXPECT_TRUE(graph.optimize());
+  }
+  ASSERT_FALSE(graph.pose(0).has_value()) << "node 0 should have left the 5 s window";
+
+  const std::vector<BatchPose> recorded = graph.recorded_poses();
+
+  ASSERT_EQ(recorded.size(), static_cast<std::size_t>(node_count));
+  for (int index = 0; index < node_count; ++index) {
+    EXPECT_EQ(recorded[index].index, index);
+    EXPECT_DOUBLE_EQ(recorded[index].stamp_sec, static_cast<double>(index));
+    EXPECT_NEAR(recorded[index].map_to_base.translation().x(), kStepM * index, 1e-3);
+    EXPECT_FALSE(recorded[index].position_and_yaw_std.has_value());
+  }
+  EXPECT_TRUE(graph.batch_poses().empty()) << "no batch optimisation must have run";
+}
+
+TEST(PoseGraph, RecordedPosesAreEmptyWithoutHistory) {
+  PoseGraph graph{PoseGraphParameters{}};
+  graph.add_first_node(0.0, Eigen::Isometry3d::Identity(), 0.05, 0.01);
+  EXPECT_TRUE(graph.optimize());
+  EXPECT_TRUE(graph.recorded_poses().empty());
+}

@@ -27,6 +27,12 @@ struct PoseGraphParameters {
   double wheel_robust_k = 8.0;
   double planar_sigma_z_per_m = 0.05;
   double planar_sigma_tilt_rad = 0.05;
+  // Absolute references for a ground vehicle; 0 disables each. The planar terms above only limit the
+  // change between two nodes (a random walk), so roll, pitch and height drift without bound when
+  // nothing observes them (no IMU, GPS altitude unused). These pull every node towards level and
+  // towards the height of the first node.
+  double absolute_sigma_tilt_rad = 0.0;
+  double absolute_sigma_z_m = 0.0;
   double sigma_floor_m = 0.01;  // keeps a stationary wheel factor from becoming a hard constraint
   double sigma_floor_rad = 0.005;
   // Keeps every factor and initial value so that mapping can batch-optimize the full graph.
@@ -73,9 +79,26 @@ class PoseGraph {
   void add_gps_factor(int index, const Eigen::Vector3d& position, const Eigen::Vector3d& sigma_m);
   // Optimizes. Returns false if GTSAM threw; the caller then rebuilds from the current estimate.
   bool optimize();
+  // Relative pose between two recorded nodes found by loop-closure detection. It enters only the batch
+  // history (the online window no longer holds the earlier node). Needs record_history.
+  void add_loop_closure_factor(int from_index, int to_index, const Eigen::Isometry3d& relative,
+                               double sigma_translation_m, double sigma_rotation_rad);
   // Batch re-optimization of every retained factor (record_history must be on). Fills batch_poses().
-  bool batch_optimize(int max_iterations);
+  // Starts from the previous batch result when there is one. `should_compute_marginals` false leaves
+  // position_and_yaw_std empty (the marginals of a long drive take most of the time).
+  bool batch_optimize(int max_iterations, bool should_compute_marginals = true);
+  // The loop closure factors added since the last remove_loop_closure_factors().
+  std::size_t loop_closure_factor_count() const;
+  // Drops every loop closure factor and puts batch_poses() / the batch initial guess back to what they
+  // were before the first one was added (the optimized map of the save stage before the loop closing).
+  void remove_loop_closure_factors();
+  // Test seam: the batch_optimize() call after `successful_calls` more calls fails as if GTSAM had thrown.
+  void inject_batch_failure_after(int successful_calls) { batch_failure_countdown_ = successful_calls; }
   const std::vector<BatchPose>& batch_poses() const;
+  // Every recorded node at the estimate it had when it left the online window (the nodes still in the
+  // window: their latest estimate). No optimisation runs, so this is available at once;
+  // position_and_yaw_std is empty. Empty without record_history.
+  std::vector<BatchPose> recorded_poses() const;
 
   // Estimate of a node; nullopt after it left the window.
   std::optional<Eigen::Isometry3d> pose(int index) const;
@@ -93,6 +116,7 @@ class PoseGraph {
   int latest_index_ = -1;
   std::string last_error_;
   bool should_fail_once_ = false;
+  int batch_failure_countdown_ = -1;
   mutable std::string covariance_error_;
 };
 

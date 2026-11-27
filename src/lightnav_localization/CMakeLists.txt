@@ -40,6 +40,8 @@ add_library(lightnav_localization_core
   src/lidar_odometry.cpp
   src/initial_alignment.cpp
   src/global_initialization.cpp
+  src/loop_closure.cpp
+  src/map_save.cpp
   src/point_cloud_extraction.cpp
   src/visualization.cpp
   src/localizer.cpp)
@@ -83,7 +85,12 @@ add_executable(localization_node src/localization_node_main.cpp)
 target_link_libraries(localization_node lightnav_localization_node_lib)
 target_compile_options(localization_node PRIVATE -Wall -Wextra -Werror)
 
-install(TARGETS localization_node lightnav_localization_node_lib
+# Development tool: loop-closure detection on a saved map directory (see the file header).
+add_executable(loop_closure_probe src/loop_closure_probe_main.cpp)
+target_link_libraries(loop_closure_probe lightnav_localization_core)
+target_compile_options(loop_closure_probe PRIVATE -Wall -Wextra -Werror)
+
+install(TARGETS localization_node loop_closure_probe lightnav_localization_node_lib
   ARCHIVE DESTINATION lib LIBRARY DESTINATION lib RUNTIME DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY launch config DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY include/ DESTINATION include)
@@ -100,7 +107,7 @@ if(BUILD_TESTING)
   foreach(test_name pcd_io map_metadata pose_buffer deskew matcher performance pose_graph gps_input
                     corrector state_machine lidar_odometry localizer match_information
                     performance_large initial_alignment global_initialization point_cloud_extraction mapping
-                    visualization map_build_allocation)
+                    visualization map_build_allocation loop_closure)
     add_executable(test_${test_name} test/test_${test_name}.cpp)
     target_link_libraries(test_${test_name} lightnav_localization_core GTest::gtest GTest::gtest_main)
     target_compile_options(test_${test_name} PRIVATE -Wall -Wextra -Werror)
