@@ -1103,7 +1103,10 @@ void expect_matches_recording_before_the_gyro(bool has_prior_map, const std::vec
   }
   ASSERT_EQ(golden.size(), run.size());
   for (std::size_t index = 0; index < golden.size(); ++index) {
-    ASSERT_EQ(hash_output(run[index]), golden[index].hash) << "output " << index << " differs from the recording";
+    ASSERT_EQ(hash_output(run[index]), golden[index].hash)
+        << "output " << index << " differs from the recording of toolchain " << golden_toolchain()
+        << ". If the code did not change, this toolchain rounds differently (another libm or build type also "
+           "counts): regenerate the recording with test/data/README.md";
   }
 }
 
