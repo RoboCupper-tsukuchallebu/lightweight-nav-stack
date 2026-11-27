@@ -113,6 +113,29 @@ TEST(GyroYawTracker, constant_rate_integrates_to_rate_times_duration_between_sam
   EXPECT_NEAR(0.5 * (to_sec - from_sec), *yaw_delta, 0.5 * (to_sec - from_sec) * 1e-6);
 }
 
+TEST(GyroYawTracker, linearly_increasing_rate_integrates_exactly_between_samples) {
+  GyroYawTracker tracker{GyroYawParameters()};
+  Simulator simulator(tracker);
+  simulator.run(kStationarySettleSec);
+  const double ramp_start_sec = simulator.last_imu_stamp_sec();
+  constexpr double kRampRadPerSecSquared = 0.4;
+  const Eigen::Vector3d gravity(0.0, 0.0, kGravityMetersPerSecSquared);
+  for (int index = 1; index <= 1000; ++index) {
+    const double elapsed_sec = index / kImuRateHz;
+    const Eigen::Vector3d measured = kTrueBias + Eigen::Vector3d(0.0, 0.0, kRampRadPerSecSquared * elapsed_sec);
+    tracker.add_imu_sample(ramp_start_sec + elapsed_sec, measured, gravity);
+  }
+  const double from_elapsed_sec = 0.2 + 0.3 / kImuRateHz;
+  const double to_elapsed_sec = 0.9 + 0.7 / kImuRateHz;
+
+  const auto yaw_delta =
+      tracker.integrate_yaw(ramp_start_sec + from_elapsed_sec, ramp_start_sec + to_elapsed_sec);
+
+  ASSERT_TRUE(yaw_delta.has_value());
+  const double expected = 0.5 * kRampRadPerSecSquared * (to_elapsed_sec * to_elapsed_sec - from_elapsed_sec * from_elapsed_sec);
+  EXPECT_NEAR(expected, *yaw_delta, 1e-9);
+}
+
 TEST(GyroYawTracker, rate_is_projected_on_the_up_axis_after_subtracting_the_bias) {
   GyroYawTracker tracker{GyroYawParameters()};
   Simulator simulator(tracker);
@@ -411,6 +434,7 @@ TEST(GyroYawTracker, backwards_imu_stamp_discards_the_samples_but_keeps_bias_and
   EXPECT_EQ(bias_before, status.gyro_bias_rad_s);
   EXPECT_EQ(up_axis_before, status.up_axis_in_imu);
   EXPECT_FALSE(tracker.integrate_yaw(newest_sec - 0.5, newest_sec).has_value());
+  EXPECT_FALSE(tracker.integrate_yaw(newest_sec - 1.0, newest_sec - 1.0).has_value());  // the late sample is not held
 }
 
 // --- retention and state -------------------------------------------------------------------
@@ -491,4 +515,17 @@ TEST(GyroYawTracker, constructor_rejects_parameters_that_are_not_finite_and_posi
     }
   }
   EXPECT_NO_THROW(GyroYawTracker{GyroYawParameters()});
+}
+
+TEST(GyroYawTracker, constructor_rejects_a_standstill_window_that_the_held_samples_cannot_cover) {
+  GyroYawParameters too_long;
+  too_long.stationary_window_s = 3.0;
+  GyroYawParameters far_too_long;
+  far_too_long.stationary_window_s = 5.0;
+  GyroYawParameters longest_allowed;
+  longest_allowed.stationary_window_s = 2.9;
+
+  EXPECT_THROW(GyroYawTracker{too_long}, std::invalid_argument);
+  EXPECT_THROW(GyroYawTracker{far_too_long}, std::invalid_argument);
+  EXPECT_NO_THROW(GyroYawTracker{longest_allowed});
 }

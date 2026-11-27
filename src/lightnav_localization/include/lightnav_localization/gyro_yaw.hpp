@@ -20,9 +20,15 @@ struct GyroYawParameters {
 enum class GyroYawState { kWaitingForData, kWaitingForStationary, kReady, kStale };
 
 struct GyroYawStatus {
+  // Priority, first match wins: no accepted IMU sample -> kWaitingForData; wheel stamp ahead of
+  // the IMU by more than timeout_s -> kStale (even while the bias is unknown); no bias yet ->
+  // kWaitingForStationary; otherwise kReady.
   GyroYawState state = GyroYawState::kWaitingForData;
   double sample_rate_hz = 0.0;
-  std::optional<double> last_sample_age_s;  // newest wheel stamp - newest IMU stamp (never negative)
+  // Newest wheel stamp - newest accepted IMU stamp (never negative). "Accepted" means a sample that
+  // passed the input checks: samples dropped for a non-finite value, a rate above the limit or a
+  // backwards stamp do not move it, so an IMU whose samples are all dropped reads as stale.
+  std::optional<double> last_sample_age_s;
   std::optional<Eigen::Vector3d> gyro_bias_rad_s;
   std::optional<double> yaw_bias_rad_s;
   std::optional<double> bias_age_s;
@@ -42,15 +48,21 @@ struct GyroYawStatus {
 // (no ROS, no GTSAM); all times are header stamps in seconds, never the wall clock.
 class GyroYawTracker {
  public:
-  // Throws std::invalid_argument unless every parameter is finite and positive.
+  // Throws std::invalid_argument unless every parameter is finite and positive and
+  // stationary_window_s is shorter than the 3 s the samples are held for (a longer window could
+  // never be covered, and the bias would silently never be estimated).
   explicit GyroYawTracker(const GyroYawParameters& parameters);
 
-  // Samples with a non-finite value, a rate above max_rate_rad_s or a stamp that does not advance
-  // are dropped and counted. A stamp that moves backwards also discards the held samples; the
-  // bias and the up axis are kept.
+  // Samples with a non-finite value, a rate above max_rate_rad_s, a repeated stamp or a stamp that
+  // moves backwards are dropped (not held) and counted once each. A backwards stamp also
+  // discards every held sample, because they no longer belong to the new timeline; the bias and
+  // the up axis are kept.
   void add_imu_sample(double stamp_sec, const Eigen::Vector3d& angular_velocity_rad_s,
                       const Eigen::Vector3d& linear_acceleration_m_s2);
 
+  // A standstill window that the samples do not cover is neither adopted nor rejected and is not
+  // counted: GyroYawStatus has no field for it in the fixed contract, so adding one is left to a
+  // contract change.
   // Standstill is judged from the pose difference of consecutive wheel poses. Also the reference
   // time of the timeout.
   void add_wheel_pose(double stamp_sec, const Eigen::Isometry3d& odom_to_base);

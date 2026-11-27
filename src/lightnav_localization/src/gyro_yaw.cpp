@@ -26,6 +26,9 @@ bool is_finite_and_positive(double value) { return std::isfinite(value) && value
 }  // namespace
 
 GyroYawTracker::GyroYawTracker(const GyroYawParameters& parameters) : parameters_(parameters) {
+  if (parameters.stationary_window_s >= kSampleRetentionSec) {
+    throw std::invalid_argument("GyroYawParameters: stationary_window_s must be shorter than the held sample time");
+  }
   const double values[] = {parameters.max_gap_s,         parameters.max_rate_rad_s,
                            parameters.stationary_window_s, parameters.bias_max_abs_rad_s,
                            parameters.bias_max_std_rad_s,  parameters.up_axis_warn_deg,
@@ -48,8 +51,10 @@ void GyroYawTracker::add_imu_sample(double stamp_sec, const Eigen::Vector3d& ang
   if (!samples_.empty() && stamp_sec <= samples_.back().stamp_sec) {
     ++dropped_samples_total_;
     const bool is_duplicate_stamp = stamp_sec == samples_.back().stamp_sec;
-    if (is_duplicate_stamp) return;
-    samples_.clear();  // the clock went backwards: what is held no longer belongs to this timeline
+    // The clock went backwards: what is held no longer belongs to this timeline. The sample
+    // itself is dropped too (not held), as the header says.
+    if (!is_duplicate_stamp) samples_.clear();
+    return;
   }
   samples_.push_back({stamp_sec, angular_velocity_rad_s, linear_acceleration_m_s2});
   prune_old_samples();
