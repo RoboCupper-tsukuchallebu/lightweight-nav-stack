@@ -71,6 +71,7 @@ tools/bag_replay/run_replay.sh --bag ~/bags/<IMU の入った bag> --out ~/work/
 - `summary.json` の `imu_diagnostics`: 再生の間に最後に受け取った `/diagnostics` の `localization_node: IMU` の項目（key と値の辞書）。1 つも受け取らなかったとき、`--imu-topic` なしのときは `null`。
 - `summary.json` の `missing_topics`: `--imu-topic`・`--extra-topic`・`--record-gnss-topic` で頼んだが記録に無かったトピック（`[]` なら全部あった）。記録のトピックを先に読み、あるものだけを `ros2 bag play --topics` に渡します。無かったものは警告を出して再生は続けます。センサーのトピック（`/velodyne_points` など）は、これまでどおり常に渡します。
 - 記録に IMU が無くても、ノードには `imu_topic` を渡します（「有効だが 1 つも届かない」状態を作れます）。そのときは `missing_topics` に入り、`imu_diagnostics` は `null` か、ノードが出した「届いていない」状態になります。
+- 記録のトピックは `metadata.yaml` から読みます（記録の形式も `metadata.yaml` の `storage_identifier` から取り、mcap 固定ではありません）。`--imu-topic` なしでも毎回読むので、記録の場所の誤りや壊れた `metadata.yaml` では、トレースバックではなく `bag: cannot read the bag <場所> ...: <理由>` を出して終了コード 1 で止まります。
 - `--imu-topic` なしのときの再生するトピックとノードの起動引数は、これまでと同じです（頼んだトピックが記録に無いときの扱いだけ、上のとおり変わりました）。
 
 ### 保存の呼び出し（`--save-map-service`）

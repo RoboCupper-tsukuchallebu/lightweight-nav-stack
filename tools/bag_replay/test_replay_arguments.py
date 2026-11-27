@@ -125,6 +125,14 @@ def test_sensor_topics_are_played_even_when_the_bag_lacks_them():
     assert missing == []
 
 
+def test_without_an_imu_topic_the_split_gives_the_same_topics_as_before_when_the_bag_holds_them_all():
+    recorded = [*SENSORS, "/fix_all", "/other"]
+
+    assert replay_arguments.split_by_recorded_topics(SENSORS, ["/fix_all"], None, "", recorded) == (
+        replay_arguments.played_topics(SENSORS, ["/fix_all"], None), [])
+    assert replay_arguments.split_by_recorded_topics(SENSORS, [], None, "", recorded) == (list(SENSORS), [])
+
+
 def test_nothing_is_reported_missing_without_extra_requests():
     assert replay_arguments.split_by_recorded_topics(SENSORS, [], None, "", list(SENSORS)) == (list(SENSORS), [])
 

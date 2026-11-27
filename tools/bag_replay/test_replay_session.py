@@ -3,6 +3,8 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 from geometry_msgs.msg import TransformStamped
 from tf2_msgs.msg import TFMessage
 
@@ -85,3 +87,40 @@ def test_the_recorded_topic_names_are_read_from_the_bag(tmp_path):
     del writer  # closes the bag
 
     assert replay_session.read_recorded_topic_names(bag_directory) == ["/wheel/odom"]
+
+
+def test_a_missing_bag_directory_is_a_bag_read_error_naming_the_place(tmp_path):
+    missing_directory = tmp_path / "no_such_bag"
+
+    with pytest.raises(replay_session.BagReadError, match="no_such_bag.*does not exist"):
+        replay_session.read_recorded_topic_names(missing_directory)
+
+
+def test_a_directory_without_metadata_is_a_bag_read_error(tmp_path):
+    with pytest.raises(replay_session.BagReadError, match="metadata"):
+        replay_session.read_recorded_topic_names(tmp_path)
+
+
+def test_a_broken_metadata_yaml_is_a_bag_read_error_with_the_reason(tmp_path):
+    (tmp_path / "metadata.yaml").write_text("rosbag2_bagfile_information: [\n")
+
+    with pytest.raises(replay_session.BagReadError, match="yaml"):
+        replay_session.read_recorded_topic_names(tmp_path)
+
+
+def test_opening_the_reader_of_a_broken_bag_is_a_bag_read_error(tmp_path):
+    (tmp_path / "metadata.yaml").write_text("rosbag2_bagfile_information: [\n")
+
+    with pytest.raises(replay_session.BagReadError):
+        replay_session.open_bag_reader(tmp_path)
+
+
+def test_main_exits_with_a_message_instead_of_a_traceback_when_the_bag_cannot_be_read(monkeypatch, tmp_path):
+    monkeypatch.setenv("ROS_DOMAIN_ID", "47")
+    monkeypatch.setattr(sys, "argv", ["replay_session.py", "--bag", str(tmp_path / "no_such_bag"), "--out", str(tmp_path / "out")])
+
+    with pytest.raises(SystemExit) as exit_information:
+        replay_session.main()
+
+    assert isinstance(exit_information.value.code, str)  # a message: SystemExit with text exits non-zero
+    assert "no_such_bag" in exit_information.value.code

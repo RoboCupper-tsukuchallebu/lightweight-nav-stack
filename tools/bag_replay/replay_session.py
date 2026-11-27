@@ -85,6 +85,34 @@ def find_node_executable():
     sys.exit("localization_node executable not found under AMENT_PREFIX_PATH")
 
 
+class BagReadError(RuntimeError):
+    """The bag cannot be read: a wrong place, a missing or broken metadata.yaml, or a storage format nothing here can open."""
+
+
+def read_bag_metadata(bag_directory):
+    """The bag's metadata.yaml (rosbag2_py BagMetadata). Raises BagReadError with the place and the reason."""
+    import rosbag2_py
+
+    try:
+        return rosbag2_py.Info().read_metadata(str(bag_directory), "")
+    except Exception as error:  # rosbag2_py raises plain RuntimeError for each of these
+        raise BagReadError(f"cannot read the bag {bag_directory} (a rosbag2 directory with metadata.yaml is needed): {error}") from error
+
+
+def open_bag_reader(bag_directory):
+    """A SequentialReader on the bag, in the storage format its metadata.yaml names (storage_identifier; not fixed to mcap)."""
+    import rosbag2_py
+
+    storage_identifier = read_bag_metadata(bag_directory).storage_identifier
+    reader = rosbag2_py.SequentialReader()
+    try:
+        reader.open(rosbag2_py.StorageOptions(uri=str(bag_directory), storage_id=storage_identifier),
+                    rosbag2_py.ConverterOptions(input_serialization_format="cdr", output_serialization_format="cdr"))
+    except Exception as error:
+        raise BagReadError(f"cannot open the bag {bag_directory} (storage '{storage_identifier}'): {error}") from error
+    return reader
+
+
 def merge_static_transforms(messages):
     """One TFMessage with the newest transform of every (parent, child) pair; None when there are no messages."""
     newest_by_pair = {}
@@ -102,9 +130,7 @@ def read_static_transforms(bag_directory):
     Messages after --start-offset are played by `ros2 bag play` again; the duplicates are harmless."""
     import rosbag2_py
 
-    reader = rosbag2_py.SequentialReader()
-    reader.open(rosbag2_py.StorageOptions(uri=str(bag_directory), storage_id="mcap"),
-                rosbag2_py.ConverterOptions(input_serialization_format="cdr", output_serialization_format="cdr"))
+    reader = open_bag_reader(bag_directory)
     reader.set_filter(rosbag2_py.StorageFilter(topics=["/tf_static"]))
     messages = []
     while reader.has_next():
@@ -241,21 +267,12 @@ def request_initial_pose(recorder, x, y, yaw):
 
 
 def read_recorded_topic_names(bag_directory):
-    """Names of the topics the bag holds."""
-    import rosbag2_py
-
-    reader = rosbag2_py.SequentialReader()
-    reader.open(rosbag2_py.StorageOptions(uri=str(bag_directory), storage_id="mcap"),
-                rosbag2_py.ConverterOptions(input_serialization_format="cdr", output_serialization_format="cdr"))
-    return [topic_metadata.name for topic_metadata in reader.get_all_topics_and_types()]
+    """Names of the topics the bag holds, from its metadata.yaml. Raises BagReadError."""
+    return [entry.topic_metadata.name for entry in read_bag_metadata(bag_directory).topics_with_message_count]
 
 
 def read_bag_start_time_s(bag_directory):
-    import rosbag2_py
-
-    reader = rosbag2_py.SequentialReader()
-    reader.open(rosbag2_py.StorageOptions(uri=str(bag_directory), storage_id="mcap"),
-                rosbag2_py.ConverterOptions(input_serialization_format="cdr", output_serialization_format="cdr"))
+    reader = open_bag_reader(bag_directory)
     return reader.get_metadata().starting_time.nanoseconds / NANOSECONDS_PER_SECOND
 
 
@@ -401,14 +418,18 @@ def main():
     out_directory = arguments.out
     (out_directory / "map").mkdir(parents=True, exist_ok=True)
     try:
+        # Always read, also without --imu-topic: only topics the bag holds are asked of `ros2 bag play` (Issue #92 §5).
+        recorded_topic_names = read_recorded_topic_names(arguments.bag)
         initial_pose = decide_initial_pose(arguments)
+        static_transforms = read_static_transforms(arguments.bag) if arguments.start_offset > 0.0 else None
+    except BagReadError as error:
+        sys.exit(f"bag: {error}")
     except replay_arguments.InitialPoseError as error:
         sys.exit(f"initial pose: {error}")
     topics_to_play, missing_topics = replay_arguments.split_by_recorded_topics(
-        PLAYED_TOPICS, arguments.extra_topic, arguments.record_gnss_topic, arguments.imu_topic, read_recorded_topic_names(arguments.bag))
+        PLAYED_TOPICS, arguments.extra_topic, arguments.record_gnss_topic, arguments.imu_topic, recorded_topic_names)
     for topic in missing_topics:
         print(f"warning: the bag has no topic {topic}; it is not played", file=sys.stderr)
-    static_transforms = read_static_transforms(arguments.bag) if arguments.start_offset > 0.0 else None
     if arguments.start_offset > 0.0 and static_transforms is None:
         print("warning: the bag has no /tf_static message; the lidar extrinsic will not be found", file=sys.stderr)
 
