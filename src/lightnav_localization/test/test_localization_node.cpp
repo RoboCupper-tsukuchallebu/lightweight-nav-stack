@@ -1877,3 +1877,120 @@ TEST_F(LocalizationNodeTest, ConfigureFailsWithInvalidImuParameters) {
     }
   }
 }
+
+// ---- IMU in the wheel callback and /diagnostics (Issue #92 L3, second part) ----
+
+class LocalizationNodeImuTest : public LocalizationNodeTest {
+ protected:
+  void TearDown() override {
+    imu_publisher_.reset();
+    LocalizationNodeTest::TearDown();
+  }
+
+  void create_imu_node() {
+    create_node(with_imu_topic(make_options(map_file_.string(), map_yaml_.string()), kImuTopic));
+    imu_publisher_ = helper_->create_publisher<sensor_msgs::msg::Imu>(
+        kImuTopic, rclcpp::SensorDataQoS().keep_last(2000));
+  }
+
+  void publish_imu(const rclcpp::Time& stamp, double yaw_rate_rad_s) {
+    sensor_msgs::msg::Imu message;
+    message.header.stamp = stamp;
+    message.header.frame_id = "imu_link";
+    message.angular_velocity.x = 0.001;
+    message.angular_velocity.y = -0.002;
+    message.angular_velocity.z = kImuBiasZ + yaw_rate_rad_s;
+    message.linear_acceleration.z = 9.80665;  // gravity is +z: the board is level
+    imu_publisher_->publish(message);
+  }
+
+  // Wheel at 50 Hz (the truth pose, standing still) and, when `has_imu`, the IMU at 200 Hz.
+  void run_standing_still(std::chrono::milliseconds duration, bool has_imu) {
+    const auto end = std::chrono::steady_clock::now() + duration;
+    auto next_wheel = std::chrono::steady_clock::now();
+    auto next_imu = next_wheel;
+    while (std::chrono::steady_clock::now() < end) {
+      const auto now = std::chrono::steady_clock::now();
+      const rclcpp::Time stamp = node_->get_clock()->now();
+      if (has_imu && now >= next_imu) {
+        publish_imu(stamp, 0.0);
+        while (next_imu <= now) next_imu += 5ms;
+      }
+      if (now >= next_wheel) {
+        publish_wheel(stamp);
+        while (next_wheel <= now) next_wheel += 20ms;
+      }
+      executor_.spin_some(5ms);
+    }
+  }
+
+  const std::map<std::string, std::string>& imu_values() const {
+    static const std::map<std::string, std::string> kEmpty;
+    const auto found = diagnostics_values_.find(kImuDiagnosticsName);
+    return found == diagnostics_values_.end() ? kEmpty : found->second;
+  }
+
+  static constexpr double kImuBiasZ = 0.003;
+  rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr imu_publisher_;
+};
+
+TEST_F(LocalizationNodeImuTest, DiagnosticsWarnWithWaitingForDataBeforeAnySampleArrives) {
+  create_imu_node();
+  bring_up();
+  run_standing_still(1500ms, false);
+  ASSERT_EQ(diagnostics_levels_.count(kImuDiagnosticsName), 1U);
+  EXPECT_EQ(diagnostics_levels_.at(kImuDiagnosticsName), diagnostic_msgs::msg::DiagnosticStatus::WARN);
+  EXPECT_EQ(imu_values().at("state"), "waiting_for_data");
+  EXPECT_EQ(imu_values().at("consistency"), "unverified");
+  EXPECT_EQ(imu_values().at("up_axis_in_imu"), "unavailable");
+  EXPECT_EQ(imu_values().at("tf_up_axis_disagreement_deg"), "unavailable");
+}
+
+TEST_F(LocalizationNodeImuTest, StandstillMakesTheStateReadyWithTheGravityUpAxisAndTheBias) {
+  create_imu_node();
+  bring_up();
+  run_standing_still(3500ms, true);
+  EXPECT_EQ(imu_values().at("state"), "ready");
+  EXPECT_EQ(imu_values().at("consistency"), "unverified");
+  EXPECT_EQ(diagnostics_levels_.at(kImuDiagnosticsName), diagnostic_msgs::msg::DiagnosticStatus::OK);
+  EXPECT_EQ(imu_values().at("up_axis_in_imu").substr(0, 8), "0.000000");
+  EXPECT_NEAR(std::stod(imu_values().at("yaw_bias_rad_s")), kImuBiasZ, 1e-6);
+  EXPECT_GE(std::stoul(imu_values().at("bias_updates_total")), 1U);
+  EXPECT_GT(std::stod(imu_values().at("sample_rate_hz")), 100.0);
+}
+
+TEST_F(LocalizationNodeImuTest, StoppedImuMakesTheStateStaleWhileTheWheelContinues) {
+  create_imu_node();
+  bring_up();
+  run_standing_still(3500ms, true);
+  ASSERT_EQ(imu_values().at("state"), "ready");
+  run_standing_still(1500ms, false);
+  EXPECT_EQ(imu_values().at("state"), "stale");
+  EXPECT_EQ(diagnostics_levels_.at(kImuDiagnosticsName), diagnostic_msgs::msg::DiagnosticStatus::WARN);
+}
+
+// The tracker (bias, up axis) outlives a Localizer rebuild; reload_map keeps the IMU entry going.
+TEST_F(LocalizationNodeImuTest, ReloadMapKeepsTheTrackerAndOnlyCleanupConfigureRestartsIt) {
+  create_imu_node();
+  bring_up();
+  start_tracking_at_truth();
+  run_standing_still(3500ms, true);
+  ASSERT_EQ(imu_values().at("state"), "ready");
+  auto reload_client = helper_->create_client<std_srvs::srv::Trigger>("/localization_node/reload_map");
+  auto future = reload_client->async_send_request(std::make_shared<std_srvs::srv::Trigger::Request>());
+  ASSERT_TRUE(run_until([&future]() { return future.wait_for(0ms) == std::future_status::ready; },
+                        3000ms, kInputWheel));
+  ASSERT_TRUE(future.get()->success);
+  run_standing_still(1200ms, true);
+  EXPECT_EQ(imu_values().at("state"), "ready");
+  EXPECT_EQ(imu_values().at("consistency"), "unverified");
+  EXPECT_EQ(imu_values().at("consistency_outvoted_total"), "0");
+
+  ASSERT_EQ(node_->deactivate().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(node_->cleanup().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED);
+  ASSERT_EQ(node_->configure().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(node_->activate().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE);
+  diagnostics_values_.clear();
+  run_standing_still(1500ms, false);
+  EXPECT_EQ(imu_values().at("state"), "waiting_for_data");
+}

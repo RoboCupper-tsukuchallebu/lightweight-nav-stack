@@ -78,6 +78,14 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
   void handle_nav_sat_fix(const sensor_msgs::msg::NavSatFix::SharedPtr message);
   // Issue #92: hands one IMU sample to the GyroYawTracker. Not called when imu_topic is empty.
   void handle_imu(const sensor_msgs::msg::Imu::SharedPtr message);
+  void ingest_imu_sample(const sensor_msgs::msg::Imu& message);
+  // First step of the wheel callback: takes every IMU message that is already queued (the executor
+  // serves the queued wheel samples before the IMU ones, and a scan can block this thread for tens of ms).
+  void drain_imu_subscription();
+  // Yaw change from the previous wheel sample to this one; nullopt = "no increment" (wheel yaw is used).
+  std::optional<double> compute_gyro_yaw_delta(double stamp_sec) const;
+  // Keeps the consistency state and the outvote count of the Localizer that is about to be discarded.
+  void remember_gyro_fusion_state();
   // Looks up the TF base_frame -> imu frame once and gives its up axis to the tracker. The TF is only
   // compared with the gravity-based up axis, never used to compute the yaw.
   void try_resolve_imu_expected_up_axis(const std::string& imu_frame, double stamp_sec);
@@ -129,6 +137,7 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
   diagnostic_msgs::msg::DiagnosticStatus build_map_match_status(const rclcpp::Time& now, bool has_localizer) const;
   diagnostic_msgs::msg::DiagnosticStatus build_errors_status(bool has_localizer) const;
   diagnostic_msgs::msg::DiagnosticStatus build_performance_status(bool has_localizer);
+  diagnostic_msgs::msg::DiagnosticStatus build_imu_status(bool has_localizer) const;
   double sample_cpu_percent();
   void publish_diagnostics(const rclcpp::Time& now);
   // Live preview for Foxglove / RViz (visualization_enabled). Mapping: the scans placed by the online
@@ -223,6 +232,11 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
   std::string imu_frame_;
   bool has_imu_expected_up_axis_ = false;
   double last_imu_tf_attempt_sec_ = -1e9;
+  // Consistency state and outvote total that survive a Localizer rebuild (reload_map). Back to
+  // kUnverified and 0 by on_configure / on_cleanup (reset_runtime_state).
+  GyroConsistencyState carried_gyro_consistency_ = GyroConsistencyState::kUnverified;
+  std::size_t carried_gyro_outvoted_total_ = 0;
+  std::optional<double> previous_wheel_stamp_sec_;
 
   // Wheel input and the node-side buffer used for initial alignment/debug deskew.
   bool has_wheel_odom_ = false;
