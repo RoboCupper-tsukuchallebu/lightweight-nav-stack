@@ -120,6 +120,12 @@ struct PoseGraph::Implementation {
         !std::isfinite(parameters.wheel_yaw_slip_threshold_rad) || parameters.wheel_yaw_slip_threshold_rad < 0.0) {
       throw std::invalid_argument("invalid wheel noise parameters");
     }
+    if (!std::isfinite(parameters.gyro_noise_density_rad_s_sqrt_hz) ||
+        parameters.gyro_noise_density_rad_s_sqrt_hz <= 0.0 ||
+        !std::isfinite(parameters.gyro_bias_sigma_rad_s) || parameters.gyro_bias_sigma_rad_s <= 0.0 ||
+        !std::isfinite(parameters.gyro_scale_sigma) || parameters.gyro_scale_sigma <= 0.0) {
+      throw std::invalid_argument("invalid gyro noise parameters");
+    }
     if (!std::isfinite(parameters.absolute_sigma_tilt_rad) || parameters.absolute_sigma_tilt_rad < 0.0 ||
         !std::isfinite(parameters.absolute_sigma_z_m) || parameters.absolute_sigma_z_m < 0.0) {
       throw std::invalid_argument("invalid absolute tilt / height sigmas");
@@ -243,6 +249,20 @@ double wheel_yaw_sigma(const PoseGraphParameters& parameters, const Eigen::Isome
   return sigma;
 }
 
+double gyro_yaw_sigma(const PoseGraphParameters& parameters, double interval_sec, double yaw_delta_rad,
+                      double uncovered_wheel_yaw_rad) {
+  if (!std::isfinite(interval_sec) || interval_sec < 0.0 || !std::isfinite(yaw_delta_rad) ||
+      !std::isfinite(uncovered_wheel_yaw_rad)) {
+    throw std::invalid_argument("invalid gyro yaw sigma arguments");
+  }
+  const double white_noise = parameters.gyro_noise_density_rad_s_sqrt_hz;
+  const double bias_drift = parameters.gyro_bias_sigma_rad_s * interval_sec;
+  const double scale_error = parameters.gyro_scale_sigma * std::abs(yaw_delta_rad);
+  const double variance = white_noise * white_noise * interval_sec + bias_drift * bias_drift +
+                          scale_error * scale_error + uncovered_wheel_yaw_rad * uncovered_wheel_yaw_rad;
+  return std::max(parameters.sigma_floor_rad, std::sqrt(variance));
+}
+
 int PoseGraph::add_node_with_wheel_factor(double stamp_sec, const Eigen::Isometry3d& guess,
                                           const Eigen::Isometry3d& wheel_relative, double yaw_disagreement_rad) {
   Implementation& graph = *implementation_;
@@ -289,6 +309,28 @@ void PoseGraph::add_lidar_odometry_factor(int from_index, int to_index,
       new gtsam::BetweenFactor<gtsam::Pose3>(
           key_of(from_index), key_of(to_index), to_gtsam(relative),
           gtsam::noiseModel::Gaussian::Information(information)));
+  implementation_->pending_factors.push_back(factor);
+  if (implementation_->parameters.record_history) {
+    implementation_->history_factors.push_back(factor);
+  }
+}
+
+void PoseGraph::add_rotation_factor(int from_index, int to_index, double yaw_delta_rad,
+                                    double yaw_sigma_rad) {
+  if (!std::isfinite(yaw_delta_rad) || !std::isfinite(yaw_sigma_rad) || yaw_sigma_rad <= 0.0) {
+    throw std::invalid_argument("invalid rotation factor");
+  }
+  // Roll, pitch and translation are not measured: their standard deviations are far above any
+  // plausible value, so these rows carry no information.
+  constexpr double kUnconstrainedRotationSigmaRad = 100.0;
+  constexpr double kUnconstrainedTranslationSigmaM = 1000.0;
+  const gtsam::Pose3 measured_relative(gtsam::Rot3::Yaw(yaw_delta_rad), gtsam::Point3(0.0, 0.0, 0.0));
+  boost::shared_ptr<gtsam::BetweenFactor<gtsam::Pose3>> factor(
+      new gtsam::BetweenFactor<gtsam::Pose3>(
+          key_of(from_index), key_of(to_index), measured_relative,
+          pose_noise({kUnconstrainedRotationSigmaRad, kUnconstrainedRotationSigmaRad, yaw_sigma_rad},
+                     {kUnconstrainedTranslationSigmaM, kUnconstrainedTranslationSigmaM,
+                      kUnconstrainedTranslationSigmaM})));
   implementation_->pending_factors.push_back(factor);
   if (implementation_->parameters.record_history) {
     implementation_->history_factors.push_back(factor);

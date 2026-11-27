@@ -440,3 +440,125 @@ TEST(PoseGraph, RecordedPosesAreEmptyWithoutHistory) {
   EXPECT_TRUE(graph.optimize());
   EXPECT_TRUE(graph.recorded_poses().empty());
 }
+
+namespace {
+constexpr double kTrueYawRad = 0.5;
+constexpr double kWheelYawErrorRatio = 0.4;
+constexpr double kRadiansPerDegree = M_PI / 180.0;
+
+struct TwoNodeResult {
+  Eigen::Isometry3d online_pose;
+  Eigen::Isometry3d batch_pose;
+};
+
+// Two nodes 1 s apart. The wheel reports 40 % too much yaw; the gyro (when used) reports the true one.
+TwoNodeResult drive_two_nodes(bool should_add_rotation_factor, bool should_record_history) {
+  PoseGraphParameters parameters;
+  parameters.record_history = should_record_history;
+  PoseGraph graph(parameters);
+  graph.add_first_node(0.0, Eigen::Isometry3d::Identity(), 0.05, 0.01);
+  EXPECT_TRUE(graph.optimize());
+  const Eigen::Isometry3d wheel_relative = yaw_translation(1.0, 0.0, kTrueYawRad * (1.0 + kWheelYawErrorRatio));
+  const int index = graph.add_node_with_wheel_factor(1.0, wheel_relative, wheel_relative);
+  if (should_add_rotation_factor) {
+    const double sigma = gyro_yaw_sigma(parameters, 1.0, kTrueYawRad, 0.0);
+    graph.add_rotation_factor(0, index, kTrueYawRad, sigma);
+  }
+  EXPECT_TRUE(graph.optimize());
+  TwoNodeResult result{*graph.pose(index), Eigen::Isometry3d::Identity()};
+  if (should_record_history) {
+    EXPECT_TRUE(graph.batch_optimize(50, false));
+    result.batch_pose = graph.batch_poses().back().map_to_base;
+  }
+  return result;
+}
+
+double yaw_of(const Eigen::Isometry3d& pose) {
+  return std::atan2(pose.linear()(1, 0), pose.linear()(0, 0));
+}
+}  // namespace
+
+TEST(PoseGraph, RotationFactorCorrectsAWheelYawErrorWithoutMovingTheTranslation) {
+  const TwoNodeResult without_factor = drive_two_nodes(false, false);
+  const TwoNodeResult with_factor = drive_two_nodes(true, false);
+  EXPECT_GT(std::abs(yaw_of(without_factor.online_pose) - kTrueYawRad), 5.0 * kRadiansPerDegree);
+  EXPECT_LT(std::abs(yaw_of(with_factor.online_pose) - kTrueYawRad), 0.5 * kRadiansPerDegree);
+  EXPECT_LT((with_factor.online_pose.translation() - without_factor.online_pose.translation()).norm(), 1.0e-3);
+}
+
+TEST(PoseGraph, RotationFactorAlsoActsOnTheBatchHistory) {
+  const TwoNodeResult without_factor = drive_two_nodes(false, true);
+  const TwoNodeResult with_factor = drive_two_nodes(true, true);
+  EXPECT_GT(std::abs(yaw_of(without_factor.batch_pose) - kTrueYawRad), 5.0 * kRadiansPerDegree);
+  EXPECT_LT(std::abs(yaw_of(with_factor.batch_pose) - kTrueYawRad), 0.5 * kRadiansPerDegree);
+}
+
+TEST(PoseGraph, RotationFactorKeepsTheWheelTranslationOfATurningStep) {
+  // The factor measures zero translation; it must not pull the wheel translation of a turning step.
+  PoseGraphParameters parameters;
+  PoseGraph graph(parameters);
+  graph.add_first_node(0.0, Eigen::Isometry3d::Identity(), 0.05, 0.01);
+  ASSERT_TRUE(graph.optimize());
+  Eigen::Isometry3d wheel_relative = yaw_translation(2.0, 0.5, 0.1);
+  const int index = graph.add_node_with_wheel_factor(1.0, wheel_relative, wheel_relative);
+  graph.add_rotation_factor(0, index, 0.1, gyro_yaw_sigma(parameters, 1.0, 0.1, 0.0));
+  ASSERT_TRUE(graph.optimize());
+  const Eigen::Isometry3d estimate = *graph.pose(index);
+  EXPECT_NEAR(estimate.translation().x(), 2.0, 1.0e-3);
+  EXPECT_NEAR(estimate.translation().y(), 0.5, 1.0e-3);
+  EXPECT_NEAR(yaw_of(estimate), 0.1, 0.5 * kRadiansPerDegree);
+}
+
+TEST(PoseGraph, GyroYawSigmaFollowsTheFormula) {
+  PoseGraphParameters parameters;
+  parameters.sigma_floor_rad = 0.0;
+  // Noise only: 1e-3 * sqrt(4 s) plus the bias term 5e-4 * 4 s.
+  const double noise = 1.0e-3;
+  const double bias = 5.0e-4 * 4.0;
+  EXPECT_NEAR(gyro_yaw_sigma(parameters, 4.0, 0.0, 0.0), std::sqrt(noise * noise * 4.0 + bias * bias), 1.0e-12);
+  // Scale error is proportional to the magnitude of the rotation, not its sign.
+  EXPECT_NEAR(gyro_yaw_sigma(parameters, 0.0, 2.0, 0.0), 0.02, 1.0e-12);
+  EXPECT_NEAR(gyro_yaw_sigma(parameters, 0.0, -2.0, 0.0), 0.02, 1.0e-12);
+  // The uncovered wheel yaw adds in quadrature, also regardless of its sign.
+  EXPECT_NEAR(gyro_yaw_sigma(parameters, 0.0, 0.0, -0.3), 0.3, 1.0e-12);
+  EXPECT_NEAR(gyro_yaw_sigma(parameters, 0.0, 2.0, 0.15), std::hypot(0.02, 0.15), 1.0e-12);
+}
+
+TEST(PoseGraph, GyroYawSigmaNeverFallsBelowTheFloor) {
+  const PoseGraphParameters parameters;
+  EXPECT_DOUBLE_EQ(gyro_yaw_sigma(parameters, 0.0, 0.0, 0.0), parameters.sigma_floor_rad);
+  EXPECT_DOUBLE_EQ(gyro_yaw_sigma(parameters, 0.1, 0.0, 0.0), parameters.sigma_floor_rad);
+}
+
+TEST(PoseGraph, GyroYawSigmaRejectsInvalidArguments) {
+  const PoseGraphParameters parameters;
+  const double not_a_number = std::numeric_limits<double>::quiet_NaN();
+  EXPECT_THROW(gyro_yaw_sigma(parameters, -1.0, 0.0, 0.0), std::invalid_argument);
+  EXPECT_THROW(gyro_yaw_sigma(parameters, not_a_number, 0.0, 0.0), std::invalid_argument);
+  EXPECT_THROW(gyro_yaw_sigma(parameters, 1.0, not_a_number, 0.0), std::invalid_argument);
+  EXPECT_THROW(gyro_yaw_sigma(parameters, 1.0, 0.0, std::numeric_limits<double>::infinity()), std::invalid_argument);
+}
+
+TEST(PoseGraph, RejectsNonpositiveOrNonfiniteGyroNoiseParameters) {
+  for (const double invalid : {0.0, -1.0, std::numeric_limits<double>::infinity(),
+                               std::numeric_limits<double>::quiet_NaN()}) {
+    PoseGraphParameters noise_parameters;
+    noise_parameters.gyro_noise_density_rad_s_sqrt_hz = invalid;
+    EXPECT_THROW(PoseGraph graph(noise_parameters), std::invalid_argument);
+    PoseGraphParameters bias_parameters;
+    bias_parameters.gyro_bias_sigma_rad_s = invalid;
+    EXPECT_THROW(PoseGraph graph(bias_parameters), std::invalid_argument);
+    PoseGraphParameters scale_parameters;
+    scale_parameters.gyro_scale_sigma = invalid;
+    EXPECT_THROW(PoseGraph graph(scale_parameters), std::invalid_argument);
+  }
+}
+
+TEST(PoseGraph, RotationFactorRejectsInvalidMeasurements) {
+  PoseGraph graph{PoseGraphParameters()};
+  graph.add_first_node(0.0, Eigen::Isometry3d::Identity(), 0.05, 0.01);
+  const int index = graph.add_node_with_wheel_factor(1.0, Eigen::Isometry3d::Identity(), Eigen::Isometry3d::Identity());
+  EXPECT_THROW(graph.add_rotation_factor(0, index, std::numeric_limits<double>::quiet_NaN(), 0.01), std::invalid_argument);
+  EXPECT_THROW(graph.add_rotation_factor(0, index, 0.1, 0.0), std::invalid_argument);
+  EXPECT_THROW(graph.add_rotation_factor(0, index, 0.1, std::numeric_limits<double>::infinity()), std::invalid_argument);
+}

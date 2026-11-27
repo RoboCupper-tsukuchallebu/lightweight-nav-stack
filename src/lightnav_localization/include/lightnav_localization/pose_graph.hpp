@@ -38,10 +38,23 @@ struct PoseGraphParameters {
   // Keeps every factor and initial value so that mapping can batch-optimize the full graph.
   // Off by default: localization keeps the fixed-lag window only.
   bool record_history = false;
+  // Gyro yaw rotation factor (add_rotation_factor / gyro_yaw_sigma). The white noise is larger than a
+  // bench measurement (about 3.4e-5) to cover vibration; the bias sigma is what is left of the
+  // estimated bias; the scale sigma is a sensitivity error proportional to the rotation.
+  double gyro_noise_density_rad_s_sqrt_hz = 1.0e-3;
+  double gyro_bias_sigma_rad_s = 5.0e-4;
+  double gyro_scale_sigma = 0.01;
 };
 
 double wheel_yaw_sigma(const PoseGraphParameters& parameters, const Eigen::Isometry3d& wheel_relative,
                        double yaw_disagreement_rad);
+
+// Standard deviation of the yaw change measured by the gyro over `interval_sec`:
+// max(sigma_floor_rad, sqrt(noise^2 T + (bias T)^2 + (scale |dyaw|)^2 + uncovered^2)).
+// `uncovered_wheel_yaw_rad` is the wheel yaw change over the part of the interval the gyro did not cover.
+// Throws std::invalid_argument when an argument is not finite or `interval_sec` is negative.
+double gyro_yaw_sigma(const PoseGraphParameters& parameters, double interval_sec, double yaw_delta_rad,
+                      double uncovered_wheel_yaw_rad);
 
 struct BatchPose {
   int index = 0;
@@ -73,6 +86,10 @@ class PoseGraph {
   // `information` is 6x6 in GTSAM Pose3 order (rotation xyz, then translation xyz).
   void add_lidar_odometry_factor(int from_index, int to_index, const Eigen::Isometry3d& relative,
                                  const Eigen::Matrix<double, 6, 6>& information);
+  // Relative yaw measured by a gyro between two nodes (both still in the window): a between factor on
+  // the yaw only. Translation, roll and pitch are left unconstrained (very large standard deviations).
+  // Enters the batch history when record_history is on. Call before optimize().
+  void add_rotation_factor(int from_index, int to_index, double yaw_delta_rad, double yaw_sigma_rad);
   void add_map_factor(int index, const Eigen::Isometry3d& pose,
                       const Eigen::Matrix<double, 6, 6>& information);
   // Uses only map-frame x/y and sigma x/y; altitude is intentionally ignored.
