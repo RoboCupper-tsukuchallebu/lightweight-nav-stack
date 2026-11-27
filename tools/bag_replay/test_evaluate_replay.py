@@ -239,4 +239,4 @@ def test_a_replay_directory_is_evaluated_end_to_end(tmp_path):
     assert result["start_end_distance_m"] == pytest.approx(5.0)
     assert result["gps_only_fraction"] == pytest.approx(1.0)
     assert result["save_timings_s"] == [{"final": 3.5}]
-    assert result["gnss_aligned"]["count"] == 1
+    assert result["gnss_aligned"]["count"] == 2  # both rows are within 1 s of the one GNSS point
