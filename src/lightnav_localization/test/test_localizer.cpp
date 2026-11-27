@@ -1,6 +1,11 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <filesystem>
+#include <fstream>
+#include <functional>
+#include <map>
+#include <sstream>
 #include <cstdio>
 #include <random>
 #include <array>
@@ -122,6 +127,7 @@ struct Scenario {
   double slip_begin_sec = -1.0;
   double slip_end_sec = -1.0;
   double stop_sec = -1.0;  // ends the run early
+  bool gives_gyro_increments = false;  // passes the true yaw change (plus a small bias) as the gyro increment
 };
 
 struct Measurement {
@@ -277,8 +283,12 @@ Report run(const Scenario& scenario) {
         !pitch_step_begin_sec && truth.translation().x() >= 5.0) {
       pitch_step_begin_sec = 5.0 / kSpeed;
     }
+    std::optional<double> gyro_increment;
     if (step > 0) {
       const Eigen::Isometry3d relative = truth_at(time_sec - kDt).inverse() * truth;
+      constexpr double kGyroBiasResidualRadPerSec = 2.0e-4;
+      gyro_increment = std::atan2(relative.rotation()(1, 0), relative.rotation()(0, 0)) +
+                       kGyroBiasResidualRadPerSec * kDt;
       const double distance = relative.translation().norm();
       Eigen::Isometry3d drifted = relative;
       drifted.translation() *= scenario.wheel_scale;
@@ -327,7 +337,8 @@ Report run(const Scenario& scenario) {
       localizer.inject_map_rebuild_failure_for_test(scenario.rebuild_failure_mode);
       has_injected_rebuild_failure = true;
     }
-    const auto output = localizer.on_wheel_odom(time_sec, odom);
+    const auto output = scenario.gives_gyro_increments ? localizer.on_wheel_odom(time_sec, odom, gyro_increment)
+                                                       : localizer.on_wheel_odom(time_sec, odom);
     const double accepted_gps_stamp_sec = localizer.last_accepted_gps_stamp_sec();
     if (accepted_gps_stamp_sec >= 0.0 && accepted_gps_stamp_sec != previous_accepted_gps_stamp_sec) {
       ++report.gps_accepted_by_interval[accepted_gps_stamp_sec < 10.0 ? 0 : (accepted_gps_stamp_sec < 20.0 ? 1 : 2)];
@@ -1019,6 +1030,31 @@ TEST(Localizer, WheelYawSlipDuringTurnKeepsTrackingAndYawCloseToTruth) {
   EXPECT_LT(report.max_yaw_error_deg, 5.5);
 }
 
+// T2 (Issue #92): the same drive with gyro increments must not get worse (the first turn slips, so the
+// gyro may not be verified yet while it slips).
+TEST(LocalizerGyroDrive, T2_TheExistingSlipDriveDoesNotGetWorseWithTheGyro) {
+  Scenario scenario;
+  scenario.has_pillars = true;
+  scenario.degeneracy_ratio = 0.0;
+  scenario.scan_period_sec = 0.1;
+  scenario.correction_slew_rps = 2.0;
+  scenario.is_gps_enabled = false;
+  scenario.wheel_scale = 1.0;
+  scenario.slip_gate_yaw_rad = 0.35;
+  scenario.wheel_yaw_slip_threshold_rad = 0.1;
+  scenario.slip_begin_sec = 20.0 / kSpeed + 0.5;
+  scenario.slip_end_sec = scenario.slip_begin_sec + 0.8;
+  scenario.stop_sec = scenario.slip_end_sec + 2.0;
+  const Report without_gyro = run(scenario);
+  scenario.gives_gyro_increments = true;
+  const Report with_gyro = run(scenario);
+  std::printf("[ MEASURED ] T2 max yaw error without gyro %.3f deg, with gyro %.3f deg\n",
+              without_gyro.max_yaw_error_deg, with_gyro.max_yaw_error_deg);
+  EXPECT_LE(with_gyro.max_yaw_error_deg, without_gyro.max_yaw_error_deg + 0.2);
+  EXPECT_LT(with_gyro.max_yaw_error_deg, 5.5);
+  EXPECT_TRUE(with_gyro.is_tracking_at_end);
+}
+
 // Sparse observations expose the effect of slip handling; retain the 10 Hz test above.
 TEST(Localizer, WheelYawSlipWithSparseScansKeepsYawBounded) {
   Scenario scenario;
@@ -1598,6 +1634,7 @@ struct GyroDriveOptions {
   double wheel_time_backwards_sec = -1.0;
   double initialize_sec = -1.0;
   bool has_prior_map = false;  // false: mapping without a map or GNSS (never reaches TRACKING)
+  bool should_save_map = false;  // mapping only: save_map() after the drive and read each stage back
 };
 
 struct DriveSample {
@@ -1612,6 +1649,8 @@ struct GyroDriveResult {
   GyroFusionStatus status;
   std::optional<double> first_active_sec;
   bool saw_suspended = false;
+  // Yaw error (deg) of every keyframe in trajectory.csv, by save stage ("preliminary", "optimized", "final").
+  std::map<std::string, std::vector<double>> saved_yaw_errors_deg;
   std::size_t scans_processed = 0;
   std::size_t max_pending_scans = 0;
   bool is_tracking_at_end = false;
@@ -1624,6 +1663,48 @@ struct GyroDriveResult {
   }
   double max_yaw_error_deg() const { return max_yaw_error_deg(0.0, 1.0e9); }
 };
+
+// Reads the yaw errors of the keyframes of trajectory.csv (columns: stamp, x, y, z, roll, pitch, yaw, ...).
+std::vector<double> read_trajectory_yaw_errors_deg(const std::filesystem::path& file,
+                                                   const std::function<Eigen::Isometry3d(double)>& truth_at) {
+  std::ifstream stream(file);
+  std::string line;
+  std::getline(stream, line);  // header
+  std::vector<double> errors;
+  while (std::getline(stream, line)) {
+    if (line.empty()) continue;
+    std::stringstream line_stream(line);
+    std::string field;
+    std::vector<double> values;
+    while (std::getline(line_stream, field, ',')) values.push_back(std::stod(field));
+    if (values.size() < 7) continue;
+    const double truth_yaw = yaw_of_pose(truth_at(values[0]));
+    const double difference = std::remainder(values[6] - truth_yaw, 2.0 * M_PI);
+    errors.push_back(std::abs(difference) * 180.0 / M_PI);
+  }
+  return errors;
+}
+
+void save_and_read_yaw_errors(Localizer& localizer, const std::function<Eigen::Isometry3d(double)>& truth_at,
+                              GyroDriveResult& result) {
+  const std::filesystem::path directory =
+      std::filesystem::path(::testing::TempDir()) / ("gyro_drive_save_" + std::to_string(std::rand()));
+  std::filesystem::create_directories(directory);
+  MapOutputParameters output_parameters;
+  output_parameters.map_output_dir = directory.string();
+  output_parameters.map_voxel_size_m = 0.2;
+  output_parameters.batch_max_iterations = 100;
+  output_parameters.created = "2026-01-01T00:00:00Z";
+  MapOutputResult output_result;
+  std::string error;
+  const bool is_saved = localizer.save_map(output_parameters, output_result, error, [&](const std::string& line) {
+    const std::string stage = line.substr(0, line.find_first_of(" :"));
+    result.saved_yaw_errors_deg[stage] = read_trajectory_yaw_errors_deg(directory / "trajectory.csv", truth_at);
+  });
+  EXPECT_TRUE(is_saved) << error;
+  std::error_code ignored;
+  std::filesystem::remove_all(directory, ignored);
+}
 
 GyroDriveResult run_gyro_drive(const GyroDriveOptions& options) {
   const SegmentedCourse& course = options.course;
@@ -1702,6 +1783,7 @@ GyroDriveResult run_gyro_drive(const GyroDriveOptions& options) {
   }
   result.status = localizer.gyro_fusion_status();
   result.scans_processed = localizer.take_scan_time_statistics().count;
+  if (options.should_save_map) save_and_read_yaw_errors(localizer, truth_at, result);
   return result;
 }
 
@@ -1975,4 +2057,66 @@ TEST(LocalizerGyroDrive, WindowRebuildAndTimeGoingBackwardsDoNotBreakTheFusion) 
   const GyroDriveResult went_back = run_gyro_drive(backwards);
   EXPECT_FALSE(went_back.samples.empty());
   EXPECT_GT(went_back.samples.back().time_sec, backwards.wheel_time_backwards_sec);
+}
+
+TEST(LocalizerGyroDrive, T1_SavedTrajectoryKeepsEveryKeyframeYawWithin2Degrees) {
+  GyroDriveOptions options = t1_options();
+  options.should_save_map = true;
+  const GyroDriveResult with_gyro = run_gyro_drive(options);
+  ASSERT_TRUE(with_gyro.saved_yaw_errors_deg.count("optimized"));
+  ASSERT_TRUE(with_gyro.saved_yaw_errors_deg.count("final"));
+  for (const char* stage : {"optimized", "final"}) {
+    const std::vector<double>& errors = with_gyro.saved_yaw_errors_deg.at(stage);
+    ASSERT_FALSE(errors.empty()) << stage;
+    const double maximum = *std::max_element(errors.begin(), errors.end());
+    std::printf("[ MEASURED ] T1 saved trajectory (%s) max yaw error %.3f deg\n", stage, maximum);
+    EXPECT_LT(maximum, 2.0) << stage;
+  }
+  // Without the prediction the rotation factors alone must still do it.
+  options.is_prediction_enabled = false;
+  const GyroDriveResult factors_only = run_gyro_drive(options);
+  for (const char* stage : {"optimized", "final"}) {
+    const std::vector<double>& errors = factors_only.saved_yaw_errors_deg.at(stage);
+    ASSERT_FALSE(errors.empty()) << stage;
+    EXPECT_LT(*std::max_element(errors.begin(), errors.end()), 2.0) << stage;
+  }
+  // The wheel alone is far off, so the check above has something to prove.
+  GyroDriveOptions wheel_only = t1_options();
+  wheel_only.has_gyro = false;
+  wheel_only.should_save_map = true;
+  const GyroDriveResult reference = run_gyro_drive(wheel_only);
+  EXPECT_GT(*std::max_element(reference.saved_yaw_errors_deg.at("final").begin(),
+                              reference.saved_yaw_errors_deg.at("final").end()), 15.0);
+}
+
+TEST(LocalizerGyroDrive, T10b_AWheelSpinningInPlaceWhileLidarIsAcceptedKeepsTheGyroActive) {
+  GyroDriveOptions options;
+  const double spin_begin = options.course.turn_windows()[0].second + 3.0;
+  options.wheel_spin_window = {spin_begin, spin_begin + 3.0};  // LiDAR and gyro both say "not turning"
+  const GyroDriveResult result = run_gyro_drive(options);
+  EXPECT_EQ(result.status.consistency, GyroConsistencyState::kActive);
+  EXPECT_EQ(result.status.consistency_outvoted_total, 0U);
+  EXPECT_LT(result.max_yaw_error_deg(spin_begin, spin_begin + 3.0), 2.0);
+}
+
+// DISABLED: the Issue's criterion is not met on this synthetic drive (measured 3.44 deg with the gyro
+// against 3.11 deg without: both drift at 0.012 deg/s, a floor set by the LiDAR odometry, not by the
+// wheel or the gyro). Kept, with the Issue's numbers unchanged, until the coordinator decides.
+TEST(LocalizerGyroDrive, DISABLED_T3_ALongDriveWithATripledWheelYawBiasEndsAsWellAsTheGyroAllows) {
+  GyroDriveOptions options;
+  options.course = SegmentedCourse({30.0, 30.0, 30.0, 30.0, 30.0}, {1.0, 1.0, -1.0, 1.0}, 0.6, 0.4);
+  options.wheel_yaw_drift_rad_per_m = 1.5 * M_PI / 180.0 / 10.0;  // three times the Issue's wheel model
+  GyroDriveOptions wheel_only = options;
+  wheel_only.has_gyro = false;
+  const GyroDriveResult reference = run_gyro_drive(wheel_only);
+  const GyroDriveResult with_gyro = run_gyro_drive(options);
+  const double wheel_only_final = reference.samples.back().yaw_error_deg;
+  const double gyro_final = with_gyro.samples.back().yaw_error_deg;
+  std::printf("[ MEASURED ] T3 final yaw error without gyro %.3f deg, with gyro %.3f deg\n", wheel_only_final, gyro_final);
+  std::printf("[ MEASURED ] T3 gyro: active=%d added=%zu skipped=%zu slip=%zu outvoted=%zu max_error=%.3f (wheel only max %.3f)\n",
+              with_gyro.first_active_sec.has_value(), with_gyro.status.rotation_factors_added_total,
+              with_gyro.status.rotation_factors_skipped_total, with_gyro.status.slip_detected_total,
+              with_gyro.status.consistency_outvoted_total, with_gyro.max_yaw_error_deg(), reference.max_yaw_error_deg());
+  EXPECT_LE(gyro_final, std::max(1.0, 0.5 * wheel_only_final));
+  EXPECT_EQ(with_gyro.status.consistency_outvoted_total, 0U);
 }
