@@ -38,6 +38,9 @@ struct MapOutputParameters {
   std::string created;  // ISO-8601 UTC, e.g. 2026-01-02T03:04:05Z
   // Also writes keyframes.bin (every keyframe cloud in its base frame). Large: about 100 MB per 30 min.
   bool should_write_keyframe_clouds = false;
+  // Localizer::save_map only: runs the loop closing between the optimized and the final stage. The caller
+  // decides (the node passes true only for ~/save_map), so the stop-time save never closes loops.
+  bool should_close_loops = false;
 };
 
 struct MapOutputResult {

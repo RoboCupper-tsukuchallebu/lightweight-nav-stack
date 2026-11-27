@@ -1048,3 +1048,28 @@ TEST(Localizer, RejectsInvalidSlipWheelRateWindow) {
     EXPECT_THROW(Localizer localizer(parameters, PointList{}, std::nullopt), std::invalid_argument);
   }
 }
+
+// The absolute height reference exists in mapping only; the level reference applies in both modes.
+TEST(Localizer, HeightReferenceIsUsedInMappingOnlyAndTiltReferenceInBothModes) {
+  LocalizerParameters mapping_parameters;
+  mapping_parameters.mapping = true;
+  mapping_parameters.graph.absolute_sigma_tilt_rad = 0.3;
+  mapping_parameters.graph.absolute_sigma_z_m = 2.0;
+  const PoseGraphParameters mapping_graph = graph_parameters_for_mode(mapping_parameters);
+  EXPECT_DOUBLE_EQ(mapping_graph.absolute_sigma_tilt_rad, 0.3);
+  EXPECT_DOUBLE_EQ(mapping_graph.absolute_sigma_z_m, 2.0);
+
+  LocalizerParameters localization_parameters = mapping_parameters;
+  localization_parameters.mapping = false;
+  const PoseGraphParameters localization_graph = graph_parameters_for_mode(localization_parameters);
+  EXPECT_DOUBLE_EQ(localization_graph.absolute_sigma_tilt_rad, 0.3);
+  EXPECT_DOUBLE_EQ(localization_graph.absolute_sigma_z_m, 0.0);
+}
+
+TEST(Localizer, InvalidHeightSigmaIsStillRejectedInLocalizationMode) {
+  LocalizerParameters parameters;
+  parameters.mapping = false;
+  parameters.graph.absolute_sigma_z_m = -1.0;
+  EXPECT_DOUBLE_EQ(graph_parameters_for_mode(parameters).absolute_sigma_z_m, -1.0);
+  EXPECT_THROW(Localizer(parameters, PointList{}, std::nullopt), std::invalid_argument);
+}

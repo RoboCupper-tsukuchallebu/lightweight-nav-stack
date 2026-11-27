@@ -159,7 +159,8 @@ MappingRun run_mapping(const Course& course, bool has_pillars,
                        double fail_optimization_at_sec = -1.0,
                        double wheel_gap_begin_sec = -1.0, double wheel_gap_end_sec = -1.0,
                        const MapSaveProgress& report_progress = {},
-                       const std::function<void(LocalizerParameters&)>& adjust_parameters = {}) {
+                       const std::function<void(LocalizerParameters&)>& adjust_parameters = {},
+                       bool should_close_loops_on_save = true) {
   SyntheticWorld world(course.centerline(), true);
   if (has_pillars) {
     world.add_pillars(0.1, 0.5, 1.25, 1.5, true);
@@ -248,6 +249,8 @@ MappingRun run_mapping(const Course& course, bool has_pillars,
   output_parameters.map_voxel_size_m = 0.2;
   output_parameters.batch_max_iterations = 100;
   output_parameters.created = "2026-01-01T00:00:00Z";
+  // Like ~/save_map of the node; the stop-time save passes false (a test asks for it with should_close_loops_on_save).
+  output_parameters.should_close_loops = parameters.loop_closure.enabled && should_close_loops_on_save;
   MapOutputResult output_result;
   std::string error;
   result.is_saved = localizer.save_map(output_parameters, output_result, error, report_progress);
@@ -735,6 +738,8 @@ TEST(MapBuilder, LoopClosureDoesNotJoinLookalikeCornersOfASymmetricLap) {
               closed_lap.loop_closure_report.c_str());
 
   EXPECT_TRUE(closed_lap.is_saved) << closed_lap.save_error;
+  // An explicit save with loop_closure.enabled runs the detection (the lap is symmetric, so it may join nothing).
+  EXPECT_FALSE(closed_lap.loop_closure_report.empty());
   EXPECT_NE(closed_lap.loop_closure_report.find("implausible"), std::string::npos)
       << closed_lap.loop_closure_report;
   EXPECT_LT(seam_gap_m(closed_lap), seam_gap_m(open_lap) + 0.05);
@@ -744,6 +749,26 @@ TEST(MapBuilder, LoopClosureDoesNotJoinLookalikeCornersOfASymmetricLap) {
   std::error_code error;
   std::filesystem::remove_all(open_directory, error);
   std::filesystem::remove_all(closed_directory, error);
+}
+
+// The stop-time save (deactivate / shutdown) must not close loops even when loop_closure_enabled is true:
+// only an explicit ~/save_map does. Same lap as above, saved the way the node saves on stop.
+TEST(MapBuilder, StopTimeSaveDoesNotCloseLoopsEvenWhenEnabled) {
+  const auto enable_loop_closure = [](LocalizerParameters& parameters) {
+    parameters.loop_closure.enabled = true;
+    parameters.loop_closure.search.maximum_range_m = 15.0;
+    parameters.loop_closure.search.peaks.score_min = 0.45;
+    parameters.loop_closure.search.peaks.margin_min = 0.1;
+  };
+  const std::string stop_directory = unique_directory("lap_stop_save");
+  const MappingRun stop_save = run_mapping(kLoopCourse, false, -1.0, -1.0, false, 1.03, 1.0, stop_directory,
+                                           -1.0, -1.0, -1.0, {}, enable_loop_closure, false);
+  ASSERT_TRUE(stop_save.is_saved) << stop_save.save_error;
+  EXPECT_EQ(stop_save.loop_closure_count, 0U);
+  EXPECT_TRUE(stop_save.loop_closure_report.empty()) << stop_save.loop_closure_report;
+  EXPECT_TRUE(stop_save.metadata.batch_optimized);
+  std::error_code error;
+  std::filesystem::remove_all(stop_directory, error);
 }
 
 TEST(MapBuilder, TrajectoryCsvHasContractHeaderAndOneRowPerKeyframe) {

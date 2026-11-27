@@ -84,6 +84,13 @@ struct ScanTimeStatistics {
 // every 50 m; it only reads the immutable map and hands the result back through a future that the
 // calling thread collects, so no lock is needed and the 50 Hz path never waits for the rebuild.
 // ROS-free pipeline: deskew -> lidar odometry -> prior-map match -> GPS -> pose graph -> slew.
+// The pose graph parameters the Localizer actually builds its graph with. The absolute height reference
+// (absolute_sigma_z_m) is applied in mapping only: in localization the prior map decides the height, and
+// "the height of the first node" would be the height of wherever the localizer was initialised. The level
+// (tilt) reference applies in both modes. Invalid (negative / non-finite) values are passed on unchanged so
+// the pose graph rejects them.
+PoseGraphParameters graph_parameters_for_mode(const LocalizerParameters& parameters);
+
 class Localizer {
  public:
   // `map_points` may be empty (no prior map). `gps_origin` empty disables GPS.
@@ -152,7 +159,8 @@ class Localizer {
   // finished stage instead of nothing:
   //   1. preliminary: the poses as the online estimate left them (map.yaml batch_optimized: false),
   //   2. optimized: after the batch optimisation of every retained factor (position_std_m is nan),
-  //   3. final: after the loop closures (when enabled) and with the standard deviations.
+  //   3. final: after the loop closures (only when MapOutputParameters::should_close_loops) and with the
+  //      standard deviations.
   // `report_progress` is called with one line as soon as a stage is on disk.
   // On failure the files of the stages that finished stay; `error` says what failed.
   bool save_map(const MapOutputParameters& parameters, MapOutputResult& result,

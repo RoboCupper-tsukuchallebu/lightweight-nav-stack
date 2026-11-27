@@ -81,7 +81,7 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
                          std::shared_ptr<std_srvs::srv::Trigger::Response> response);
   void handle_save_map(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
                        std::shared_ptr<std_srvs::srv::Trigger::Response> response);
-  bool save_mapping_outputs(std::string& message);
+  bool save_mapping_outputs(std::string& message, bool should_close_loops);
   // on_deactivate / on_shutdown: saves once, unless save_map already saved and no keyframe was added since.
   void stop_mapping_recording_after_save_map();
   void save_mapping_outputs_on_stop(const char* phase);

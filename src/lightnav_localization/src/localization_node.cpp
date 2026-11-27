@@ -1529,7 +1529,8 @@ void LocalizationNode::handle_save_map(
     return;
   }
   std::string message;
-  response->success = save_mapping_outputs(message);
+  // Only an explicit save_map closes loops (when enabled); the stop-time save never does.
+  response->success = save_mapping_outputs(message, localizer_parameters_.loop_closure.enabled);
   response->message = message;
   if (response->success) stop_mapping_recording_after_save_map();
 }
@@ -1555,14 +1556,14 @@ void LocalizationNode::save_mapping_outputs_on_stop(const char* phase) {
     return;
   }
   std::string message;
-  if (save_mapping_outputs(message)) {
+  if (save_mapping_outputs(message, false)) {
     RCLCPP_INFO(get_logger(), "mapping map saved on %s: %s", phase, message.c_str());
   } else {
     RCLCPP_WARN(get_logger(), "mapping map could not be saved on %s: %s", phase, message.c_str());
   }
 }
 
-bool LocalizationNode::save_mapping_outputs(std::string& message) {
+bool LocalizationNode::save_mapping_outputs(std::string& message, bool should_close_loops) {
   if (!is_mapping()) {
     message = "save_map is only available in mapping mode";
     return false;
@@ -1577,6 +1578,7 @@ bool LocalizationNode::save_mapping_outputs(std::string& message) {
   parameters.batch_max_iterations = batch_max_iterations_;
   parameters.created = utc_now_iso8601();
   parameters.should_write_keyframe_clouds = get_parameter("map_save_keyframe_clouds").as_bool();
+  parameters.should_close_loops = should_close_loops;
   parameters.has_gps_origin = mapping_has_gps_origin_ && gps_origin_.has_value();
   if (parameters.has_gps_origin) parameters.gps_origin = *gps_origin_;
   MapOutputResult result;

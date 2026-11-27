@@ -15,6 +15,15 @@
 #include "lightnav_localization/map_save.hpp"
 
 namespace lightnav_localization {
+
+PoseGraphParameters graph_parameters_for_mode(const LocalizerParameters& parameters) {
+  PoseGraphParameters graph_parameters = parameters.graph;
+  const bool is_valid_positive_height_sigma =
+      std::isfinite(graph_parameters.absolute_sigma_z_m) && graph_parameters.absolute_sigma_z_m > 0.0;
+  if (!parameters.mapping && is_valid_positive_height_sigma) graph_parameters.absolute_sigma_z_m = 0.0;
+  return graph_parameters;
+}
+
 namespace {
 
 constexpr double kMapSubmapRadiusM = 100.0;
@@ -64,7 +73,7 @@ struct PendingGps {
 };
 
 PoseGraphParameters history_parameters_for(const LocalizerParameters& parameters) {
-  PoseGraphParameters graph_parameters = parameters.graph;
+  PoseGraphParameters graph_parameters = graph_parameters_for_mode(parameters);
   graph_parameters.record_history = parameters.mapping;
   return graph_parameters;
 }
@@ -213,7 +222,7 @@ struct Localizer::Implementation {
         pose_cache[restarted_index] = current;
         if (!graph->optimize()) { event_error += " (restart also failed)"; update_error(); }
       } else {
-        graph = std::make_unique<PoseGraph>(parameters.graph);
+        graph = std::make_unique<PoseGraph>(graph_parameters_for_mode(parameters));
         graph->add_first_node(latest_node.stamp, current, parameters.initial_sigma_xy_m,
                               parameters.initial_sigma_yaw_rad);
         nodes.clear();
@@ -697,7 +706,7 @@ bool Localizer::save_map(const MapOutputParameters& parameters, MapOutputResult&
       return false;
     }
     write_stage("optimized", true, self.graph->batch_poses());
-    if (self.parameters.loop_closure.enabled &&
+    if (parameters.should_close_loops &&
         !close_loops(*self.graph, self.mapping_keyframes, self.parameters.loop_closure,
                      parameters.batch_max_iterations, closures, closure_report, error)) {
       return false;
