@@ -447,6 +447,9 @@ def main():
         write_csv(out_directory / "gnss.csv", GNSS_CSV_HEADER, recorder.gnss_rows)
     summary = summarize(arguments, recorder, wall_seconds, node_exit_code, out_directory)
     summary.update(session_results)
+    if arguments.record_gnss_topic:
+        summary["gnss_samples_recorded"] = len(recorder.gnss_rows)
+        summary["gnss_samples_without_clock"] = recorder.gnss_samples_without_clock  # received before the first /clock: dropped
     (out_directory / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
     print(json.dumps(summary, indent=2, sort_keys=True))
     return 0 if node_exit_code == 0 and not is_session_failed else 1

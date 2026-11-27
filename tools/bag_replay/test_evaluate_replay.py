@@ -213,6 +213,31 @@ def test_save_timings_come_from_the_map_save_lines_of_each_save():
     assert saves == [{"preliminary": 1.5, "optimized": 40.2, "final": 191.2}, {"preliminary": 2.0}]
 
 
+def test_a_save_that_starts_at_a_later_stage_is_counted_as_a_second_save():
+    # save_map writes all three stages; the save at the stop starts at 'optimized' (no new keyframe since).
+    log = "\n".join([
+        "map save: preliminary map written 1.0 s after the start of the save",
+        "map save: optimized map written 30.0 s after the start of the save",
+        "map save: final map written 190.0 s after the start of the save",
+        "map save: optimized map written 25.0 s after the start of the save",
+        "map save: final map written 180.0 s after the start of the save",
+    ])
+
+    saves = evaluate_replay.parse_save_timings(log)
+
+    assert saves == [{"preliminary": 1.0, "optimized": 30.0, "final": 190.0}, {"optimized": 25.0, "final": 180.0}]
+
+
+def test_a_save_that_stops_midway_is_followed_by_a_second_save_from_the_start():
+    log = "\n".join([
+        "map save: preliminary map written 1.0 s after the start of the save",
+        "map save: optimized map written 30.0 s after the start of the save",
+        "map save: preliminary map written 2.0 s after the start of the save",
+    ])
+
+    assert evaluate_replay.parse_save_timings(log) == [{"preliminary": 1.0, "optimized": 30.0}, {"preliminary": 2.0}]
+
+
 def test_map_gps_origin_is_none_without_an_origin(tmp_path):
     yaml_path = tmp_path / "map.yaml"
     yaml_path.write_text("has_gps_origin: false\n")

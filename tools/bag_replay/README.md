@@ -60,6 +60,7 @@ tools/bag_replay/run_replay.sh --build --bag ~/bags/<bag のディレクトリ> 
 
 再生が終わり、ノードが入力を処理し終えたら、停止の前に `~/save_map` を呼びます。応答の `success` と `message` と待った秒数が
 `summary.json` の `save_map` に入ります。失敗・時間切れ（`--save-timeout`）のときは終了コード 1 です。
+`save_map` のあとの停止（SIGINT）でも保存がもう一度走る（キーフレームが増えていなければ段階 2 から始まる）ので、`--save-timeout` は最大で 2 回分かかります。
 付けないと、保存は停止（SIGINT）のときの 1 回だけです（呼ばずに止めたときの地図を見る回に使う）。
 
 ### 初期姿勢（localization）
@@ -96,7 +97,7 @@ numpy が要ります。
    GNSS が使われた割合 ＝ `GPS_ONLY` ÷（全体 − `INITIALIZING` − `INPUT_STALE`）。
    `TRACKING` の割合 ＝ `TRACKING` ÷（最初に `TRACKING` になってからの全体 − `INPUT_STALE`）。
    分母が 0 の割合は `null`。
-7. 保存の時間: `node.log` の `map save: <段階> map written <秒> s after the start of the save` の行の秒（段階 `preliminary` で次の保存とみなす）。
+7. 保存の時間: `node.log` の `map save: <段階> map written <秒> s after the start of the save` の行の秒（すでに出た段階、またはそれより前の段階が来たら次の保存とみなす。段階 2 から始まる保存も 1 回と数える）。
 
 ## Mac での再生（評価用の環境 `-e eval`）
 

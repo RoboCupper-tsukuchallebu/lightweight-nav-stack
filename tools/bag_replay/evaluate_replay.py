@@ -40,7 +40,7 @@ STATE_INPUT_STALE = "INPUT_STALE"
 STATE_GPS_ONLY = "GPS_ONLY"
 STATE_TRACKING = "TRACKING"
 SAVE_TIMING_PATTERN = re.compile(r"map save: (\w+) map written ([0-9.]+) s after the start of the save")
-FIRST_SAVE_STAGE = "preliminary"
+SAVE_STAGE_ORDER = ("preliminary", "optimized", "final")
 
 
 # ---------------------------------------------------------------- geometry
@@ -69,6 +69,7 @@ def nearest_time_pairs(source_times, target_times, maximum_gap_s):
     sorted_targets = target_times[order]
     upper = np.clip(np.searchsorted(sorted_targets, source_times), 0, sorted_targets.size - 1)
     lower = np.clip(upper - 1, 0, sorted_targets.size - 1)
+    # On a tie in time the earlier target is taken (<=).
     use_lower = np.abs(source_times - sorted_targets[lower]) <= np.abs(sorted_targets[upper] - source_times)
     nearest = np.where(use_lower, lower, upper)
     is_close_enough = np.abs(sorted_targets[nearest] - source_times) <= maximum_gap_s
@@ -174,12 +175,21 @@ def read_map_gps_origin(map_yaml_path):
 
 
 def parse_save_timings(node_log_text):
-    """Rule 7: one dict per save (a save starts at its 'preliminary' line): stage -> seconds after the start of the save."""
+    """Rule 7: one dict per save: stage -> seconds after the start of the save.
+
+    A line starts a new save when its stage was already written by the current save or comes before the last one written:
+    a save that follows an earlier one without new keyframes starts at 'optimized' (Issue #93 3.4), e.g. the save at the
+    stop after a save_map call."""
     saves = []
+    last_stage_rank = None
     for stage, seconds in SAVE_TIMING_PATTERN.findall(node_log_text):
-        if stage == FIRST_SAVE_STAGE or not saves:
+        stage_rank = SAVE_STAGE_ORDER.index(stage) if stage in SAVE_STAGE_ORDER else None
+        is_new_save = not saves or (stage_rank is not None and last_stage_rank is not None and stage_rank <= last_stage_rank)
+        if is_new_save:
             saves.append({})
         saves[-1][stage] = float(seconds)
+        if stage_rank is not None:
+            last_stage_rank = stage_rank
     return saves
 
 
@@ -242,7 +252,9 @@ def evaluate_localization(online_path, map_trajectory, gnss, map_gps_origin, fir
     if first_tracking_stamp is None:
         return result
     row_times = map_trajectory["times_s"]
-    is_row_in_scope = (row_times >= first_tracking_stamp) & (row_times >= row_times.min()) & (row_times <= row_times.max())
+    # The rows are the map's own times, so "before the first / after the last row of the map" cannot happen here; it is
+    # the 0.2 s interpolation condition that leaves out the part of the replay outside the map.
+    is_row_in_scope = row_times >= first_tracking_stamp
     scoped_times = row_times[is_row_in_scope]
     scoped_poses = map_trajectory["poses"][is_row_in_scope]
     online_poses, is_interpolated = interpolate_poses(online_path["times_s"], online_path["poses"], scoped_times)
