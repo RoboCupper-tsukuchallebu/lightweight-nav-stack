@@ -2124,6 +2124,10 @@ TEST_F(LocalizationNodeImuTurnTest, TheStateGoesFromWaitingForDataToReadyAndStal
   EXPECT_EQ(diagnostics_levels_.at(kImuDiagnosticsName), diagnostic_msgs::msg::DiagnosticStatus::WARN);
   constexpr double kMinimumStoppedSec = 1.5;
   const double detection_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - stop_time).count();
+  // Section 4.4: stale within 2 s of the wheel stamps, plus the 1 s period of /diagnostics and some slack.
+  constexpr double kMaximumStaleDetectionSec = 2.0 + 1.0 + 0.5;
+  std::printf("[ MEASURED ] stale seen %.2f s after the IMU stopped\n", detection_sec);
+  EXPECT_LE(detection_sec, kMaximumStaleDetectionSec);
   if (detection_sec < kMinimumStoppedSec) run_phase(kMinimumStoppedSec - detection_sec, 0.0, 1.0, 1.0, false);
   const double stopped_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - stop_time).count();
   constexpr double kMinimumOdomRatio = 0.8;  // of the wheel rate; the loop and the executor are not exact
@@ -2329,8 +2333,11 @@ class LocalizationNodeImuLoadTest : public LocalizationNodeImuTurnTest {
     // Publish nothing more (a restart would leave a gap in the IMU and cost increments): just wait for
     // /diagnostics to report the final counts.
     const int fresh_diagnostics_target = complete_diagnostics_count_ + 2;
-    run_until([this, fresh_diagnostics_target] { return complete_diagnostics_count_ >= fresh_diagnostics_target; },
-              std::chrono::milliseconds(static_cast<int>(kWaitLimitSec * 1000.0)), 0);
+    const bool is_reported = run_until(
+        [this, fresh_diagnostics_target] { return complete_diagnostics_count_ >= fresh_diagnostics_target; },
+        std::chrono::milliseconds(static_cast<int>(kWaitLimitSec * 1000.0)), 0);
+    EXPECT_TRUE(is_reported) << "/diagnostics did not report after the scenario";
+    if (!is_reported) return 0.0;  // (the caller's ratio check fails too)
     const std::size_t gyro_total = imu_count("yaw_increments_gyro_total");
     const std::size_t wheel_total = imu_count("yaw_increments_wheel_total");
     const double ratio = static_cast<double>(gyro_total) / static_cast<double>(gyro_total + wheel_total);
