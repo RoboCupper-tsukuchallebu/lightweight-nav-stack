@@ -87,7 +87,7 @@ struct GyroFusionStatus {
   GyroConsistencyState consistency = GyroConsistencyState::kUnverified;
   bool is_inconsistent_warning = false;  // still kUnverified after three rejected checks
   std::size_t consistency_confirmed_total = 0;
-  std::size_t consistency_outvoted_total = 0;
+  std::size_t consistency_outvoted_total = 0;  // includes LocalizerParameters::initial_gyro_outvoted_total
   std::size_t consistency_rejected_total = 0;
   std::optional<Eigen::Vector3d> last_yaw_deltas_rad;    // wheel, gyro, lidar (NaN without lidar)
   std::optional<Eigen::Vector3d> verification_sums_rad;  // W, G, L; only while kUnverified / kSuspended
