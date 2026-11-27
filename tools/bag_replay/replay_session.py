@@ -6,14 +6,14 @@ with use_sim_time (configure + activate), optionally foxglove_bridge, `ros2 bag 
 then SIGINT to the node so it saves map.pcd / map.yaml / trajectory.csv. Writes into --out:
 
     map/{map.pcd,map.yaml,trajectory.csv}   saved by the node (mapping mode)
-    status.csv, online_path.csv             LocalizationStatus samples and the online map->base_footprint poses
+    status.csv, online_path.csv             LocalizationStatus samples and the online map->base_footprint poses (x, y, z, yaw)
+    gnss.csv                                --record-gnss-topic: bag_time_ns,latitude,longitude,altitude,status,cov_east,cov_north,cov_up
     summary.json, node.log, play.log        numbers of the run (also printed at the end)
     map_topdown.png                         top-down render (render_map.py), mapping mode only
 
 Normally started through run_replay.sh; see README.md.
 """
 
-import argparse
 import csv
 import json
 import math
@@ -31,16 +31,20 @@ import rclpy
 from lifecycle_msgs.msg import Transition
 from lifecycle_msgs.srv import ChangeState
 from lightnav_msgs.msg import LocalizationStatus
+from lightnav_msgs.srv import SetInitialPose
 from nav_msgs.msg import Odometry
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from rclpy.serialization import deserialize_message
-from sensor_msgs.msg import PointCloud2
+from rosgraph_msgs.msg import Clock
+from sensor_msgs.msg import NavSatFix, PointCloud2
+from std_srvs.srv import Trigger
 from tf2_msgs.msg import TFMessage
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import render_map  # noqa: E402
+import replay_arguments  # noqa: E402
 
 FORBIDDEN_DOMAIN_IDS = ("42", "43", "44")  # robot, GUI, tests
 PLAYED_TOPICS = ("/velodyne_points", "/wheel/odom", "/tf", "/tf_static")
@@ -51,31 +55,14 @@ FOXGLOVE_START_WAIT_S = 3.0
 IDLE_SCAN_WAIT_S = 5.0  # the node counts as drained when no new aligned scan arrived for this long
 DRAIN_TIMEOUT_S = 120.0
 PLAY_EXIT_GRACE_S = 15.0
+GNSS_CSV_HEADER = ["bag_time_ns", "latitude", "longitude", "altitude", "status", "cov_east", "cov_north", "cov_up"]
+GNSS_QOS_DEPTH = 100
+NANOSECONDS_PER_SECOND = 1e9
 STATUS_STATE_NAMES = {0: "INITIALIZING", 1: "TRACKING", 2: "GPS_ONLY", 3: "ODOM_ONLY", 4: "LOST", 5: "INPUT_STALE"}
 
 
 def parse_arguments(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--bag", type=Path, default=Path("/bag"), help="rosbag2 directory (mcap)")
-    parser.add_argument("--out", type=Path, default=Path("/out"), help="output directory")
-    parser.add_argument("--mode", choices=("mapping", "localization"), default="mapping")
-    parser.add_argument("--rate", type=float, default=1.0, help="playback rate for ros2 bag play -r")
-    parser.add_argument("--start-offset", type=float, default=0.0, help="seconds to skip from the bag start")
-    parser.add_argument("--duration", type=float, default=0.0, help="stop playback after this many bag seconds (0 = to the end)")
-    parser.add_argument("--params-file", type=Path, default=Path("/ws/config/localization_indoor.yaml"))
-    parser.add_argument("--map-file", help="prior map.pcd (localization mode)")
-    parser.add_argument("--map-yaml", help="prior map.yaml (localization mode)")
-    parser.add_argument("--status-rate-hz", type=float, default=10.0, help="LocalizationStatus rate (more samples for scan_ms)")
-    parser.add_argument("--node-param", action="append", default=[], metavar="NAME:=VALUE",
-                        help="extra localization_node parameter (repeatable)")
-    parser.add_argument("--extra-topic", action="append", default=[], metavar="TOPIC",
-                        help="bag topic to play besides the sensor topics, e.g. /fix_all for GNSS (repeatable)")
-    parser.add_argument("--foxglove", action="store_true", help="start foxglove_bridge (no authentication: use on a trusted network)")
-    parser.add_argument("--foxglove-port", type=int, default=8765)
-    parser.add_argument("--hold-seconds", type=float, default=0.0,
-                        help="keep the node and foxglove_bridge running this long after the replay, before the save")
-    parser.add_argument("--save-timeout", type=float, default=600.0, help="seconds to wait for the map save after SIGINT")
-    return parser.parse_args(argv)
+    return replay_arguments.parse_arguments(__doc__, argv)
 
 
 def check_domain():
@@ -129,9 +116,12 @@ def percentile(sorted_values, fraction):
 class Recorder(Node):
     """Collects what the node publishes during the replay. All callbacks run on the executor thread."""
 
-    def __init__(self, republished_static_transforms):
+    def __init__(self, republished_static_transforms, record_gnss_topic=None):
         super().__init__("bag_replay_session")
         self.status_rows = []
+        self.gnss_rows = []
+        self.gnss_samples_without_clock = 0
+        self.latest_clock_ns = None
         self.online_path_rows = []
         self.delivered_scan_stamps = []
         self.aligned_scan_count = 0
@@ -150,6 +140,24 @@ class Recorder(Node):
         self.create_subscription(PointCloud2, "/lightnav/localization/aligned_scan", self._on_aligned_scan,
                                  QoSProfile(depth=200, reliability=ReliabilityPolicy.BEST_EFFORT), raw=True)
         self.change_state_client = self.create_client(ChangeState, f"/{NODE_NAME}/change_state")
+        self.set_initial_pose_client = self.create_client(SetInitialPose, f"/{NODE_NAME}/set_initial_pose")
+        self.save_map_client = self.create_client(Trigger, f"/{NODE_NAME}/save_map")
+        # The player's /clock is the bag time of every received GNSS sample (this node itself runs on the wall clock).
+        self.create_subscription(Clock, "/clock", self._on_clock, qos_profile_sensor_data)
+        if record_gnss_topic:
+            self.create_subscription(NavSatFix, record_gnss_topic, self._on_gnss,
+                                     QoSProfile(depth=GNSS_QOS_DEPTH, reliability=ReliabilityPolicy.BEST_EFFORT))
+
+    def _on_clock(self, message):
+        self.latest_clock_ns = message.clock.sec * int(NANOSECONDS_PER_SECOND) + message.clock.nanosec
+
+    def _on_gnss(self, message):
+        if self.latest_clock_ns is None:
+            self.gnss_samples_without_clock += 1
+            return
+        covariance = message.position_covariance
+        self.gnss_rows.append((self.latest_clock_ns, repr(message.latitude), repr(message.longitude), message.altitude,
+                               message.status.status, covariance[0], covariance[4], covariance[8]))
 
     def _on_status(self, message):
         stamp = message.header.stamp
@@ -168,7 +176,7 @@ class Recorder(Node):
         pose = message.pose.pose
         yaw = math.atan2(2.0 * (pose.orientation.w * pose.orientation.z + pose.orientation.x * pose.orientation.y),
                          1.0 - 2.0 * (pose.orientation.y ** 2 + pose.orientation.z ** 2))
-        self.online_path_rows.append((stamp.sec + stamp.nanosec * 1e-9, pose.position.x, pose.position.y, yaw))
+        self.online_path_rows.append((stamp.sec + stamp.nanosec * 1e-9, pose.position.x, pose.position.y, pose.position.z, yaw))
 
     def _on_delivered_scan(self, serialized):
         # CDR: 4 byte encapsulation header, then header.stamp (int32 sec, uint32 nanosec).
@@ -190,6 +198,79 @@ def change_state(recorder, transition_id):
     future.add_done_callback(lambda _: done.set())
     if not done.wait(SERVICE_TIMEOUT_S) or not future.result().success:
         raise RuntimeError(f"lifecycle transition {transition_id} failed (see node.log)")
+
+
+def call_service(client, request, timeout_s):
+    """Calls a service and waits at most timeout_s for the answer. Raises RuntimeError when it is not available or late."""
+    if not client.wait_for_service(timeout_sec=SERVICE_TIMEOUT_S):
+        raise RuntimeError(f"{client.srv_name} is not available")
+    done = threading.Event()
+    future = client.call_async(request)
+    future.add_done_callback(lambda _: done.set())
+    if not done.wait(timeout_s):
+        future.cancel()
+        raise RuntimeError(f"{client.srv_name} did not answer within {timeout_s:g} s")
+    return future.result()
+
+
+def request_initial_pose(recorder, x, y, yaw):
+    """Sets the initial pose of the active node (frame map, yaw given: covariance[35] = 0). Returns the response."""
+    request = SetInitialPose.Request()
+    request.pose.header.frame_id = "map"
+    request.pose.pose.pose.position.x = x
+    request.pose.pose.pose.position.y = y
+    request.pose.pose.pose.orientation.z = math.sin(0.5 * yaw)
+    request.pose.pose.pose.orientation.w = math.cos(0.5 * yaw)
+    return call_service(recorder.set_initial_pose_client, request, SERVICE_TIMEOUT_S)
+
+
+def read_bag_start_time_s(bag_directory):
+    import rosbag2_py
+
+    reader = rosbag2_py.SequentialReader()
+    reader.open(rosbag2_py.StorageOptions(uri=str(bag_directory), storage_id="mcap"),
+                rosbag2_py.ConverterOptions(input_serialization_format="cdr", output_serialization_format="cdr"))
+    return reader.get_metadata().starting_time.nanoseconds / NANOSECONDS_PER_SECOND
+
+
+def decide_initial_pose(arguments):
+    """(x, y, yaw, description of where it came from) for the node, or None when the run gives none.
+
+    --initial-pose-from-trajectory raises replay_arguments.InitialPoseError (before anything is started)."""
+    if arguments.initial_pose is not None:
+        x, y, yaw = arguments.initial_pose
+        return {"x": x, "y": y, "yaw": yaw, "source": "--initial-pose"}
+    if arguments.initial_pose_from_trajectory is None:
+        return None
+    start_time_s = read_bag_start_time_s(arguments.bag) + arguments.start_offset
+    rows = replay_arguments.read_trajectory_rows(arguments.initial_pose_from_trajectory)
+    pose = replay_arguments.interpolate_initial_pose(rows, start_time_s)
+    return {**pose, "source": "--initial-pose-from-trajectory"}
+
+
+def apply_initial_pose(recorder, initial_pose, session_results):
+    """Calls ~/set_initial_pose and records the pose and the answer in session_results. True when it was accepted."""
+    record = {key: value for key, value in initial_pose.items()}
+    try:
+        response = request_initial_pose(recorder, initial_pose["x"], initial_pose["y"], initial_pose["yaw"])
+        record.update({"accepted": bool(response.accepted), "message": response.message})
+    except RuntimeError as error:
+        record.update({"accepted": False, "message": str(error)})
+    session_results["initial_pose"] = record
+    return record["accepted"]
+
+
+def call_save_map(recorder, timeout_s, session_results):
+    """Calls ~/save_map (after the replay, before the stop) and records success and message. True when it succeeded."""
+    started_s = time.monotonic()
+    try:
+        response = call_service(recorder.save_map_client, Trigger.Request(), timeout_s)
+        record = {"success": bool(response.success), "message": response.message}
+    except RuntimeError as error:
+        record = {"success": False, "message": str(error)}
+    record["wall_seconds"] = round(time.monotonic() - started_s, 1)
+    session_results["save_map"] = record
+    return record["success"]
 
 
 def start_node(arguments, out_directory, log_file):
@@ -221,9 +302,10 @@ def start_foxglove(arguments, log_file):
 
 
 def start_player(arguments, log_file):
+    topics = replay_arguments.played_topics(PLAYED_TOPICS, arguments.extra_topic, arguments.record_gnss_topic)
     command = ["ros2", "bag", "play", str(arguments.bag), "--clock", "100", "--rate", str(arguments.rate),
                "--start-offset", str(arguments.start_offset), "--read-ahead-queue-size", "2000",
-               "--disable-keyboard-controls", "--topics", *PLAYED_TOPICS, *arguments.extra_topic]
+               "--disable-keyboard-controls", "--topics", *topics]
     if arguments.duration > 0.0:
         command += ["--playback-duration", str(arguments.duration)]
     return subprocess.Popen(command, stdout=log_file, stderr=subprocess.STDOUT)
@@ -293,12 +375,16 @@ def main():
     check_domain()
     out_directory = arguments.out
     (out_directory / "map").mkdir(parents=True, exist_ok=True)
+    try:
+        initial_pose = decide_initial_pose(arguments)
+    except replay_arguments.InitialPoseError as error:
+        sys.exit(f"initial pose: {error}")
     static_transforms = read_static_transforms(arguments.bag) if arguments.start_offset > 0.0 else None
     if arguments.start_offset > 0.0 and static_transforms is None:
         print("warning: the bag has no /tf_static message; the lidar extrinsic will not be found", file=sys.stderr)
 
     rclpy.init()
-    recorder = Recorder(static_transforms)
+    recorder = Recorder(static_transforms, arguments.record_gnss_topic)
     executor = MultiThreadedExecutor(num_threads=2)
     executor.add_node(recorder)
     spin_thread = threading.Thread(target=executor.spin, daemon=True)
@@ -307,6 +393,8 @@ def main():
     processes = []
     log_files = []
     node_exit_code = None
+    session_results = {}  # what the session itself did (initial pose, save_map call); goes into summary.json
+    is_session_failed = False
     started_wall_s = time.monotonic()
     try:
         node_log = (out_directory / "node.log").open("w")
@@ -321,16 +409,25 @@ def main():
             processes.append(start_foxglove(arguments, foxglove_log))
             print(f"foxglove_bridge: ws://<this machine>:{arguments.foxglove_port}", flush=True)
 
-        play_log = (out_directory / "play.log").open("w")
-        log_files.append(play_log)
-        player = start_player(arguments, play_log)
-        processes.append(player)
-        play_status = player.wait()
-        print(f"ros2 bag play finished with exit code {play_status}", flush=True)
-        wait_until_node_is_drained(recorder, node_process)
-        if arguments.hold_seconds > 0.0:
-            print(f"holding {arguments.hold_seconds:g} s before the save (inspect in Foxglove)", flush=True)
-            time.sleep(arguments.hold_seconds)
+        is_initial_pose_accepted = True
+        if initial_pose is not None:
+            is_initial_pose_accepted = apply_initial_pose(recorder, initial_pose, session_results)
+        if not is_initial_pose_accepted:
+            is_session_failed = True
+            print(f"initial pose was not accepted: {session_results['initial_pose']['message']}; the replay is not started", file=sys.stderr)
+        else:
+            play_log = (out_directory / "play.log").open("w")
+            log_files.append(play_log)
+            player = start_player(arguments, play_log)
+            processes.append(player)
+            play_status = player.wait()
+            print(f"ros2 bag play finished with exit code {play_status}", flush=True)
+            wait_until_node_is_drained(recorder, node_process)
+            if arguments.hold_seconds > 0.0:
+                print(f"holding {arguments.hold_seconds:g} s before the save (inspect in Foxglove)", flush=True)
+                time.sleep(arguments.hold_seconds)
+            if arguments.save_map_service:
+                is_session_failed = not call_save_map(recorder, arguments.save_timeout, session_results)
         node_exit_code = stop_process(node_process, arguments.save_timeout)
     finally:
         for process in reversed(processes):
@@ -345,11 +442,17 @@ def main():
     wall_seconds = time.monotonic() - started_wall_s
     write_csv(out_directory / "status.csv", ["stamp_sec", "state", "scan_ms", "match_ms", "lidar_odom_inlier_ratio", "odom_only_distance_m", "last_error"],
               [row.values() for row in recorder.status_rows])
-    write_csv(out_directory / "online_path.csv", ["stamp_sec", "x", "y", "yaw"], recorder.online_path_rows)
+    write_csv(out_directory / "online_path.csv", ["stamp_sec", "x", "y", "z", "yaw"], recorder.online_path_rows)
+    if arguments.record_gnss_topic:
+        write_csv(out_directory / "gnss.csv", GNSS_CSV_HEADER, recorder.gnss_rows)
     summary = summarize(arguments, recorder, wall_seconds, node_exit_code, out_directory)
+    summary.update(session_results)
+    if arguments.record_gnss_topic:
+        summary["gnss_samples_recorded"] = len(recorder.gnss_rows)
+        summary["gnss_samples_without_clock"] = recorder.gnss_samples_without_clock  # received before the first /clock: dropped
     (out_directory / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
     print(json.dumps(summary, indent=2, sort_keys=True))
-    return 0 if node_exit_code == 0 else 1
+    return 0 if node_exit_code == 0 and not is_session_failed else 1
 
 
 if __name__ == "__main__":
