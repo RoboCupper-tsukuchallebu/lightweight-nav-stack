@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <cstdlib>
+#include <optional>
 #include <filesystem>
 #include <system_error>
 #include <stdexcept>
@@ -113,4 +114,58 @@ TEST(MapMetadata, rejects_invalid_values) {
 TEST(MapMetadata, write_to_an_unwritable_location_is_an_error) {
   EXPECT_THROW(lightnav_localization::write_map_metadata(unique_temp_directory() + "no_such_directory/map.yaml", MapMetadata{}),
                std::runtime_error);
+}
+
+TEST(MapMetadata, round_trips_the_save_stage_and_the_loop_closure_count) {
+  for (const lightnav_localization::MapSaveStage stage :
+       {lightnav_localization::MapSaveStage::kPreliminary, lightnav_localization::MapSaveStage::kOptimized,
+        lightnav_localization::MapSaveStage::kFinal}) {
+    MapMetadata metadata;
+    metadata.created = "x";
+    metadata.save_stage = stage;
+    metadata.loop_closure_count = stage == lightnav_localization::MapSaveStage::kFinal ? std::optional<int>(0)
+                                                                                        : std::nullopt;
+    const std::string path = unique_temp_directory() + "stage.yaml";
+    lightnav_localization::write_map_metadata(path, metadata);
+    const MapMetadata loaded = lightnav_localization::read_map_metadata(path);
+    EXPECT_EQ(loaded.save_stage, stage);
+    EXPECT_EQ(loaded.loop_closure_count, metadata.loop_closure_count);
+  }
+}
+
+TEST(MapMetadata, a_map_yaml_without_the_new_keys_reads_as_unknown_stage_and_no_loop_closing) {
+  const std::string path = unique_temp_directory() + "old.yaml";
+  write_yaml(path, "35.0");
+  const MapMetadata loaded = lightnav_localization::read_map_metadata(path);
+  EXPECT_EQ(loaded.save_stage, lightnav_localization::MapSaveStage::kUnknown);
+  EXPECT_FALSE(loaded.loop_closure_count.has_value());
+}
+
+TEST(MapMetadata, rejects_an_unknown_save_stage_and_a_negative_loop_closure_count) {
+  const std::string path = unique_temp_directory() + "bad_stage.yaml";
+  write_yaml(path, "35.0");
+  std::ofstream(path, std::ios::app) << "save_stage: halfway\n";
+  EXPECT_THROW(lightnav_localization::read_map_metadata(path), std::runtime_error);
+  write_yaml(path, "35.0");
+  std::ofstream(path, std::ios::app) << "loop_closure_count: -1\n";
+  EXPECT_THROW(lightnav_localization::read_map_metadata(path), std::runtime_error);
+}
+
+TEST(MapMetadata, only_an_existing_map_yaml_with_batch_optimized_false_is_a_preliminary_map) {
+  const std::string preliminary_path = unique_temp_directory() + "preliminary.yaml";
+  MapMetadata preliminary;
+  preliminary.created = "x";
+  preliminary.batch_optimized = false;
+  lightnav_localization::write_map_metadata(preliminary_path, preliminary);
+  EXPECT_TRUE(lightnav_localization::is_preliminary_map(preliminary_path));
+
+  const std::string optimized_path = unique_temp_directory() + "optimized.yaml";
+  MapMetadata optimized = preliminary;
+  optimized.batch_optimized = true;
+  lightnav_localization::write_map_metadata(optimized_path, optimized);
+  EXPECT_FALSE(lightnav_localization::is_preliminary_map(optimized_path));
+
+  EXPECT_FALSE(lightnav_localization::is_preliminary_map(unique_temp_directory() + "absent3.yaml"));
+  EXPECT_FALSE(lightnav_localization::is_preliminary_map(""));
+  EXPECT_STREQ(lightnav_localization::kPreliminaryMapNote, "map is a preliminary save (not batch optimized)");
 }

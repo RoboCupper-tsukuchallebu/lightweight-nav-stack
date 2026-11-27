@@ -1,8 +1,10 @@
+#include "lightnav_localization/map_save.hpp"
 #include "lightnav_localization/localization_node.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdint>
 #include <cstring>
 #include <ctime>
@@ -248,6 +250,7 @@ void LocalizationNode::declare_parameters() {
   declare_parameter<double>("path_min_step_m", 0.1);
   declare_parameter<int>("path_max_poses", 20000);
   declare_parameter<double>("init_gps_max_std_m", 3.0);
+  declare_parameter<double>("init_gps_reported_std_max_m", 0.0);
   // GNSS input contract (Issue #43 section 4.3): drop fixes below this NavSatStatus (-1 keeps all) and
   // thin the rest to one per gps_min_interval_s (0 keeps all) before they reach the Localizer.
   declare_parameter<int>("gps_min_status", kLowestNavSatStatus);
@@ -364,6 +367,7 @@ bool LocalizationNode::read_parameters(std::string& error) {
   path_min_step_m_ = get_parameter("path_min_step_m").as_double();
   path_max_poses_ = static_cast<int>(get_parameter("path_max_poses").as_int());
   init_gps_max_std_m_ = get_parameter("init_gps_max_std_m").as_double();
+  init_gps_reported_std_max_m_ = get_parameter("init_gps_reported_std_max_m").as_double();
   gps_min_status_ = static_cast<int>(get_parameter("gps_min_status").as_int());
   gps_min_interval_s_ = get_parameter("gps_min_interval_s").as_double();
   alignment_parameters_.scan_count = static_cast<int>(get_parameter("init_scan_count").as_int());
@@ -407,6 +411,10 @@ bool LocalizationNode::read_parameters(std::string& error) {
       !(alignment_parameters_.fine_correspondence_m > 0.0) ||
       !(alignment_parameters_.inlier_ratio_min > 0.0) || !(init_gps_max_std_m_ > 0.0)) {
     error = "initial alignment parameters must be positive";
+    return false;
+  }
+  if (!std::isfinite(init_gps_reported_std_max_m_) || init_gps_reported_std_max_m_ < 0.0) {
+    error = "init_gps_reported_std_max_m must be finite and not negative (0 = off)";
     return false;
   }
   if (gps_min_status_ < kLowestNavSatStatus || gps_min_status_ > kHighestNavSatStatus) {
@@ -684,6 +692,9 @@ bool LocalizationNode::load_map_data(std::string& error) {
   gps_origin_ = loaded_origin;
   gps_converter_ = std::move(loaded_converter);
   map_has_no_gps_origin_ = !gps_origin_.has_value();
+  // A preliminary map (the save was cut short after its first stage) is still used, but not silently.
+  is_preliminary_map_ = is_preliminary_map(map_yaml_);
+  if (is_preliminary_map_) RCLCPP_WARN(get_logger(), "%s", kPreliminaryMapNote);
   return true;
 }
 
@@ -758,6 +769,7 @@ LocalizationNode::CallbackReturn LocalizationNode::on_configure(
     gps_origin_.reset();
     gps_converter_.reset();
     map_has_no_gps_origin_ = false;
+    is_preliminary_map_ = false;
   } else if (!load_map_data(error)) {
     RCLCPP_ERROR(get_logger(), "%s", error.c_str());
     return CallbackReturn::FAILURE;
@@ -894,6 +906,7 @@ LocalizationNode::CallbackReturn LocalizationNode::on_cleanup(
   map_points_.clear();
   map_metadata_ = MapMetadata{};
   gps_origin_.reset();
+  is_preliminary_map_ = false;
   gps_converter_.reset();
   reset_runtime_state();
   return CallbackReturn::SUCCESS;
@@ -992,8 +1005,33 @@ GpsFix LocalizationNode::to_gps_fix(const sensor_msgs::msg::NavSatFix& message) 
       fix.known_std_m = std::sqrt(horizontal_variance);
     }
   }
+  if (message.position_covariance_type != sensor_msgs::msg::NavSatFix::COVARIANCE_TYPE_UNKNOWN) {
+    const double reported_variance =
+        std::max(message.position_covariance[0], message.position_covariance[4]);
+    if (std::isfinite(reported_variance) && reported_variance > 0.0) {
+      fix.reported_std_m = std::sqrt(reported_variance);
+    }
+  }
   fix.hdop = 0.0;
   return fix;
+}
+
+bool LocalizationNode::accepts_reported_std_for_start(const GpsFix& fix) {
+  if (is_reported_std_above_limit(fix, init_gps_reported_std_max_m_)) {
+    char text[160];
+    std::snprintf(text, sizeof(text),
+                  "waiting for a GPS fix with reported std <= %.1f m (latest %.1f m)",
+                  init_gps_reported_std_max_m_, fix.reported_std_m);
+    node_error_ = text;
+    is_waiting_for_reported_std_ = true;
+    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "%s", text);
+    return false;
+  }
+  if (is_waiting_for_reported_std_) {
+    node_error_.clear();
+    is_waiting_for_reported_std_ = false;
+  }
+  return true;
 }
 
 bool LocalizationNode::is_usable_initial_fix(const GpsFix& fix) const {
@@ -1231,6 +1269,7 @@ void LocalizationNode::handle_nav_sat_fix(
 
   if (is_mapping() && !is_localizer_initialized_) {
     if (!mapping_has_gps_origin_) {
+      if (!accepts_reported_std_for_start(fix)) return;
       if (!is_usable_mapping_fix(fix)) {
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
                              "waiting for a good GPS fix for the mapping origin");
@@ -1251,6 +1290,7 @@ void LocalizationNode::handle_nav_sat_fix(
       RCLCPP_INFO(get_logger(), "mapping origin set at lat %.8f, lon %.8f, alt %.3f",
                   origin.latitude_deg, origin.longitude_deg, origin.altitude_m);
     } else if (gps_converter_) {
+      if (!accepts_reported_std_for_start(fix)) return;
       if (!is_usable_mapping_fix(fix)) {
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
                              "ignoring an unusable GPS fix while waiting for the mapping start");
@@ -1286,7 +1326,7 @@ void LocalizationNode::handle_nav_sat_fix(
   }
 
   if (!is_localizer_initialized_) {
-    if (!initial_position_ && is_usable_initial_fix(fix)) {
+    if (!initial_position_ && accepts_reported_std_for_start(fix) && is_usable_initial_fix(fix)) {
       initial_position_ = gps_converter_->to_enu(fix);
       initial_position_from_gps_ = true;
       alignment_target_.reset();
@@ -1422,7 +1462,8 @@ void LocalizationNode::maybe_start_mapping() {
       initial_position_from_gps_ = false;
       map_has_no_gps_origin_ = true;
     } else {
-      node_error_ = "waiting for a GPS fix for the mapping origin";
+      // The reason of a refused fix (reported std above the limit) is more specific: keep it.
+      if (!is_waiting_for_reported_std_) node_error_ = "waiting for a GPS fix for the mapping origin";
       return;
     }
   }
@@ -1528,8 +1569,16 @@ void LocalizationNode::handle_save_map(
     response->message = "localization node is not active";
     return;
   }
+  if (localizer_ && keyframe_count_at_save_map_ &&
+      localizer_->mapping_keyframe_count() == *keyframe_count_at_save_map_) {
+    // The previous save_map succeeded and nothing was recorded since: the files are already final.
+    response->success = true;
+    response->message = kMapAlreadySavedMessage;
+    return;
+  }
   std::string message;
-  response->success = save_mapping_outputs(message);
+  // Only an explicit save_map closes loops (when enabled); the stop-time save never does.
+  response->success = save_mapping_outputs(message, localizer_parameters_.loop_closure.enabled);
   response->message = message;
   if (response->success) stop_mapping_recording_after_save_map();
 }
@@ -1555,14 +1604,14 @@ void LocalizationNode::save_mapping_outputs_on_stop(const char* phase) {
     return;
   }
   std::string message;
-  if (save_mapping_outputs(message)) {
+  if (save_mapping_outputs(message, false)) {
     RCLCPP_INFO(get_logger(), "mapping map saved on %s: %s", phase, message.c_str());
   } else {
     RCLCPP_WARN(get_logger(), "mapping map could not be saved on %s: %s", phase, message.c_str());
   }
 }
 
-bool LocalizationNode::save_mapping_outputs(std::string& message) {
+bool LocalizationNode::save_mapping_outputs(std::string& message, bool should_close_loops) {
   if (!is_mapping()) {
     message = "save_map is only available in mapping mode";
     return false;
@@ -1577,6 +1626,7 @@ bool LocalizationNode::save_mapping_outputs(std::string& message) {
   parameters.batch_max_iterations = batch_max_iterations_;
   parameters.created = utc_now_iso8601();
   parameters.should_write_keyframe_clouds = get_parameter("map_save_keyframe_clouds").as_bool();
+  parameters.should_close_loops = should_close_loops;
   parameters.has_gps_origin = mapping_has_gps_origin_ && gps_origin_.has_value();
   if (parameters.has_gps_origin) parameters.gps_origin = *gps_origin_;
   MapOutputResult result;
@@ -1590,8 +1640,7 @@ bool LocalizationNode::save_mapping_outputs(std::string& message) {
     message = "save_map failed: " + error;
     return false;
   }
-  message = "saved " + std::to_string(result.keyframe_count) + " keyframes, " +
-            std::to_string(result.map_point_count) + " map points to " + map_output_dir_;
+  message = format_save_map_message(result, map_output_dir_, should_close_loops);
   RCLCPP_INFO(get_logger(), "%s", message.c_str());
   if (!result.loop_closure_report.empty()) {
     RCLCPP_INFO(get_logger(), "loop closures: %zu in total; %s", result.loop_closure_count,
@@ -1819,6 +1868,7 @@ std::string LocalizationNode::composed_last_error() const {
     error_message += part;
   };
   if (map_has_no_gps_origin_) append("map has no GPS origin: GPS disabled");
+  if (is_preliminary_map_) append(kPreliminaryMapNote);
   append(mapping_recording_stopped_note_);
   if (localizer_) append(localizer_->last_error());
   return error_message;

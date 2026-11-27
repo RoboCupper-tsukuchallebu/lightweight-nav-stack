@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <exception>
 #include <optional>
+#include <utility>
 #include <stdexcept>
 
 namespace lightnav_localization {
@@ -155,6 +156,17 @@ struct PoseGraph::Implementation {
   std::map<int, double> history_stamps;
   std::vector<BatchPose> batch_poses;
   gtsam::Values batch_values;  // result of the last batch_optimize(); initial guess of the next one
+  // Kept apart from history_factors so they can be removed again (a failed loop closing must leave the
+  // graph as it was). batch_optimize() uses both.
+  gtsam::NonlinearFactorGraph loop_closure_factors;
+  // batch_values / batch_poses as they were when the first loop closure factor was added.
+  std::optional<std::pair<gtsam::Values, std::vector<BatchPose>>> batch_state_before_loop_closures;
+
+  gtsam::NonlinearFactorGraph batch_factors() const {
+    gtsam::NonlinearFactorGraph all_factors = history_factors;
+    all_factors.push_back(loop_closure_factors);
+    return all_factors;
+  }
 };
 
 PoseGraph::PoseGraph(const PoseGraphParameters& parameters)
@@ -364,7 +376,24 @@ void PoseGraph::add_loop_closure_factor(int from_index, int to_index, const Eige
           robust(pose_noise(gtsam::Vector3::Constant(sigma_rotation_rad),
                             gtsam::Vector3::Constant(sigma_translation_m)),
                  graph.parameters.huber_k)));
-  graph.history_factors.push_back(factor);
+  if (graph.loop_closure_factors.empty()) {
+    graph.batch_state_before_loop_closures = std::make_pair(graph.batch_values, graph.batch_poses);
+  }
+  graph.loop_closure_factors.push_back(factor);
+}
+
+std::size_t PoseGraph::loop_closure_factor_count() const {
+  return implementation_->loop_closure_factors.size();
+}
+
+void PoseGraph::remove_loop_closure_factors() {
+  Implementation& graph = *implementation_;
+  graph.loop_closure_factors.resize(0);
+  if (graph.batch_state_before_loop_closures) {
+    graph.batch_values = graph.batch_state_before_loop_closures->first;
+    graph.batch_poses = graph.batch_state_before_loop_closures->second;
+    graph.batch_state_before_loop_closures.reset();
+  }
 }
 
 bool PoseGraph::batch_optimize(int max_iterations, bool should_compute_marginals) {
@@ -381,14 +410,19 @@ bool PoseGraph::batch_optimize(int max_iterations, bool should_compute_marginals
     last_error_ = "batch optimization has no graph";
     return false;
   }
+  if (batch_failure_countdown_ >= 0 && batch_failure_countdown_-- == 0) {
+    last_error_ = "injected batch optimization failure";
+    return false;
+  }
   try {
+    const gtsam::NonlinearFactorGraph all_factors = graph.batch_factors();
     gtsam::LevenbergMarquardtParams optimizer_parameters;
     optimizer_parameters.maxIterations = max_iterations;
     gtsam::Values initial_values = graph.history_values;
     for (const gtsam::Key key : graph.batch_values.keys()) {
       if (initial_values.exists(key)) initial_values.update(key, graph.batch_values.at(key));
     }
-    gtsam::LevenbergMarquardtOptimizer optimizer(graph.history_factors, initial_values,
+    gtsam::LevenbergMarquardtOptimizer optimizer(all_factors, initial_values,
                                                  optimizer_parameters);
     const gtsam::Values result = optimizer.optimize();
     graph.batch_values = result;
@@ -406,7 +440,7 @@ bool PoseGraph::batch_optimize(int max_iterations, bool should_compute_marginals
       }
       try {
         if (!marginals) {
-          marginals = std::make_unique<gtsam::Marginals>(graph.history_factors, result);
+          marginals = std::make_unique<gtsam::Marginals>(all_factors, result);
         }
         const gtsam::Matrix covariance = marginals->marginalCovariance(key_of(entry.first));
         const Eigen::Matrix3d map_rotation = batch_pose.map_to_base.rotation();

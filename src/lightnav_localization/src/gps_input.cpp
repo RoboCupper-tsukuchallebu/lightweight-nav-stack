@@ -6,6 +6,12 @@
 
 namespace lightnav_localization {
 
+bool is_reported_std_above_limit(const GpsFix& fix, double limit_m) {
+  if (!(limit_m > 0.0)) return false;
+  if (!std::isfinite(fix.reported_std_m) || !(fix.reported_std_m > 0.0)) return false;
+  return fix.reported_std_m > limit_m;
+}
+
 struct GpsConverter::Implementation {
   explicit Implementation(const GpsOrigin& origin)
       : local_cartesian(origin.latitude_deg, origin.longitude_deg, origin.altitude_m) {}

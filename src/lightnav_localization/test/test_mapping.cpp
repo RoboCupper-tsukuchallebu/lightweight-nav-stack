@@ -8,7 +8,9 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <iterator>
 #include <limits>
+#include <map>
 #include <random>
 #include <sstream>
 #include <stdexcept>
@@ -18,6 +20,7 @@
 #include "lightnav_localization/localizer.hpp"
 #include "lightnav_localization/map_builder.hpp"
 #include "lightnav_localization/map_metadata.hpp"
+#include "lightnav_localization/map_save.hpp"
 #include "lightnav_localization/mapping_initialization.hpp"
 #include "lightnav_localization/pcd_io.hpp"
 #include "synthetic_world.hpp"
@@ -159,7 +162,10 @@ MappingRun run_mapping(const Course& course, bool has_pillars,
                        double fail_optimization_at_sec = -1.0,
                        double wheel_gap_begin_sec = -1.0, double wheel_gap_end_sec = -1.0,
                        const MapSaveProgress& report_progress = {},
-                       const std::function<void(LocalizerParameters&)>& adjust_parameters = {}) {
+                       const std::function<void(LocalizerParameters&)>& adjust_parameters = {},
+                       bool should_close_loops_on_save = true,
+                       const std::function<void(Localizer&, MapOutputParameters&)>& before_save = {},
+                       const std::function<void(Localizer&, const MapOutputParameters&)>& after_save = {}) {
   SyntheticWorld world(course.centerline(), true);
   if (has_pillars) {
     world.add_pillars(0.1, 0.5, 1.25, 1.5, true);
@@ -248,14 +254,20 @@ MappingRun run_mapping(const Course& course, bool has_pillars,
   output_parameters.map_voxel_size_m = 0.2;
   output_parameters.batch_max_iterations = 100;
   output_parameters.created = "2026-01-01T00:00:00Z";
+  // Like ~/save_map of the node; the stop-time save passes false (a test asks for it with should_close_loops_on_save).
+  output_parameters.should_close_loops = parameters.loop_closure.enabled && should_close_loops_on_save;
+  if (before_save) before_save(localizer, output_parameters);
   MapOutputResult output_result;
   std::string error;
   result.is_saved = localizer.save_map(output_parameters, output_result, error, report_progress);
   result.save_error = error;
+  if (after_save) after_save(localizer, output_parameters);
   result.loop_closure_count = output_result.loop_closure_count;
   result.loop_closure_report = output_result.loop_closure_report;
   // A test that cuts the save short passes a callback and checks is_saved itself.
-  if (!report_progress) EXPECT_TRUE(result.is_saved) << error;
+  if (!report_progress) {
+    EXPECT_TRUE(result.is_saved) << error;
+  }
   result.accepted_gps_factors = localizer.accepted_gps_factor_count();
   result.gps_gate_rejections = localizer.gps_gate_rejection_count();
   result.gps_time_gap_rejections = localizer.gps_time_gap_rejection_count();
@@ -735,6 +747,8 @@ TEST(MapBuilder, LoopClosureDoesNotJoinLookalikeCornersOfASymmetricLap) {
               closed_lap.loop_closure_report.c_str());
 
   EXPECT_TRUE(closed_lap.is_saved) << closed_lap.save_error;
+  // An explicit save with loop_closure.enabled runs the detection (the lap is symmetric, so it may join nothing).
+  EXPECT_FALSE(closed_lap.loop_closure_report.empty());
   EXPECT_NE(closed_lap.loop_closure_report.find("implausible"), std::string::npos)
       << closed_lap.loop_closure_report;
   EXPECT_LT(seam_gap_m(closed_lap), seam_gap_m(open_lap) + 0.05);
@@ -744,6 +758,210 @@ TEST(MapBuilder, LoopClosureDoesNotJoinLookalikeCornersOfASymmetricLap) {
   std::error_code error;
   std::filesystem::remove_all(open_directory, error);
   std::filesystem::remove_all(closed_directory, error);
+}
+
+// The stop-time save (deactivate / shutdown) must not close loops even when loop_closure_enabled is true:
+// only an explicit ~/save_map does. Same lap as above, saved the way the node saves on stop.
+TEST(MapBuilder, StopTimeSaveDoesNotCloseLoopsEvenWhenEnabled) {
+  const auto enable_loop_closure = [](LocalizerParameters& parameters) {
+    parameters.loop_closure.enabled = true;
+    parameters.loop_closure.search.maximum_range_m = 15.0;
+    parameters.loop_closure.search.peaks.score_min = 0.45;
+    parameters.loop_closure.search.peaks.margin_min = 0.1;
+  };
+  const std::string stop_directory = unique_directory("lap_stop_save");
+  const MappingRun stop_save = run_mapping(kLoopCourse, false, -1.0, -1.0, false, 1.03, 1.0, stop_directory,
+                                           -1.0, -1.0, -1.0, {}, enable_loop_closure, false);
+  ASSERT_TRUE(stop_save.is_saved) << stop_save.save_error;
+  EXPECT_EQ(stop_save.loop_closure_count, 0U);
+  EXPECT_TRUE(stop_save.loop_closure_report.empty()) << stop_save.loop_closure_report;
+  EXPECT_TRUE(stop_save.metadata.batch_optimized);
+  EXPECT_EQ(stop_save.metadata.save_stage, MapSaveStage::kFinal);
+  EXPECT_FALSE(stop_save.metadata.loop_closure_count.has_value());
+  std::error_code error;
+  std::filesystem::remove_all(stop_directory, error);
+}
+
+// ---- loop closing failures and repeated saves, with a stand-in for the loop closing (the synthetic courses
+// have no real closure to find). The stand-in adds one loop closure factor between the first and the last
+// keyframe, at the relative pose they already have, so it does not move anything.
+bool add_one_loop_closure(PoseGraph& graph, const std::vector<KeyframeCloud>& keyframes,
+                          std::vector<LoopClosure>& closures, std::string& report) {
+  std::map<int, Eigen::Isometry3d> pose_of_node;
+  for (const BatchPose& pose : graph.batch_poses()) pose_of_node[pose.index] = pose.map_to_base;
+  const int first_node = keyframes.front().node_index;
+  const int last_node = keyframes.back().node_index;
+  LoopClosure closure;
+  closure.target_node_index = first_node;
+  closure.query_node_index = last_node;
+  closure.target_to_query = pose_of_node.at(first_node).inverse() * pose_of_node.at(last_node);
+  graph.add_loop_closure_factor(first_node, last_node, closure.target_to_query, 0.1, 0.01);
+  closures.push_back(closure);
+  report += "stand-in: 1 accepted; ";
+  return true;
+}
+
+Localizer::LoopClosingFunction stand_in_loop_closing(bool should_fail_after_adding) {
+  return [should_fail_after_adding](PoseGraph& graph, const std::vector<KeyframeCloud>& keyframes,
+                                    const LoopClosureParameters&, int, std::vector<LoopClosure>& closures,
+                                    std::string& report, std::string& error) {
+    add_one_loop_closure(graph, keyframes, closures, report);
+    if (!should_fail_after_adding) return true;
+    error = "loop closure detection failed: injected";
+    return false;
+  };
+}
+
+std::string read_whole_file(const std::filesystem::path& file_path) {
+  std::ifstream stream(file_path, std::ios::binary);
+  return std::string(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
+}
+
+std::string read_map_files_as_text(const std::string& directory) {
+  return read_whole_file(std::filesystem::path(directory) / "map.pcd") +
+         read_whole_file(std::filesystem::path(directory) / "trajectory.csv") +
+         read_whole_file(std::filesystem::path(directory) / "map.yaml");
+}
+
+// A save that was not cut short must not be judged by run_mapping's EXPECT_TRUE(is_saved): the tests below
+// check is_saved themselves and so pass a progress callback.
+const MapSaveProgress kIgnoreProgress = [](const std::string&) {};
+
+TEST(MapBuilder, SaveMapWithLoopClosingWritesTheFinalMapWithTheClosureCount) {
+  const std::string directory = unique_directory("save_with_loops");
+  std::size_t factor_count = 0;
+  const MappingRun mapping = run_mapping(
+      kKCourse, true, -1.0, -1.0, true, 1.01, 0.2, directory, -1.0, -1.0, -1.0, kIgnoreProgress, {}, true,
+      [](Localizer& localizer, MapOutputParameters& parameters) {
+        localizer.set_loop_closing_for_test(stand_in_loop_closing(false));
+        parameters.should_close_loops = true;
+      },
+      [&factor_count](Localizer& localizer, const MapOutputParameters&) {
+        factor_count = localizer.loop_closure_factor_count_for_test();
+      });
+  EXPECT_TRUE(mapping.is_saved) << mapping.save_error;
+  EXPECT_EQ(mapping.metadata.save_stage, MapSaveStage::kFinal);
+  ASSERT_TRUE(mapping.metadata.loop_closure_count.has_value());
+  EXPECT_EQ(*mapping.metadata.loop_closure_count, 1);
+  EXPECT_EQ(mapping.loop_closure_count, 1U);
+  EXPECT_EQ(factor_count, 1U);
+  std::error_code error;
+  std::filesystem::remove_all(directory, error);
+}
+
+TEST(MapBuilder, FailedLoopClosingKeepsTheOptimizedMapAndRemovesTheFactorsAgain) {
+  const std::string directory = unique_directory("loop_failure");
+  std::size_t factor_count_after_failure = 99;
+  const MappingRun mapping = run_mapping(
+      kKCourse, true, -1.0, -1.0, true, 1.01, 0.2, directory, -1.0, -1.0, -1.0, kIgnoreProgress, {}, true,
+      [](Localizer& localizer, MapOutputParameters& parameters) {
+        localizer.set_loop_closing_for_test(stand_in_loop_closing(true));
+        parameters.should_close_loops = true;
+      },
+      [&factor_count_after_failure](Localizer& localizer, const MapOutputParameters&) {
+        factor_count_after_failure = localizer.loop_closure_factor_count_for_test();
+      });
+  EXPECT_FALSE(mapping.is_saved);
+  EXPECT_NE(mapping.save_error.find("loop closure"), std::string::npos) << mapping.save_error;
+  EXPECT_EQ(mapping.metadata.save_stage, MapSaveStage::kOptimized);
+  EXPECT_FALSE(mapping.metadata.loop_closure_count.has_value());
+  EXPECT_EQ(factor_count_after_failure, 0U);
+  std::error_code error;
+  std::filesystem::remove_all(directory, error);
+}
+
+TEST(MapBuilder, StopTimeSaveAfterAFailedLoopClosingWritesTheFinalMapWithoutLoops) {
+  const std::string directory = unique_directory("loop_failure_then_stop");
+  std::size_t factor_count = 99;
+  const MappingRun mapping = run_mapping(
+      kKCourse, true, -1.0, -1.0, true, 1.01, 0.2, directory, -1.0, -1.0, -1.0, kIgnoreProgress, {}, true,
+      [](Localizer& localizer, MapOutputParameters& parameters) {
+        localizer.set_loop_closing_for_test(stand_in_loop_closing(true));
+        parameters.should_close_loops = true;
+      },
+      [&factor_count](Localizer& localizer, const MapOutputParameters& first_parameters) {
+        MapOutputParameters stop_parameters = first_parameters;
+        stop_parameters.should_close_loops = false;
+        MapOutputResult stop_result;
+        std::string stop_error;
+        EXPECT_TRUE(localizer.save_map(stop_parameters, stop_result, stop_error)) << stop_error;
+        factor_count = localizer.loop_closure_factor_count_for_test();
+      });
+  EXPECT_FALSE(mapping.is_saved);
+  EXPECT_EQ(mapping.metadata.save_stage, MapSaveStage::kFinal);
+  EXPECT_FALSE(mapping.metadata.loop_closure_count.has_value());
+  EXPECT_EQ(factor_count, 0U);
+  for (const CsvRow& row : mapping.trajectory) EXPECT_TRUE(std::isfinite(row.position_std_m));
+  std::error_code error;
+  std::filesystem::remove_all(directory, error);
+}
+
+TEST(MapBuilder, SecondSaveWithLoopClosingAfterAFailureDoesNotAddTheFactorsTwice) {
+  const std::string directory = unique_directory("loop_failure_then_retry");
+  std::size_t factor_count = 99;
+  const MappingRun mapping = run_mapping(
+      kKCourse, true, -1.0, -1.0, true, 1.01, 0.2, directory, -1.0, -1.0, -1.0, kIgnoreProgress, {}, true,
+      [](Localizer& localizer, MapOutputParameters& parameters) {
+        localizer.set_loop_closing_for_test(stand_in_loop_closing(true));
+        parameters.should_close_loops = true;
+      },
+      [&factor_count](Localizer& localizer, const MapOutputParameters& first_parameters) {
+        localizer.set_loop_closing_for_test(stand_in_loop_closing(false));
+        MapOutputResult retry_result;
+        std::string retry_error;
+        EXPECT_TRUE(localizer.save_map(first_parameters, retry_result, retry_error)) << retry_error;
+        factor_count = localizer.loop_closure_factor_count_for_test();
+      });
+  EXPECT_FALSE(mapping.is_saved);
+  EXPECT_EQ(mapping.metadata.save_stage, MapSaveStage::kFinal);
+  ASSERT_TRUE(mapping.metadata.loop_closure_count.has_value());
+  EXPECT_EQ(*mapping.metadata.loop_closure_count, 1);
+  EXPECT_EQ(factor_count, 1U);
+  std::error_code error;
+  std::filesystem::remove_all(directory, error);
+}
+
+TEST(MapBuilder, StopTimeSaveDoesNotOverwriteAnOptimizedMapWithAPreliminaryOneWhenStageTwoFails) {
+  const std::string directory = unique_directory("no_overwrite");
+  std::string files_before;
+  std::string files_after;
+  bool is_stop_save_saved = true;
+  const MappingRun mapping = run_mapping(
+      kKCourse, true, -1.0, -1.0, true, 1.01, 0.2, directory, -1.0, -1.0, -1.0, kIgnoreProgress, {}, true,
+      [](Localizer& localizer, MapOutputParameters& parameters) {
+        localizer.set_loop_closing_for_test(stand_in_loop_closing(true));
+        parameters.should_close_loops = true;
+      },
+      [&](Localizer& localizer, const MapOutputParameters& first_parameters) {
+        files_before = read_map_files_as_text(directory);
+        localizer.inject_batch_failure_for_test(0);  // the next batch optimisation is stage 2
+        MapOutputParameters stop_parameters = first_parameters;
+        stop_parameters.should_close_loops = false;
+        MapOutputResult stop_result;
+        std::string stop_error;
+        is_stop_save_saved = localizer.save_map(stop_parameters, stop_result, stop_error);
+        files_after = read_map_files_as_text(directory);
+      });
+  EXPECT_FALSE(mapping.is_saved);
+  EXPECT_FALSE(is_stop_save_saved);
+  EXPECT_FALSE(files_before.empty());
+  EXPECT_EQ(files_before, files_after);
+  EXPECT_EQ(mapping.metadata.save_stage, MapSaveStage::kOptimized);
+  std::error_code error;
+  std::filesystem::remove_all(directory, error);
+}
+
+TEST(MapBuilder, SaveMapMessageNamesTheClosuresTheDurationAndTheDirectory) {
+  MapOutputResult result;
+  result.keyframe_count = 1899;
+  result.map_point_count = 1135156;
+  result.loop_closure_count = 6;
+  result.save_duration_s = 191.24;
+  EXPECT_EQ(format_save_map_message(result, "/maps/a", true),
+            "saved 1899 keyframes, 1135156 map points to /maps/a; loop closures: 6; 191.2 s");
+  EXPECT_EQ(format_save_map_message(result, "/maps/a", false),
+            "saved 1899 keyframes, 1135156 map points to /maps/a; loop closures: off; 191.2 s");
+  EXPECT_STREQ(kMapAlreadySavedMessage, "map already saved (no keyframe added since)");
 }
 
 TEST(MapBuilder, TrajectoryCsvHasContractHeaderAndOneRowPerKeyframe) {
@@ -912,6 +1130,30 @@ void make_map_inputs(int keyframe_count, std::vector<KeyframeCloud>& keyframes,
 }
 
 }  // namespace
+
+// A keyframe without a pose does not enter the map, and no keyframes (or no poses) give an empty map.
+TEST(MapBuilder, KeyframesWithoutAPoseAreLeftOutAndNoKeyframesGiveAnEmptyMap) {
+  std::vector<KeyframeCloud> keyframes;
+  std::vector<TrajectoryPoint> trajectory;
+  make_map_inputs(3, keyframes, trajectory);
+  const PointList full_map = build_map_points(keyframes, trajectory, 0.2);
+  ASSERT_EQ(full_map.size(), 3U);
+
+  KeyframeCloud keyframe_without_pose = keyframes.front();
+  keyframe_without_pose.node_index = 1000;
+  for (Eigen::Vector3f& point : keyframe_without_pose.points_in_base) point += Eigen::Vector3f(50.0F, 50.0F, 0.0F);
+  std::vector<KeyframeCloud> keyframes_with_stray = keyframes;
+  keyframes_with_stray.push_back(keyframe_without_pose);
+
+  const PointList map_with_stray = build_map_points(keyframes_with_stray, trajectory, 0.2);
+
+  ASSERT_EQ(map_with_stray.size(), full_map.size());
+  for (std::size_t index = 0; index < full_map.size(); ++index) {
+    EXPECT_TRUE(map_with_stray[index].isApprox(full_map[index])) << "point " << index;
+  }
+  EXPECT_TRUE(build_map_points({}, {}, 0.2).empty());
+  EXPECT_TRUE(build_map_points(keyframes, {}, 0.2).empty());
+}
 
 // Issue #43 D7 (3): a failure while writing must not leave a new map.pcd next to an old map.yaml.
 TEST(MapBuilder, FailedWriteKeepsThePreviousThreeFiles) {

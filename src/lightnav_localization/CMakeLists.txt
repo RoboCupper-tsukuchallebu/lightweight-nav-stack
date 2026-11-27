@@ -108,7 +108,7 @@ if(BUILD_TESTING)
   foreach(test_name pcd_io map_metadata pose_buffer deskew matcher performance pose_graph gps_input
                     corrector state_machine lidar_odometry localizer match_information
                     performance_large initial_alignment global_initialization point_cloud_extraction mapping
-                    visualization loop_closure gyro_yaw)
+                    visualization map_build_allocation loop_closure gyro_yaw)
     add_executable(test_${test_name} test/test_${test_name}.cpp)
     target_link_libraries(test_${test_name} lightnav_localization_core GTest::gtest GTest::gtest_main)
     target_compile_options(test_${test_name} PRIVATE -Wall -Wextra -Werror)

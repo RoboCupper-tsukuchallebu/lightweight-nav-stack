@@ -41,12 +41,14 @@ localization_node:
     # Issue #59, user decision 2026-11-09: accept map-match yaw corrections up to 2.0 rad (code default 0.2 rad
     # rejected correct corrections after wheel slip, so the yaw stayed off).
     map_gate_rotation_rad: 2.0
-    # GNSS input contract (Issue #43 section 4.3, decisions D1, D8, D10). Mapping and localization use the same topic.
-    gps_topic: /rtk/fix_all
+    # GNSS input contract (Issue #43 section 4.3, decisions D8, D10). Mapping and localization use the same topic.
+    # The receiver runs the CLAS firmware again (Issue #88, user decision 2026-11-25): its Float / Fix solution is
+    # on /fix. /rtk/fix_all (RTKLIB with a base station) is not published while the rtk containers are stopped.
+    gps_topic: /fix
     # 1 = SBAS (Float) or better. The single-point solution (status 0) is no GNSS observation: it does not
     # initialise, set the mapping origin or enter the graph, and it is not counted as a rejection.
     gps_min_status: 1
-    # The receiver publishes 5 Hz; the graph takes at most one fix per second (thinned by header.stamp).
+    # The graph takes at most one fix per second (thinned by header.stamp); the CLAS receiver publishes 1 Hz.
     gps_min_interval_s: 1.0
     # With gps_min_status 1 this is reached by a Float fix (sigma 1.0 m from gps_std_m_by_status).
     init_gps_max_std_m: 1.5
