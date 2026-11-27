@@ -265,7 +265,9 @@ MappingRun run_mapping(const Course& course, bool has_pillars,
   result.loop_closure_count = output_result.loop_closure_count;
   result.loop_closure_report = output_result.loop_closure_report;
   // A test that cuts the save short passes a callback and checks is_saved itself.
-  if (!report_progress) EXPECT_TRUE(result.is_saved) << error;
+  if (!report_progress) {
+    EXPECT_TRUE(result.is_saved) << error;
+  }
   result.accepted_gps_factors = localizer.accepted_gps_factor_count();
   result.gps_gate_rejections = localizer.gps_gate_rejection_count();
   result.gps_time_gap_rejections = localizer.gps_time_gap_rejection_count();
