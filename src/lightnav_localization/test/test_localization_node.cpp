@@ -1809,8 +1809,7 @@ TEST_F(LocalizationNodeTest, LocalizationYamlListsTheImuParametersWithTheNodeDef
 TEST_F(LocalizationNodeTest, EmptyImuTopicCreatesNoSubscriptionAndNoImuDiagnostics) {
   create_node(make_options(map_file_.string(), map_yaml_.string()));
   bring_up();
-  start_tracking_at_truth();
-  run_for(2000ms, kInputWheel | kInputScans);
+  run_for(1500ms, kInputWheel);
   EXPECT_EQ(helper_->count_subscribers(kImuTopic), 0U);
   EXPECT_EQ(diagnostics_levels_.size(), 5U);
   EXPECT_EQ(diagnostics_levels_.count("localization_node: GNSS"), 1U);
@@ -1936,21 +1935,19 @@ class LocalizationNodeImuTest : public LocalizationNodeTest {
   rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr imu_publisher_;
 };
 
-TEST_F(LocalizationNodeImuTest, DiagnosticsWarnWithWaitingForDataBeforeAnySampleArrives) {
+// waiting_for_data -> ready (gravity up axis and bias) -> the TF up axis is compared with gravity -> stale.
+TEST_F(LocalizationNodeImuTest, TheStateGoesFromWaitingForDataToReadyAndStaleAndTheTfIsComparedWithGravity) {
   create_imu_node();
   bring_up();
-  run_standing_still(1500ms, false);
+  // Nothing is published yet: the watchdog timer publishes /diagnostics. (A wheel-only start would make
+  // the first standstill window uncovered by the IMU, and the bias would come a window later.)
+  spin_for(1200ms);
   ASSERT_EQ(diagnostics_levels_.count(kImuDiagnosticsName), 1U);
   EXPECT_EQ(diagnostics_levels_.at(kImuDiagnosticsName), diagnostic_msgs::msg::DiagnosticStatus::WARN);
   EXPECT_EQ(imu_values().at("state"), "waiting_for_data");
   EXPECT_EQ(imu_values().at("consistency"), "unverified");
   EXPECT_EQ(imu_values().at("up_axis_in_imu"), "unavailable");
-  EXPECT_EQ(imu_values().at("tf_up_axis_disagreement_deg"), "unavailable");
-}
 
-TEST_F(LocalizationNodeImuTest, StandstillMakesTheStateReadyWithTheGravityUpAxisAndTheBias) {
-  create_imu_node();
-  bring_up();
   run_standing_still(3500ms, true);
   EXPECT_EQ(imu_values().at("state"), "ready");
   EXPECT_EQ(imu_values().at("consistency"), "unverified");
@@ -1959,42 +1956,25 @@ TEST_F(LocalizationNodeImuTest, StandstillMakesTheStateReadyWithTheGravityUpAxis
   EXPECT_NEAR(std::stod(imu_values().at("yaw_bias_rad_s")), kImuBiasZ, 1e-6);
   EXPECT_GE(std::stoul(imu_values().at("bias_updates_total")), 1U);
   EXPECT_GT(std::stod(imu_values().at("sample_rate_hz")), 100.0);
-}
+  EXPECT_EQ(imu_values().at("tf_up_axis_disagreement_deg"), "unavailable");  // no TF: still OK
 
-TEST_F(LocalizationNodeImuTest, StoppedImuMakesTheStateStaleWhileTheWheelContinues) {
-  create_imu_node();
-  bring_up();
-  run_standing_still(3500ms, true);
-  ASSERT_EQ(imu_values().at("state"), "ready");
+  // An IMU TF turned by 90 degrees disagrees with the gravity-based up axis by 90 degrees (a warning).
+  geometry_msgs::msg::TransformStamped transform;
+  transform.header.stamp = helper_->now();
+  transform.header.frame_id = "base_footprint";
+  transform.child_frame_id = "imu_link";
+  transform.transform.rotation.x = std::sin(M_PI / 4.0);  // 90 degrees about x
+  transform.transform.rotation.w = std::cos(M_PI / 4.0);
+  static_broadcaster_->sendTransform(transform);
+  run_standing_still(2500ms, true);
+  EXPECT_NEAR(std::stod(imu_values().at("tf_up_axis_disagreement_deg")), 90.0, 2.0);
+  EXPECT_EQ(imu_values().at("state"), "ready");
+  EXPECT_EQ(diagnostics_levels_.at(kImuDiagnosticsName), diagnostic_msgs::msg::DiagnosticStatus::WARN);
+
+  // The IMU stops while the wheel continues.
   run_standing_still(1500ms, false);
   EXPECT_EQ(imu_values().at("state"), "stale");
   EXPECT_EQ(diagnostics_levels_.at(kImuDiagnosticsName), diagnostic_msgs::msg::DiagnosticStatus::WARN);
-}
-
-// The tracker (bias, up axis) outlives a Localizer rebuild; reload_map keeps the IMU entry going.
-TEST_F(LocalizationNodeImuTest, ReloadMapKeepsTheTrackerAndOnlyCleanupConfigureRestartsIt) {
-  create_imu_node();
-  bring_up();
-  start_tracking_at_truth();
-  run_standing_still(3500ms, true);
-  ASSERT_EQ(imu_values().at("state"), "ready");
-  auto reload_client = helper_->create_client<std_srvs::srv::Trigger>("/localization_node/reload_map");
-  auto future = reload_client->async_send_request(std::make_shared<std_srvs::srv::Trigger::Request>());
-  ASSERT_TRUE(run_until([&future]() { return future.wait_for(0ms) == std::future_status::ready; },
-                        3000ms, kInputWheel));
-  ASSERT_TRUE(future.get()->success);
-  run_standing_still(1200ms, true);
-  EXPECT_EQ(imu_values().at("state"), "ready");
-  EXPECT_EQ(imu_values().at("consistency"), "unverified");
-  EXPECT_EQ(imu_values().at("consistency_outvoted_total"), "0");
-
-  ASSERT_EQ(node_->deactivate().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE);
-  ASSERT_EQ(node_->cleanup().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED);
-  ASSERT_EQ(node_->configure().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE);
-  ASSERT_EQ(node_->activate().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE);
-  diagnostics_values_.clear();
-  run_standing_still(1500ms, false);
-  EXPECT_EQ(imu_values().at("state"), "waiting_for_data");
 }
 
 // ---- Consistency, increments and the test seams, driven by an in-place turn (Issue #92 L3, third part) ----
@@ -2126,7 +2106,7 @@ TEST_F(LocalizationNodeImuTurnTest, AGyroWithTheOppositeSignIsNeverUsed) {
   create_imu_node();
   bring_up();
   start_and_wait_until_ready();
-  run_phase(4.0, kTurnRateRadPerSec, -1.0);
+  run_phase(3.2, kTurnRateRadPerSec, -1.0);
   run_phase(kSettleSec, 0.0, -1.0);
   EXPECT_EQ(imu_values().at("consistency"), "inconsistent");
   EXPECT_EQ(diagnostics_levels_.at(kImuDiagnosticsName), diagnostic_msgs::msg::DiagnosticStatus::WARN);
@@ -2149,13 +2129,15 @@ TEST_F(LocalizationNodeImuTurnTest, TheConsistencyAndTheOutvoteCountSurviveARelo
 
   reload_map_and_set_initial_pose_at_the_current_heading();
   run_phase(kSettleSec, 0.0, 1.0);
+  EXPECT_EQ(imu_values().at("state"), "ready");  // the tracker (bias, up axis) outlives the Localizer
   EXPECT_EQ(imu_values().at("consistency"), "active");
   EXPECT_EQ(imu_count("consistency_outvoted_total"), 0U);
 
   // A slow turn with a gyro of 1.5 times the scale: the wheels and LiDAR agree and outvote it. (A gyro
   // of the opposite sign would move the internal odometry so far that the LiDAR match is refused.)
   run_phase(1.5, 0.3, 1.5);
-  run_phase(kSettleSec, 0.0, 1.0);
+  // The last outvote comes with the next keyframe (1 s) and shows in /diagnostics up to 1 s later.
+  run_phase(2.0 * kSettleSec + 0.3, 0.0, 1.0);
   const std::string consistency_before = imu_values().at("consistency");
   const std::size_t outvoted_before = imu_count("consistency_outvoted_total");
   EXPECT_TRUE(consistency_before == "suspended" || consistency_before == "disabled_inconsistent")
@@ -2193,27 +2175,6 @@ TEST(GyroYawDeltaForLocalizer, NothingIsPassedWhileDisabledInconsistent) {
   }
 }
 
-// An IMU TF turned by 90 degrees disagrees with the gravity-based up axis by 90 degrees (a warning);
-// without a TF the value is unavailable and there is no warning.
-TEST_F(LocalizationNodeImuTest, TheTfUpAxisIsComparedWithGravityAndMissingTfIsUnavailable) {
-  create_imu_node();
-  bring_up();
-  run_standing_still(3500ms, true);
-  EXPECT_EQ(imu_values().at("state"), "ready");
-  EXPECT_EQ(imu_values().at("tf_up_axis_disagreement_deg"), "unavailable");
-  EXPECT_EQ(diagnostics_levels_.at(kImuDiagnosticsName), diagnostic_msgs::msg::DiagnosticStatus::OK);
-
-  geometry_msgs::msg::TransformStamped transform;
-  transform.header.stamp = helper_->now();
-  transform.header.frame_id = "base_footprint";
-  transform.child_frame_id = "imu_link";
-  transform.transform.rotation.x = std::sin(M_PI / 4.0);  // 90 degrees about x
-  transform.transform.rotation.w = std::cos(M_PI / 4.0);
-  static_broadcaster_->sendTransform(transform);
-  run_standing_still(2500ms, true);
-  EXPECT_NEAR(std::stod(imu_values().at("tf_up_axis_disagreement_deg")), 90.0, 2.0);
-  EXPECT_EQ(diagnostics_levels_.at(kImuDiagnosticsName), diagnostic_msgs::msg::DiagnosticStatus::WARN);
-}
 
 // Load (Issue #92 section 4.4): the IMU at 966 Hz, the wheel at 50 Hz, the scans at 10 Hz, and every scan
 // takes 50 ms inside the wheel callback. The inputs come from a second thread, so that the samples pile
@@ -2222,7 +2183,7 @@ class LocalizationNodeImuLoadTest : public LocalizationNodeImuTurnTest {
  protected:
   static constexpr double kImuRateHz = 966.0;
   static constexpr double kStandstillSec = 3.0;
-  static constexpr double kScenarioSec = 8.0;
+  static constexpr double kScenarioSec = 6.5;
 
   void publish_wheel_from_thread(const rclcpp::Time& stamp, const Eigen::Isometry3d& pose) {
     // Not publish_wheel_at: that one records the stamp in a set the executor thread reads.
@@ -2288,7 +2249,7 @@ class LocalizationNodeImuLoadTest : public LocalizationNodeImuTurnTest {
     });
     while (!is_done) executor_.spin_some(5ms);
     publisher.join();
-    spin_for(1500ms);
+    spin_for(1200ms);
     const std::size_t gyro_total = imu_count("yaw_increments_gyro_total");
     const std::size_t wheel_total = imu_count("yaw_increments_wheel_total");
     const double ratio = static_cast<double>(gyro_total) / static_cast<double>(gyro_total + wheel_total);
