@@ -42,16 +42,38 @@ localization_node:
     # rejected correct corrections after wheel slip, so the yaw stayed off).
     map_gate_rotation_rad: 2.0
     # GNSS input contract (Issue #43 section 4.3, decisions D8, D10). Mapping and localization use the same topic.
-    # The receiver runs the CLAS firmware again (Issue #88, user decision 2026-11-25): its Float / Fix solution is
-    # on /fix. /rtk/fix_all (RTKLIB with a base station) is not published while the rtk containers are stopped.
-    gps_topic: /fix
-    # 1 = SBAS (Float) or better. The single-point solution (status 0) is no GNSS observation: it does not
-    # initialise, set the mapping origin or enter the graph, and it is not counted as a rejection.
-    gps_min_status: 1
+    # Issue #93, user decision 2026-11-27: listen to /fix_all. The receiver driver publishes the single-point solution
+    # (status 0) only on /fix_all, and /fix_all also carries the Float / Fix solution, so this one topic is enough.
+    # /fix has Float / Fix only (Issue #88, user decision 2026-11-25: the receiver runs the CLAS firmware).
+    # /rtk/fix_all (RTKLIB with a base station) is not published while the rtk containers are stopped.
+    # The driver notes that /fix_all is for display only: this decision changes that for localization.
+    gps_topic: /fix_all
+    # Issue #93, user decision 2026-11-27: 0 = the single-point solution is used too, for the mapping origin, the
+    # initial alignment and the graph (it enters the graph with sigma 2.0 m from gps_std_m_by_status; decision D8 of
+    # Issue #43 is replaced). gps_topic must be /fix_all for this to take effect: /fix never carries status 0.
+    gps_min_status: 0
     # The graph takes at most one fix per second (thinned by header.stamp); the CLAS receiver publishes 1 Hz.
     gps_min_interval_s: 1.0
-    # With gps_min_status 1 this is reached by a Float fix (sigma 1.0 m from gps_std_m_by_status).
-    init_gps_max_std_m: 1.5
+    # Issue #93, user decision 2026-11-27: 3.0 m (the code default, was 1.5). The single-point solution counts as sigma
+    # 2.0 m from gps_std_m_by_status, so 1.5 would use no fix for the mapping origin or the initial alignment.
+    init_gps_max_std_m: 3.0
+    # Issue #93, user decision 2026-11-27 (value TENTATIVE, K1): the mapping origin and the initial alignment wait
+    # while the std that the receiver reports for a fix is above 10 m (last_error says so). In the recording of
+    # Issue #93 this holds back about the first 3.5 minutes after power-on. 0 = off. The sigma that enters the graph
+    # does not change. A fix without a reported std is not refused by this.
+    init_gps_reported_std_max_m: 10.0
+    # Issue #93, user decision 2026-11-27: weak absolute references on every node. Tilt: "the body is nearly level"
+    # (sigma 0.3 rad), mapping and localization. Height: "the height stays near the first node" (sigma 2.0 m),
+    # mapping only. Without them the height drifted by +-8 m over a 650 m run without GNSS (2026-11-25).
+    absolute_sigma_tilt_rad: 0.3
+    absolute_sigma_z_m: 2.0
+    # Issue #93, user decision 2026-11-27: trust the yaw from the wheels less (sigma grows 0.2 rad per metre; the code
+    # default is 0.01). Outdoors with GNSS only: docker/config/localization_indoor.yaml keeps the default.
+    wheel_sigma_yaw_per_m: 0.2
+    # Issue #93, user decision 2026-11-27: ~/save_map closes loops between stages 2 and 3 of the map save. The stop of
+    # the container does not (its 45 s limit is too short): call save_map before stopping to get a map with loops.
+    # lidar_odom_gate_yaw_rad stays at the code default 0.1 (0.5 made another scene worse).
+    loop_closure_enabled: true
     # Same directory as the map localization reads: back up /data/map before starting mapping.
     map_output_dir: /data/map
     base_frame: base_footprint
