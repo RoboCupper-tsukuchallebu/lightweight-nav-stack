@@ -1048,3 +1048,125 @@ TEST(Localizer, RejectsInvalidSlipWheelRateWindow) {
     EXPECT_THROW(Localizer localizer(parameters, PointList{}, std::nullopt), std::invalid_argument);
   }
 }
+
+// ---- Without a gyro increment the Localizer must behave exactly as before (Issue #92, section 4.1). ----
+namespace {
+
+struct RecordedOutput {
+  Eigen::Isometry3d map_to_base;
+  LocalizationState state;
+  double position_std_m;
+};
+
+struct ExactRunResult {
+  std::vector<RecordedOutput> outputs;
+  std::optional<Eigen::Vector3d> final_position_and_yaw_std;
+  GyroFusionStatus gyro_status;
+};
+
+enum class WheelCall { kTwoArguments, kNoGyroIncrement };
+
+// The 40 m short course (below the 50 m that triggers a prior-map rebuild on another thread).
+// `has_prior_map` false is the mapping mode without GNSS; true is localization with a prior map.
+ExactRunResult run_exactly(bool has_prior_map, WheelCall wheel_call) {
+  const SyntheticWorld world(kShortCourse.centerline(), true);
+  LocalizerParameters parameters;
+  parameters.mapping = !has_prior_map;
+  if (wheel_call == WheelCall::kNoGyroIncrement) {
+    parameters.graph.gyro_noise_density_rad_s_sqrt_hz = 0.5;
+    parameters.graph.gyro_bias_sigma_rad_s = 0.25;
+    parameters.graph.gyro_scale_sigma = 0.3;
+    parameters.gyro_yaw_prediction_enabled = true;
+  }
+  Localizer localizer(parameters, has_prior_map ? world.sample_map(0.2) : PointList{}, std::nullopt);
+  const auto truth_at = [](double time_sec) { return kShortCourse.truth_at(time_sec); };
+  localizer.initialize(truth_at(0.0));
+
+  ExactRunResult result;
+  Eigen::Isometry3d odom = Eigen::Isometry3d::Identity();
+  const int step_count = static_cast<int>(kShortCourse.total_sec() / kDt);
+  const int steps_per_scan = static_cast<int>(0.2 / kDt);
+  for (int step = 0; step <= step_count; ++step) {
+    const double time_sec = step * kDt;
+    if (step > 0) {
+      const Eigen::Isometry3d relative = truth_at(time_sec - kDt).inverse() * truth_at(time_sec);
+      Eigen::Isometry3d drifted = relative;
+      drifted.translation() *= 1.05;
+      drifted.translation().z() = 0.0;
+      drifted.linear() = Eigen::AngleAxisd(std::atan2(relative.rotation()(1, 0), relative.rotation()(0, 0)) +
+                                               relative.translation().norm() * (0.5 * M_PI / 180.0 / 10.0),
+                                           Eigen::Vector3d::UnitZ())
+                             .toRotationMatrix();
+      odom = odom * drifted;
+    }
+    if (step > 0 && step % steps_per_scan == 0 && time_sec >= kScanDuration) {
+      localizer.on_scan(time_sec, world.synthesize_scan(truth_at, time_sec - kScanDuration, kScanDuration, true, 360, 8));
+    }
+    const auto output = wheel_call == WheelCall::kTwoArguments
+        ? localizer.on_wheel_odom(time_sec, odom)
+        : localizer.on_wheel_odom(time_sec, odom, std::nullopt);
+    if (output) result.outputs.push_back({output->map_to_base, output->state, output->position_std_m});
+  }
+  result.final_position_and_yaw_std = localizer.latest_position_and_yaw_std();
+  result.gyro_status = localizer.gyro_fusion_status();
+  return result;
+}
+
+void expect_identical(const ExactRunResult& expected, const ExactRunResult& actual) {
+  ASSERT_EQ(expected.outputs.size(), actual.outputs.size());
+  for (std::size_t index = 0; index < expected.outputs.size(); ++index) {
+    EXPECT_EQ(expected.outputs[index].map_to_base.matrix(), actual.outputs[index].map_to_base.matrix()) << index;
+    EXPECT_EQ(expected.outputs[index].state, actual.outputs[index].state) << index;
+    EXPECT_EQ(expected.outputs[index].position_std_m, actual.outputs[index].position_std_m) << index;
+  }
+  ASSERT_EQ(expected.final_position_and_yaw_std.has_value(), actual.final_position_and_yaw_std.has_value());
+  if (expected.final_position_and_yaw_std) {
+    EXPECT_EQ(*expected.final_position_and_yaw_std, *actual.final_position_and_yaw_std);
+  }
+}
+
+void expect_unchanged_by_missing_gyro_increments(bool has_prior_map) {
+  const ExactRunResult first = run_exactly(has_prior_map, WheelCall::kTwoArguments);
+  const ExactRunResult second = run_exactly(has_prior_map, WheelCall::kTwoArguments);
+  // The run itself must be repeatable, otherwise it cannot be used as the reference.
+  ASSERT_FALSE(first.outputs.empty());
+  expect_identical(first, second);
+  if (::testing::Test::HasFailure()) return;
+  const ExactRunResult without_increment = run_exactly(has_prior_map, WheelCall::kNoGyroIncrement);
+  expect_identical(first, without_increment);
+  EXPECT_EQ(without_increment.gyro_status.rotation_factors_added_total, 0U);
+  EXPECT_EQ(without_increment.gyro_status.yaw_increments_gyro_total, 0U);
+  EXPECT_EQ(without_increment.gyro_status.consistency, GyroConsistencyState::kUnverified);
+}
+
+}  // namespace
+
+TEST(LocalizerGyro, MappingWithoutGnssIsIdenticalWhenNoGyroIncrementIsGiven) {
+  expect_unchanged_by_missing_gyro_increments(false);
+}
+
+TEST(LocalizerGyro, LocalizationWithAPriorMapIsIdenticalWhenNoGyroIncrementIsGiven) {
+  expect_unchanged_by_missing_gyro_increments(true);
+}
+
+TEST(LocalizerGyro, InitializeCarriesOverOnlyActiveAndDisabledInconsistent) {
+  const struct {
+    GyroConsistencyState initial;
+    GyroConsistencyState after_initialize;
+  } cases[] = {
+      {GyroConsistencyState::kUnverified, GyroConsistencyState::kUnverified},
+      {GyroConsistencyState::kActive, GyroConsistencyState::kActive},
+      {GyroConsistencyState::kSuspended, GyroConsistencyState::kActive},
+      {GyroConsistencyState::kDisabledInconsistent, GyroConsistencyState::kDisabledInconsistent},
+  };
+  for (const auto& test_case : cases) {
+    LocalizerParameters parameters;
+    parameters.initial_gyro_consistency = test_case.initial;
+    Localizer localizer(parameters, PointList{}, std::nullopt);
+    EXPECT_EQ(localizer.gyro_fusion_status().consistency, test_case.initial);
+    localizer.initialize(Eigen::Isometry3d::Identity());
+    EXPECT_EQ(localizer.gyro_fusion_status().consistency, test_case.after_initialize);
+    localizer.initialize(Eigen::Isometry3d::Identity());
+    EXPECT_EQ(localizer.gyro_fusion_status().consistency, test_case.after_initialize);
+  }
+}

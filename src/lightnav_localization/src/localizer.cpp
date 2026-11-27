@@ -94,7 +94,8 @@ struct Localizer::Implementation {
         corrector(parameters_in.corrector),
         machine(state_parameters_for(parameters_in)),
         conflict(parameters_in.gps_conflict_window, parameters_in.gps_conflict_ratio),
-        gps_origin(gps_origin_in) {
+        gps_origin(gps_origin_in),
+        gyro_consistency(parameters_in.initial_gyro_consistency) {
     if (!std::isfinite(parameters.lidar_odometry.slip_wheel_rate_window_s) ||
         parameters.lidar_odometry.slip_wheel_rate_window_s <= 0.0) {
       throw std::invalid_argument("lidar odometry slip wheel rate window must be finite and positive");
@@ -145,6 +146,11 @@ struct Localizer::Implementation {
   std::vector<PendingScan> pending_scans;
   std::vector<PendingGps> pending_gps;
   std::function<void(MatchResult&)> map_match_hook;
+  std::function<void(MatchResult&)> lidar_match_hook;
+  std::function<void()> scan_processing_hook;
+  GyroConsistencyState gyro_consistency;
+  // Stays false until a gyro increment is passed: then the wheel pose is used exactly as before.
+  bool has_received_gyro_yaw_delta = false;
   std::string last_error;
   std::string state_error;
   std::string event_error;
@@ -374,6 +380,7 @@ struct Localizer::Implementation {
   }
 
   void process_scan(const PendingScan& pending) {
+    if (scan_processing_hook) scan_processing_hook();
     const auto start = Clock::now();
     struct ScanTimer {
       Implementation& implementation;
@@ -435,6 +442,7 @@ struct Localizer::Implementation {
       // Keep the gate's scan-to-scan wheel distance independent of the optimized prediction.
       const Eigen::Isometry3d scan_relative = invert_isometry(last_scan_odom_for_gate) * *odom_now;
       MatchResult result = lidar.match(cloud, prediction, scan_relative.translation().norm(), wheel_yaw_rate);
+      if (lidar_match_hook) lidar_match_hook(result);
       last_lidar_odom_inlier_ratio = result.inlier_ratio;
       if (result.is_accepted) {
         best = result.target_to_source;
@@ -565,6 +573,11 @@ void Localizer::initialize(const Eigen::Isometry3d& map_to_base) {
   auto fresh = std::make_unique<Implementation>(implementation_->parameters, implementation_->map_points,
                                                 implementation_->gps_origin);
   fresh->map_match_hook = implementation_->map_match_hook;
+  fresh->lidar_match_hook = implementation_->lidar_match_hook;
+  fresh->scan_processing_hook = implementation_->scan_processing_hook;
+  fresh->gyro_consistency = implementation_->gyro_consistency == GyroConsistencyState::kSuspended
+                                ? GyroConsistencyState::kActive
+                                : implementation_->gyro_consistency;
   fresh->requested_initial_pose = map_to_base;
   implementation_ = std::move(fresh);
 }
@@ -587,6 +600,20 @@ void Localizer::on_gps(double stamp_sec, const GpsFix& fix) {
 
 void Localizer::set_map_match_hook(std::function<void(MatchResult&)> hook) {
   implementation_->map_match_hook = std::move(hook);
+}
+
+void Localizer::set_lidar_match_hook_for_test(std::function<void(MatchResult&)> hook) {
+  implementation_->lidar_match_hook = std::move(hook);
+}
+
+void Localizer::set_scan_processing_hook_for_test(std::function<void()> hook) {
+  implementation_->scan_processing_hook = std::move(hook);
+}
+
+GyroFusionStatus Localizer::gyro_fusion_status() const {
+  GyroFusionStatus status;
+  status.consistency = implementation_->gyro_consistency;
+  return status;
 }
 
 LocalizationState Localizer::poll_state(double now_sec) {
@@ -719,9 +746,12 @@ bool Localizer::save_map(const MapOutputParameters& parameters, MapOutputResult&
 }
 
 std::optional<LocalizerOutput> Localizer::on_wheel_odom(double stamp_sec,
-                                                        const Eigen::Isometry3d& odom_to_base) {
+                                                        const Eigen::Isometry3d& odom_to_base,
+                                                        std::optional<double> gyro_yaw_delta_rad) {
   Implementation& self = *implementation_;
   if (!self.requested_initial_pose) return std::nullopt;
+  // The yaw replacement is not built yet: a value is only remembered, the path stays the old one.
+  if (gyro_yaw_delta_rad) self.has_received_gyro_yaw_delta = true;
   if (stamp_sec < self.last_wheel_sec) {
     self.buffer = PoseBuffer();
     self.pending_scans.clear();

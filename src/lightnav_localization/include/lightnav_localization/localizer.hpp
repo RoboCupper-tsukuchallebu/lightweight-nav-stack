@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Eigen/Geometry>
+#include <cstddef>
 #include <deque>
 #include <functional>
 #include <memory>
@@ -11,6 +12,7 @@
 #include "lightnav_localization/corrector.hpp"
 #include "lightnav_localization/deskew.hpp"
 #include "lightnav_localization/gps_input.hpp"
+#include "lightnav_localization/gyro_consistency.hpp"
 #include "lightnav_localization/lidar_odometry.hpp"
 #include "lightnav_localization/loop_closure.hpp"
 #include "lightnav_localization/map_builder.hpp"
@@ -52,6 +54,12 @@ struct LocalizerParameters {
   double keyframe_cloud_voxel_m = 0.25;
   // Mapping only: closes loops in the batch optimisation of save_map().
   LoopClosureParameters loop_closure;
+  // Replace the wheel yaw increments by the gyro ones while the gyro is verified (Issue #92). When false
+  // the gyro only adds rotation factors. Has no effect until an increment is passed to on_wheel_odom.
+  bool gyro_yaw_prediction_enabled = true;
+  // State to start from: the node passes the remembered kActive or kDisabledInconsistent here (anything
+  // else starts from kUnverified).
+  GyroConsistencyState initial_gyro_consistency = GyroConsistencyState::kUnverified;
 };
 
 struct LocalizerOutput {
@@ -73,6 +81,23 @@ struct MapMatchStatistics {
   double last_gate_scale = 1.0;
 };
 
+// Read-only view of the gyro yaw fusion for /diagnostics and tests.
+struct GyroFusionStatus {
+  GyroConsistencyState consistency = GyroConsistencyState::kUnverified;
+  bool is_inconsistent_warning = false;  // still kUnverified after three rejected checks
+  std::size_t consistency_confirmed_total = 0;
+  std::size_t consistency_outvoted_total = 0;
+  std::size_t consistency_rejected_total = 0;
+  std::optional<Eigen::Vector3d> last_yaw_deltas_rad;    // wheel, gyro, lidar (NaN without lidar)
+  std::optional<Eigen::Vector3d> verification_sums_rad;  // W, G, L; only while kUnverified / kSuspended
+  std::size_t yaw_increments_gyro_total = 0;
+  std::size_t yaw_increments_wheel_total = 0;
+  std::size_t rotation_factors_added_total = 0;
+  std::size_t rotation_factors_skipped_total = 0;
+  std::size_t slip_detected_total = 0;
+  double slip_max_rad = 0.0;
+};
+
 struct ScanTimeStatistics {
   std::size_t count = 0;
   double total_ms = 0.0;
@@ -91,12 +116,16 @@ class Localizer {
             const std::optional<GpsOrigin>& gps_origin);
   ~Localizer();
 
-  // Starts (or restarts after LOST) from this pose, discarding graph, queues and sub-map.
+  // Starts (or restarts after LOST) from this pose, discarding graph, queues and sub-map. The gyro
+  // consistency state is carried over: kActive and kDisabledInconsistent stay, kSuspended becomes kActive.
   void initialize(const Eigen::Isometry3d& map_to_base);
 
   // Output for this wheel sample (nullopt while the state withholds odom). Also drains queued
-  // scans/GPS that the odometry now covers.
-  std::optional<LocalizerOutput> on_wheel_odom(double stamp_sec, const Eigen::Isometry3d& odom_to_base);
+  // scans/GPS that the odometry now covers. `gyro_yaw_delta_rad` is the gyro yaw change from the
+  // previous wheel sample to this one; nullopt means "no increment for this sample". A Localizer that
+  // has never received a value takes exactly the same path as before the gyro was introduced.
+  std::optional<LocalizerOutput> on_wheel_odom(double stamp_sec, const Eigen::Isometry3d& odom_to_base,
+                                               std::optional<double> gyro_yaw_delta_rad = std::nullopt);
   // Queued until wheel odometry covers the end of the scan (stamp + largest time offset).
   void on_scan(double header_stamp_sec, std::vector<TimedPoint> scan);
   void on_gps(double stamp_sec, const GpsFix& fix);
@@ -140,6 +169,12 @@ class Localizer {
   double last_absolute_observation_stamp_sec() const;
   // Test seam: may alter a prior-map match result before the gate (e.g. inject a false convergence).
   void set_map_match_hook(std::function<void(MatchResult&)> hook);
+  // Test seams like set_map_match_hook; both survive initialize().
+  // May alter the LiDAR odometry match result before it is used.
+  void set_lidar_match_hook_for_test(std::function<void(MatchResult&)> hook);
+  // Called at the very start of scan processing (to delay it).
+  void set_scan_processing_hook_for_test(std::function<void()> hook);
+  GyroFusionStatus gyro_fusion_status() const;
 
   // Mapping support. Only meaningful when LocalizerParameters::mapping is true.
   const std::vector<KeyframeCloud>& mapping_keyframes() const;
