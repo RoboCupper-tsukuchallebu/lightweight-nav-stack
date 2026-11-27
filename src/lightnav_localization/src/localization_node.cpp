@@ -42,7 +42,9 @@ constexpr double kDefaultWatchdogPeriodSec = 0.02;
 constexpr double kDiagnosticsPeriodSec = 1.0;
 constexpr double kScanMaximumWarnMs = 100.0;
 constexpr double kScanMeanErrorMs = 150.0;
-constexpr double kKilobytesPerMegabyte = 1024.0;
+#ifdef __linux__
+constexpr double kKilobytesPerMegabyte = 1024.0;  // only read_memory_rss_mb (Linux) uses it
+#endif
 constexpr int kLowestNavSatStatus = -1;   // STATUS_NO_FIX
 constexpr int kHighestNavSatStatus = 2;   // STATUS_GBAS_FIX
 constexpr std::size_t kMaxPendingScans = 20;
