@@ -1244,6 +1244,7 @@ struct GyroRunOptions {
   GyroConsistencyState initial_state = GyroConsistencyState::kActive;
   bool is_prediction_enabled = true;
   double wheel_yaw_scale = kTurnYawScale;
+  double gyro_yaw_scale = 1.0;
   int missing_gyro_every = 0;  // every n-th wheel sample comes without a gyro increment
   bool is_lidar_rejected = true;
 };
@@ -1278,7 +1279,7 @@ GyroRunResult run_with_gyro(const GyroRunOptions& options) {
       const double true_yaw = std::atan2(relative.rotation()(1, 0), relative.rotation()(0, 0));
       odom = odom * planar_step(relative.translation().norm(), true_yaw * options.wheel_yaw_scale);
       const bool is_missing = options.missing_gyro_every > 0 && step % options.missing_gyro_every == 0;
-      if (!is_missing) gyro_increment = true_yaw;
+      if (!is_missing) gyro_increment = true_yaw * options.gyro_yaw_scale;
     }
     if (step > 0 && step % static_cast<int>(0.2 / kDt) == 0 && time_sec >= kScanDuration) {
       localizer.on_scan(time_sec, world.synthesize_scan(truth_at, time_sec - kScanDuration, kScanDuration, true, 360, 8));
@@ -1293,7 +1294,7 @@ GyroRunResult run_with_gyro(const GyroRunOptions& options) {
 
 TEST(LocalizerGyro, ActiveGyroKeepsTheHeadingWhenTheWheelOverReportsTheTurn) {
   GyroRunOptions without_gyro_use;
-  without_gyro_use.initial_state = GyroConsistencyState::kUnverified;
+  without_gyro_use.initial_state = GyroConsistencyState::kDisabledInconsistent;  // the gyro stays unused
   const GyroRunResult wheel_only = run_with_gyro(without_gyro_use);
   EXPECT_GT(wheel_only.final_yaw_error_deg, 20.0);  // 40 % of a 90 degree turn
   EXPECT_EQ(wheel_only.status.rotation_factors_added_total, 0U);
@@ -1341,4 +1342,226 @@ TEST(LocalizerGyro, PredictionCanBeSwitchedOffWhileRotationFactorsStay) {
   EXPECT_GT(result.status.rotation_factors_added_total, 0U);
   EXPECT_EQ(result.status.yaw_increments_gyro_total, 0U);
   EXPECT_LT(result.final_yaw_error_deg, 10.0);  // the factors alone pull the 40 % error down a lot
+}
+
+// ---- The consistency judge (Issue #92, section 3.3 step 3). ROS and GTSAM free. ----
+namespace {
+
+GyroIntervalObservation covered_interval(double wheel_rad, double gyro_rad,
+                                         std::optional<double> lidar_rad = std::nullopt, double duration_sec = 1.0) {
+  GyroIntervalObservation interval;
+  interval.wheel_yaw_rad = wheel_rad;
+  interval.gyro_yaw_rad = gyro_rad;
+  interval.lidar_yaw_rad = lidar_rad;
+  interval.duration_sec = duration_sec;
+  interval.is_gyro_covered = true;
+  return interval;
+}
+
+// Feeds `count` identical intervals and returns the last result.
+GyroConsistencyResult feed(GyroConsistencyJudge& judge, int count, const GyroIntervalObservation& interval) {
+  GyroConsistencyResult result;
+  for (int repetition = 0; repetition < count; ++repetition) {
+    result = judge.observe_interval(interval);
+    if (result.event != GyroConsistencyEvent::kNone) break;
+  }
+  return result;
+}
+
+// A judge that has been confirmed once (by a turn that LiDAR measured).
+GyroConsistencyJudge active_judge() {
+  return GyroConsistencyJudge(GyroConsistencyState::kActive);
+}
+
+}  // namespace
+
+TEST(GyroConsistencyJudge, SlowTurnIsConfirmedByAccumulatingTheRotation) {
+  GyroConsistencyJudge judge;
+  // 0.05 rad per interval never reaches 0.2 rad alone; the sum does at the fifth interval.
+  const GyroConsistencyResult result = feed(judge, 10, covered_interval(0.05, 0.05));
+  EXPECT_EQ(result.event, GyroConsistencyEvent::kConfirmed);
+  EXPECT_EQ(judge.state(), GyroConsistencyState::kActive);
+  EXPECT_NEAR(result.verified_gyro_yaw_rad, 0.25, 1e-12);
+  EXPECT_NEAR(result.verified_duration_sec, 5.0, 1e-12);
+  EXPECT_EQ(judge.confirmed_total(), 1U);
+  EXPECT_FALSE(judge.is_accumulating());
+}
+
+TEST(GyroConsistencyJudge, NothingIsDecidedBelowTheRotationThreshold) {
+  GyroConsistencyJudge judge;
+  EXPECT_EQ(feed(judge, 4, covered_interval(0.05, 0.05)).event, GyroConsistencyEvent::kNone);
+  EXPECT_EQ(judge.state(), GyroConsistencyState::kUnverified);
+  EXPECT_NEAR(judge.sums().wheel_rad, 0.2, 1e-12);
+  EXPECT_NEAR(judge.sums().gyro_rad, 0.2, 1e-12);
+}
+
+TEST(GyroConsistencyJudge, WithoutLidarTheGyroMustRoughlyMatchTheWheel) {
+  const auto verdict_for = [](double wheel_rad, double gyro_rad) {
+    GyroConsistencyJudge judge;
+    return judge.observe_interval(covered_interval(wheel_rad, gyro_rad)).event;
+  };
+  EXPECT_EQ(verdict_for(0.3, 0.3), GyroConsistencyEvent::kConfirmed);
+  EXPECT_EQ(verdict_for(0.3, 0.3 * 1.4), GyroConsistencyEvent::kConfirmed);
+  EXPECT_EQ(verdict_for(0.3, 0.3 * 0.5), GyroConsistencyEvent::kConfirmed);
+  EXPECT_EQ(verdict_for(0.3, -0.3), GyroConsistencyEvent::kRejected);        // sign reversed
+  EXPECT_EQ(verdict_for(0.3, 0.001), GyroConsistencyEvent::kRejected);       // another axis
+  EXPECT_EQ(verdict_for(0.3, 0.3 * 57.3), GyroConsistencyEvent::kRejected);  // degrees instead of radians
+  EXPECT_EQ(verdict_for(0.3, 0.3 * 2.0), GyroConsistencyEvent::kRejected);   // a known limit: ratio above 1.8
+  EXPECT_EQ(verdict_for(0.3, 0.3 * 0.3), GyroConsistencyEvent::kRejected);
+}
+
+TEST(GyroConsistencyJudge, WithLidarTheGyroMustAgreeWithLidarEvenWhenTheWheelAgreesWithTheGyro) {
+  // The wheel over-reports by 2x and so does a gyro of the wrong scale; LiDAR says 0.3.
+  GyroConsistencyJudge wrong_scale;
+  EXPECT_EQ(wrong_scale.observe_interval(covered_interval(0.6, 0.6, 0.3)).event, GyroConsistencyEvent::kRejected);
+  EXPECT_EQ(wrong_scale.state(), GyroConsistencyState::kUnverified);
+  GyroConsistencyJudge correct_gyro;
+  EXPECT_EQ(correct_gyro.observe_interval(covered_interval(0.6, 0.3, 0.3)).event, GyroConsistencyEvent::kConfirmed);
+}
+
+TEST(GyroConsistencyJudge, AgreementIsTheLargerOfFiftyMilliradAndTwentyPercent) {
+  // |L| = 0.5: tolerance 0.1.  |L| = 0.2 ... the floor 0.05 applies below |b| = 0.25.
+  const auto verdict_for = [](double lidar_rad, double gyro_rad) {
+    GyroConsistencyJudge judge;
+    return judge.observe_interval(covered_interval(lidar_rad, gyro_rad, lidar_rad)).event;
+  };
+  EXPECT_EQ(verdict_for(0.5, 0.59), GyroConsistencyEvent::kConfirmed);
+  EXPECT_EQ(verdict_for(0.5, 0.41), GyroConsistencyEvent::kConfirmed);
+  EXPECT_EQ(verdict_for(0.5, 0.61), GyroConsistencyEvent::kRejected);
+  EXPECT_EQ(verdict_for(0.5, 0.39), GyroConsistencyEvent::kRejected);
+  EXPECT_EQ(verdict_for(0.21, 0.259), GyroConsistencyEvent::kConfirmed);  // floor: 0.05
+  EXPECT_EQ(verdict_for(0.21, 0.27), GyroConsistencyEvent::kRejected);
+}
+
+TEST(GyroConsistencyJudge, AccumulationStartsOverAfter20SecondsAndOnUncoveredIntervals) {
+  GyroConsistencyJudge judge;
+  // 8 s intervals turning 0.05 rad: after 24 s the sums are dropped before the threshold is reached.
+  EXPECT_EQ(feed(judge, 3, covered_interval(0.05, 0.05, std::nullopt, 8.0)).event, GyroConsistencyEvent::kNone);
+  EXPECT_FALSE(judge.is_accumulating());
+  EXPECT_EQ(judge.sums().wheel_rad, 0.0);
+  EXPECT_EQ(judge.state(), GyroConsistencyState::kUnverified);
+
+  feed(judge, 2, covered_interval(0.05, 0.05));
+  EXPECT_TRUE(judge.is_accumulating());
+  GyroIntervalObservation uncovered = covered_interval(0.05, 0.05);
+  uncovered.is_gyro_covered = false;
+  EXPECT_EQ(judge.observe_interval(uncovered).event, GyroConsistencyEvent::kNone);
+  EXPECT_FALSE(judge.is_accumulating());
+}
+
+TEST(GyroConsistencyJudge, TurnsWithoutLidarInSomeIntervalsStillNeedTheLidarOnesToAgree) {
+  GyroConsistencyJudge judge;
+  // LiDAR saw 0.1 rad where the gyro said 0.3; the wheel-only interval alone would pass.
+  judge.observe_interval(covered_interval(0.1, 0.3, 0.1));
+  EXPECT_EQ(judge.state(), GyroConsistencyState::kUnverified);
+  EXPECT_EQ(judge.rejected_total(), 0U);  // the sums are still below 0.2 rad
+  const GyroConsistencyResult result = judge.observe_interval(covered_interval(0.2, 0.2));
+  EXPECT_EQ(result.event, GyroConsistencyEvent::kRejected);  // G_l = 0.3 does not agree with L = 0.1
+}
+
+TEST(GyroConsistencyJudge, ThreeRejectionsRaiseTheWarningAndALaterConfirmationClearsIt) {
+  GyroConsistencyJudge judge;
+  for (int rejection = 0; rejection < 3; ++rejection) {
+    EXPECT_FALSE(judge.is_inconsistent_warning());
+    EXPECT_EQ(judge.observe_interval(covered_interval(0.3, -0.3)).event, GyroConsistencyEvent::kRejected);
+  }
+  EXPECT_TRUE(judge.is_inconsistent_warning());
+  EXPECT_EQ(judge.state(), GyroConsistencyState::kUnverified);
+  EXPECT_EQ(judge.rejected_total(), 3U);
+  EXPECT_EQ(judge.observe_interval(covered_interval(0.3, 0.3)).event, GyroConsistencyEvent::kConfirmed);
+  EXPECT_FALSE(judge.is_inconsistent_warning());
+  EXPECT_EQ(judge.state(), GyroConsistencyState::kActive);
+}
+
+TEST(GyroConsistencyJudge, ActiveGyroIsOnlyStoppedWhenWheelAndLidarAgreeAgainstIt) {
+  GyroConsistencyJudge judge = active_judge();
+  // The wheel slipped (disagrees with LiDAR) and the gyro agrees with LiDAR: nothing happens.
+  EXPECT_EQ(judge.observe_interval(covered_interval(0.6, 0.3, 0.3)).event, GyroConsistencyEvent::kNone);
+  // Both the wheel and the gyro disagree with LiDAR: no majority.
+  EXPECT_EQ(judge.observe_interval(covered_interval(0.6, 0.9, 0.3)).event, GyroConsistencyEvent::kNone);
+  // Wheel without a LiDAR value: a wheel alone never stops the gyro (the wheel may spin in place).
+  EXPECT_EQ(judge.observe_interval(covered_interval(0.0, 0.5)).event, GyroConsistencyEvent::kNone);
+  EXPECT_EQ(judge.state(), GyroConsistencyState::kActive);
+  // An interval the gyro did not cover cannot outvote it.
+  GyroIntervalObservation uncovered = covered_interval(0.3, 0.9, 0.3);
+  uncovered.is_gyro_covered = false;
+  EXPECT_EQ(judge.observe_interval(uncovered).event, GyroConsistencyEvent::kNone);
+  // Wheel and LiDAR agree, the gyro does not.
+  EXPECT_EQ(judge.observe_interval(covered_interval(0.3, 0.6, 0.3)).event, GyroConsistencyEvent::kOutvoted);
+  EXPECT_EQ(judge.state(), GyroConsistencyState::kSuspended);
+  EXPECT_EQ(judge.outvoted_total(), 1U);
+}
+
+TEST(GyroConsistencyJudge, SuspendedGyroComesBackOnlyThroughLidar) {
+  GyroConsistencyJudge judge = active_judge();
+  ASSERT_EQ(judge.observe_interval(covered_interval(0.3, 0.6, 0.3)).event, GyroConsistencyEvent::kOutvoted);
+  // Wheel and gyro agree with each other without LiDAR: not enough after a suspension.
+  EXPECT_EQ(feed(judge, 5, covered_interval(0.3, 0.3)).event, GyroConsistencyEvent::kNone);
+  EXPECT_EQ(judge.state(), GyroConsistencyState::kSuspended);
+  EXPECT_EQ(judge.observe_interval(covered_interval(0.3, 0.3, 0.3)).event, GyroConsistencyEvent::kConfirmed);
+  EXPECT_EQ(judge.state(), GyroConsistencyState::kActive);
+}
+
+TEST(GyroConsistencyJudge, ThirdOutvoteDisablesTheGyroForGood) {
+  GyroConsistencyJudge judge = active_judge();
+  for (int round = 0; round < 2; ++round) {
+    ASSERT_EQ(judge.observe_interval(covered_interval(0.3, 0.6, 0.3)).event, GyroConsistencyEvent::kOutvoted);
+    ASSERT_EQ(judge.state(), GyroConsistencyState::kSuspended);
+    ASSERT_EQ(judge.observe_interval(covered_interval(0.3, 0.3, 0.3)).event, GyroConsistencyEvent::kConfirmed);
+  }
+  EXPECT_EQ(judge.observe_interval(covered_interval(0.3, 0.6, 0.3)).event, GyroConsistencyEvent::kOutvoted);
+  EXPECT_EQ(judge.state(), GyroConsistencyState::kDisabledInconsistent);
+  EXPECT_EQ(judge.outvoted_total(), 3U);
+  EXPECT_EQ(judge.observe_interval(covered_interval(0.3, 0.3, 0.3)).event, GyroConsistencyEvent::kNone);
+  EXPECT_EQ(judge.state(), GyroConsistencyState::kDisabledInconsistent);
+}
+
+TEST(GyroConsistencyJudge, SumsOfTheVerificationAreReportedPerKind) {
+  GyroConsistencyJudge judge;
+  judge.observe_interval(covered_interval(0.05, 0.04, 0.045));
+  judge.observe_interval(covered_interval(0.02, 0.03));
+  EXPECT_NEAR(judge.sums().wheel_rad, 0.07, 1e-12);
+  EXPECT_NEAR(judge.sums().gyro_rad, 0.07, 1e-12);
+  EXPECT_NEAR(judge.sums().lidar_rad, 0.045, 1e-12);
+  EXPECT_NEAR(judge.sums().gyro_on_lidar_rad, 0.04, 1e-12);
+  EXPECT_TRUE(judge.sums().has_interval_without_lidar);
+}
+
+// ---- The judge inside the Localizer ----
+TEST(LocalizerGyro, AccurateGyroIsConfirmedDuringTheFirstTurnAndCorrectsTheWholeTurn) {
+  GyroRunOptions options;
+  options.initial_state = GyroConsistencyState::kUnverified;
+  const GyroRunResult result = run_with_gyro(options);  // the wheel over-reports the turn by 40 %
+  EXPECT_EQ(result.status.consistency, GyroConsistencyState::kActive);
+  EXPECT_GE(result.status.consistency_confirmed_total, 1U);
+  EXPECT_FALSE(result.status.is_inconsistent_warning);
+  EXPECT_GT(result.status.rotation_factors_added_total, 0U);
+  EXPECT_FALSE(result.status.verification_sums_rad.has_value());  // only while verifying
+  // Confirmed on the first keyframe past 0.2 rad of the turn; the span factor repairs that part.
+  EXPECT_LT(result.final_yaw_error_deg, 3.0);
+}
+
+TEST(LocalizerGyro, GyroWithAReversedSignIsNeverUsed) {
+  GyroRunOptions reversed;
+  reversed.initial_state = GyroConsistencyState::kUnverified;
+  reversed.wheel_yaw_scale = 1.0;
+  reversed.gyro_yaw_scale = -1.0;
+  const GyroRunResult result = run_with_gyro(reversed);
+  EXPECT_EQ(result.status.consistency, GyroConsistencyState::kUnverified);
+  EXPECT_GE(result.status.consistency_rejected_total, 1U);
+  EXPECT_EQ(result.status.consistency_confirmed_total, 0U);
+  EXPECT_EQ(result.status.rotation_factors_added_total, 0U);
+  EXPECT_EQ(result.status.yaw_increments_gyro_total, 0U);
+  EXPECT_LT(result.final_yaw_error_deg, 5.0);  // the wheel alone (accurate here) still holds the heading
+  ASSERT_TRUE(result.status.verification_sums_rad.has_value());
+}
+
+TEST(LocalizerGyro, NoGyroIncrementsLeaveTheJudgeUntouched) {
+  GyroRunOptions no_gyro;
+  no_gyro.initial_state = GyroConsistencyState::kUnverified;
+  no_gyro.missing_gyro_every = 1;
+  const GyroRunResult result = run_with_gyro(no_gyro);
+  EXPECT_EQ(result.status.consistency, GyroConsistencyState::kUnverified);
+  EXPECT_EQ(result.status.consistency_rejected_total, 0U);
+  EXPECT_EQ(result.status.consistency_confirmed_total, 0U);
 }

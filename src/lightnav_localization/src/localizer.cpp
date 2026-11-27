@@ -126,7 +126,7 @@ struct Localizer::Implementation {
         machine(state_parameters_for(parameters_in)),
         conflict(parameters_in.gps_conflict_window, parameters_in.gps_conflict_ratio),
         gps_origin(gps_origin_in),
-        gyro_consistency(parameters_in.initial_gyro_consistency) {
+        gyro_judge(parameters_in.initial_gyro_consistency) {
     if (!std::isfinite(parameters.lidar_odometry.slip_wheel_rate_window_s) ||
         parameters.lidar_odometry.slip_wheel_rate_window_s <= 0.0) {
       throw std::invalid_argument("lidar odometry slip wheel rate window must be finite and positive");
@@ -180,7 +180,9 @@ struct Localizer::Implementation {
   std::function<void(MatchResult&)> map_match_hook;
   std::function<void(MatchResult&)> lidar_match_hook;
   std::function<void()> scan_processing_hook;
-  GyroConsistencyState gyro_consistency;
+  GyroConsistencyJudge gyro_judge;
+  // Where the current verification span of the judge began (the node it started from).
+  NodeRecord verification_start_node{0, 0.0};
   // Stays false until a gyro increment is passed: then the wheel pose is used exactly as before.
   bool has_received_gyro_yaw_delta = false;
   // True once a yaw replacement happened since the last reset. Until then the internal odometry IS the
@@ -244,6 +246,7 @@ struct Localizer::Implementation {
       const Eigen::Isometry3d current = pose_cache.at(nodes.back().index);
       const NodeRecord latest_node = nodes.back();
       gps_factors_per_keyframe.clear();
+      gyro_judge.restart_accumulation();  // the nodes of the verification span are gone
       if (parameters.mapping) {
         // Keep the retained factors and keyframe clouds: only the fixed-lag window is rebuilt,
         // and the new window continues with a fresh node index.
@@ -425,7 +428,7 @@ struct Localizer::Implementation {
     const bool has_gyro_value = gyro_yaw_delta_rad && std::isfinite(*gyro_yaw_delta_rad);
     const Eigen::Isometry3d raw_increment = invert_isometry(raw_wheel_pose) * wheel_pose;
     const double raw_yaw = yaw_of(raw_increment);
-    const bool can_replace = gyro_consistency == GyroConsistencyState::kActive &&
+    const bool can_replace = gyro_judge.state() == GyroConsistencyState::kActive &&
                              parameters.gyro_yaw_prediction_enabled;
     if (can_replace && has_gyro_value) {
       Eigen::Isometry3d replaced = raw_increment;
@@ -566,11 +569,24 @@ struct Localizer::Implementation {
         const Eigen::Matrix3d difference = wheel_relative.rotation().transpose() * lidar_relative.rotation();
         yaw_disagreement = std::abs(std::atan2(difference(1, 0), difference(0, 0)));
       }
-      // Gyro rotation factor (only while the gyro is verified and covers the interval).
+      // Gyro consistency check, then the rotation factor (only while the gyro is verified and covers the
+      // interval). The check sees this interval first so that the keyframe that confirms the gyro
+      // already carries its factor.
       const WheelYawInterval interval = summarize_wheel_samples(last_keyframe_sec, pending.stamp);
-      const bool is_gyro_active = gyro_consistency == GyroConsistencyState::kActive;
-      const bool should_add_rotation_factor = is_gyro_active && interval.is_sufficiently_covered();
       const double gyro_yaw_rad = interval.measured_yaw_rad();
+      const std::optional<double> lidar_yaw_rad = lidar_result
+          ? std::optional<double>(yaw_of(invert_isometry(*last_pose) * best)) : std::nullopt;
+      if (!gyro_judge.is_accumulating()) verification_start_node = last;
+      const GyroConsistencyResult verdict = gyro_judge.observe_interval(
+          {interval.raw_wheel_yaw_sum_rad, gyro_yaw_rad, lidar_yaw_rad, interval.total_sec,
+           interval.is_sufficiently_covered()});
+      if (interval.is_sufficiently_covered()) {
+        gyro_status.last_yaw_deltas_rad = Eigen::Vector3d(
+            interval.raw_wheel_yaw_sum_rad, gyro_yaw_rad,
+            lidar_yaw_rad ? *lidar_yaw_rad : std::numeric_limits<double>::quiet_NaN());
+      }
+      const bool is_gyro_active = gyro_judge.state() == GyroConsistencyState::kActive;
+      const bool should_add_rotation_factor = is_gyro_active && interval.is_sufficiently_covered();
       const double wheel_gyro_difference_rad =
           should_add_rotation_factor ? std::abs(interval.raw_wheel_yaw_sum_rad - gyro_yaw_rad) : 0.0;
       if (is_gyro_active && !should_add_rotation_factor) ++gyro_status.rotation_factors_skipped_total;
@@ -582,14 +598,25 @@ struct Localizer::Implementation {
             information_from_hessian(lidar_result->information, parameters.lidar_odometry_information));
       }
       if (should_add_rotation_factor) {
-        const double sigma_rad = gyro_yaw_sigma(parameters.graph, interval.total_sec, gyro_yaw_rad,
-                                                std::abs(interval.uncovered_wheel_yaw_sum_rad));
-        graph->add_rotation_factor(last.index, index, gyro_yaw_rad, sigma_rad);
+        // The keyframe that confirmed the gyro adds one factor over the whole verification span, which
+        // also corrects what slipped while the gyro was still being checked.
+        int from_index = last.index;
+        double measured_yaw_rad = gyro_yaw_rad;
+        double span_sec = interval.total_sec;
+        double uncovered_wheel_yaw_rad = std::abs(interval.uncovered_wheel_yaw_sum_rad);
+        const bool is_span_start_in_window =
+            std::any_of(nodes.begin(), nodes.end(),
+                        [&](const NodeRecord& node) { return node.index == verification_start_node.index; });
+        if (verdict.event == GyroConsistencyEvent::kConfirmed && is_span_start_in_window) {
+          from_index = verification_start_node.index;
+          measured_yaw_rad = verdict.verified_gyro_yaw_rad;
+          span_sec = verdict.verified_duration_sec;
+          uncovered_wheel_yaw_rad = 0.0;
+        }
+        const double sigma_rad =
+            gyro_yaw_sigma(parameters.graph, span_sec, measured_yaw_rad, uncovered_wheel_yaw_rad);
+        graph->add_rotation_factor(from_index, index, measured_yaw_rad, sigma_rad);
         ++gyro_status.rotation_factors_added_total;
-        const double lidar_yaw_rad = lidar_result
-            ? yaw_of(invert_isometry(*last_pose) * best) : std::numeric_limits<double>::quiet_NaN();
-        gyro_status.last_yaw_deltas_rad =
-            Eigen::Vector3d(interval.raw_wheel_yaw_sum_rad, gyro_yaw_rad, lidar_yaw_rad);
         if (wheel_gyro_difference_rad > kSlipDifferenceRad) ++gyro_status.slip_detected_total;
         gyro_status.slip_max_rad = std::max(gyro_status.slip_max_rad, wheel_gyro_difference_rad);
       }
@@ -700,9 +727,9 @@ void Localizer::initialize(const Eigen::Isometry3d& map_to_base) {
   fresh->map_match_hook = implementation_->map_match_hook;
   fresh->lidar_match_hook = implementation_->lidar_match_hook;
   fresh->scan_processing_hook = implementation_->scan_processing_hook;
-  fresh->gyro_consistency = implementation_->gyro_consistency == GyroConsistencyState::kSuspended
-                                ? GyroConsistencyState::kActive
-                                : implementation_->gyro_consistency;
+  const GyroConsistencyState previous_state = implementation_->gyro_judge.state();
+  fresh->gyro_judge = GyroConsistencyJudge(
+      previous_state == GyroConsistencyState::kSuspended ? GyroConsistencyState::kActive : previous_state);
   fresh->requested_initial_pose = map_to_base;
   implementation_ = std::move(fresh);
 }
@@ -737,7 +764,18 @@ void Localizer::set_scan_processing_hook_for_test(std::function<void()> hook) {
 
 GyroFusionStatus Localizer::gyro_fusion_status() const {
   GyroFusionStatus status = implementation_->gyro_status;
-  status.consistency = implementation_->gyro_consistency;
+  const GyroConsistencyJudge& judge = implementation_->gyro_judge;
+  status.consistency = judge.state();
+  status.is_inconsistent_warning = judge.is_inconsistent_warning();
+  status.consistency_confirmed_total = judge.confirmed_total();
+  status.consistency_outvoted_total = judge.outvoted_total();
+  status.consistency_rejected_total = judge.rejected_total();
+  const bool is_verifying = judge.state() == GyroConsistencyState::kUnverified ||
+                            judge.state() == GyroConsistencyState::kSuspended;
+  if (is_verifying) {
+    const GyroVerificationSums& sums = judge.sums();
+    status.verification_sums_rad = Eigen::Vector3d(sums.wheel_rad, sums.gyro_rad, sums.lidar_rad);
+  }
   return status;
 }
 
