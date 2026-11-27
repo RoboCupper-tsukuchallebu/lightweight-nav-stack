@@ -57,9 +57,10 @@ struct LocalizerParameters {
   // Replace the wheel yaw increments by the gyro ones while the gyro is verified (Issue #92). When false
   // the gyro only adds rotation factors. Has no effect until an increment is passed to on_wheel_odom.
   bool gyro_yaw_prediction_enabled = true;
-  // State to start from: the node passes the remembered kActive or kDisabledInconsistent here (anything
-  // else starts from kUnverified).
+  // State and count of lost votes to start from: the node passes what it remembers (the previous
+  // gyro_fusion_status().consistency and consistency_outvoted_total) when it rebuilds the Localizer.
   GyroConsistencyState initial_gyro_consistency = GyroConsistencyState::kUnverified;
+  std::size_t initial_gyro_outvoted_total = 0;
 };
 
 struct LocalizerOutput {
@@ -117,7 +118,7 @@ class Localizer {
   ~Localizer();
 
   // Starts (or restarts after LOST) from this pose, discarding graph, queues and sub-map. The gyro
-  // consistency state is carried over: kActive and kDisabledInconsistent stay, kSuspended becomes kActive.
+  // consistency state and the count of lost votes are carried over unchanged (all four states).
   void initialize(const Eigen::Isometry3d& map_to_base);
 
   // Output for this wheel sample (nullopt while the state withholds odom). Also drains queued

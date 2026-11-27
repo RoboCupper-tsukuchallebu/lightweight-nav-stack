@@ -107,7 +107,7 @@ struct Localizer::Implementation {
         machine(state_parameters_for(parameters_in)),
         conflict(parameters_in.gps_conflict_window, parameters_in.gps_conflict_ratio),
         gps_origin(gps_origin_in),
-        gyro_judge(parameters_in.initial_gyro_consistency) {
+        gyro_judge(parameters_in.initial_gyro_consistency, parameters_in.initial_gyro_outvoted_total) {
     if (!std::isfinite(parameters.lidar_odometry.slip_wheel_rate_window_s) ||
         parameters.lidar_odometry.slip_wheel_rate_window_s <= 0.0) {
       throw std::invalid_argument("lidar odometry slip wheel rate window must be finite and positive");
@@ -698,9 +698,10 @@ void Localizer::initialize(const Eigen::Isometry3d& map_to_base) {
   fresh->map_match_hook = implementation_->map_match_hook;
   fresh->lidar_match_hook = implementation_->lidar_match_hook;
   fresh->scan_processing_hook = implementation_->scan_processing_hook;
-  const GyroConsistencyState previous_state = implementation_->gyro_judge.state();
-  fresh->gyro_judge = GyroConsistencyJudge(
-      previous_state == GyroConsistencyState::kSuspended ? GyroConsistencyState::kActive : previous_state);
+  // The state and the lost votes stay (a gyro that is wrong stays wrong after a rebuild); the sums and the
+  // other counters start over.
+  fresh->gyro_judge = GyroConsistencyJudge(implementation_->gyro_judge.state(),
+                                           implementation_->gyro_judge.outvoted_total());
   fresh->requested_initial_pose = map_to_base;
   implementation_ = std::move(fresh);
 }

@@ -21,8 +21,10 @@ namespace gyro_consistency_constants {
 constexpr double kAgreementFloorRad = 0.05;      // x agrees with b when |x - b| <= max(0.05, 0.2 |b|)
 constexpr double kAgreementRatio = 0.2;
 constexpr double kVerificationThresholdRad = 0.2;  // a check needs |W| or |L| above this
-constexpr double kMinimumGyroToWheelRatio = 0.4;   // without LiDAR: |G| / |W| must be in this range
-constexpr double kMaximumGyroToWheelRatio = 1.8;
+// Without LiDAR: |G| / |W| must be in this range (version 3.2; narrowed from 0.4 - 1.8 so that a gyro of
+// twice the scale does not pass beside a wheel that over-reports by 1.4). May change with real recordings.
+constexpr double kMinimumGyroToWheelRatio = 0.6;
+constexpr double kMaximumGyroToWheelRatio = 1.2;
 constexpr double kMaximumAccumulationSec = 20.0;
 constexpr double kMinimumGyroCoverageRatio = 0.95;  // share of a keyframe interval the gyro must cover
 constexpr std::size_t kMaximumRejectionsBeforeWarning = 3;
@@ -66,8 +68,14 @@ struct GyroVerificationSums {
 // Decides when the gyro may be used. Fed once per keyframe interval; knows nothing about ROS or GTSAM.
 class GyroConsistencyJudge {
  public:
-  explicit GyroConsistencyJudge(GyroConsistencyState initial_state = GyroConsistencyState::kUnverified)
-      : state_(initial_state) {}
+  // `initial_outvoted_total`: the losses counted before (carried over when a Localizer is rebuilt). Three in
+  // total disable the gyro, so a start with three or more is disabled whatever state was asked for.
+  explicit GyroConsistencyJudge(GyroConsistencyState initial_state = GyroConsistencyState::kUnverified,
+                                std::size_t initial_outvoted_total = 0)
+      : state_(initial_outvoted_total >= gyro_consistency_constants::kMaximumOutvotesBeforeDisabling
+                   ? GyroConsistencyState::kDisabledInconsistent
+                   : initial_state),
+        outvoted_total_(initial_outvoted_total) {}
 
   GyroConsistencyState state() const { return state_; }
   std::size_t confirmed_total() const { return confirmed_total_; }

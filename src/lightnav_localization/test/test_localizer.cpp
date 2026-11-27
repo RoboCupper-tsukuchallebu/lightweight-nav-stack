@@ -1231,25 +1231,21 @@ TEST(LocalizerGyro, LocalizationWithAPriorMapIsIdenticalWhenNoGyroIncrementIsGiv
   expect_unchanged_by_missing_gyro_increments(true);
 }
 
-TEST(LocalizerGyro, InitializeCarriesOverOnlyActiveAndDisabledInconsistent) {
-  const struct {
-    GyroConsistencyState initial;
-    GyroConsistencyState after_initialize;
-  } cases[] = {
-      {GyroConsistencyState::kUnverified, GyroConsistencyState::kUnverified},
-      {GyroConsistencyState::kActive, GyroConsistencyState::kActive},
-      {GyroConsistencyState::kSuspended, GyroConsistencyState::kActive},
-      {GyroConsistencyState::kDisabledInconsistent, GyroConsistencyState::kDisabledInconsistent},
-  };
-  for (const auto& test_case : cases) {
+TEST(LocalizerGyro, InitializeCarriesOverTheStateAndTheCountOfLostVotes) {
+  for (const GyroConsistencyState state :
+       {GyroConsistencyState::kUnverified, GyroConsistencyState::kActive, GyroConsistencyState::kSuspended,
+        GyroConsistencyState::kDisabledInconsistent}) {
     LocalizerParameters parameters;
-    parameters.initial_gyro_consistency = test_case.initial;
+    parameters.initial_gyro_consistency = state;
+    parameters.initial_gyro_outvoted_total = 2;
     Localizer localizer(parameters, PointList{}, std::nullopt);
-    EXPECT_EQ(localizer.gyro_fusion_status().consistency, test_case.initial);
-    localizer.initialize(Eigen::Isometry3d::Identity());
-    EXPECT_EQ(localizer.gyro_fusion_status().consistency, test_case.after_initialize);
-    localizer.initialize(Eigen::Isometry3d::Identity());
-    EXPECT_EQ(localizer.gyro_fusion_status().consistency, test_case.after_initialize);
+    EXPECT_EQ(localizer.gyro_fusion_status().consistency, state);
+    EXPECT_EQ(localizer.gyro_fusion_status().consistency_outvoted_total, 2U);
+    for (int rebuild = 0; rebuild < 2; ++rebuild) {
+      localizer.initialize(Eigen::Isometry3d::Identity());
+      EXPECT_EQ(localizer.gyro_fusion_status().consistency, state);
+      EXPECT_EQ(localizer.gyro_fusion_status().consistency_outvoted_total, 2U);
+    }
   }
 }
 
@@ -1483,13 +1479,19 @@ TEST(GyroConsistencyJudge, WithoutLidarTheGyroMustRoughlyMatchTheWheel) {
     return judge.observe_interval(covered_interval(wheel_rad, gyro_rad)).event;
   };
   EXPECT_EQ(verdict_for(0.3, 0.3), GyroConsistencyEvent::kConfirmed);
-  EXPECT_EQ(verdict_for(0.3, 0.3 * 1.4), GyroConsistencyEvent::kConfirmed);
-  EXPECT_EQ(verdict_for(0.3, 0.3 * 0.5), GyroConsistencyEvent::kConfirmed);
+  EXPECT_EQ(verdict_for(0.3, 0.3 * 1.15), GyroConsistencyEvent::kConfirmed);
+  EXPECT_EQ(verdict_for(0.3, 0.3 * 0.65), GyroConsistencyEvent::kConfirmed);
   EXPECT_EQ(verdict_for(0.3, -0.3), GyroConsistencyEvent::kRejected);        // sign reversed
   EXPECT_EQ(verdict_for(0.3, 0.001), GyroConsistencyEvent::kRejected);       // another axis
   EXPECT_EQ(verdict_for(0.3, 0.3 * 57.3), GyroConsistencyEvent::kRejected);  // degrees instead of radians
-  EXPECT_EQ(verdict_for(0.3, 0.3 * 2.0), GyroConsistencyEvent::kRejected);   // a known limit: ratio above 1.8
-  EXPECT_EQ(verdict_for(0.3, 0.3 * 0.3), GyroConsistencyEvent::kRejected);
+  EXPECT_EQ(verdict_for(0.3, 0.3 * 2.0), GyroConsistencyEvent::kRejected);
+  EXPECT_EQ(verdict_for(0.3, 0.3 * 1.3), GyroConsistencyEvent::kRejected);   // above 1.2
+  EXPECT_EQ(verdict_for(0.3, 0.3 * 0.5), GyroConsistencyEvent::kRejected);   // below 0.6
+  // The Issue's cases (w, g, no LiDAR).
+  EXPECT_EQ(verdict_for(0.4, 0.2), GyroConsistencyEvent::kRejected);
+  EXPECT_EQ(verdict_for(0.4, 0.52), GyroConsistencyEvent::kRejected);
+  EXPECT_EQ(verdict_for(0.7, 1.0), GyroConsistencyEvent::kRejected);  // wheel 1.4x, gyro 2x: no longer passes
+  EXPECT_EQ(verdict_for(0.7, 0.75), GyroConsistencyEvent::kConfirmed);
 }
 
 TEST(GyroConsistencyJudge, WithLidarTheGyroMustAgreeWithLidarEvenWhenTheWheelAgreesWithTheGyro) {
@@ -1608,6 +1610,33 @@ TEST(GyroConsistencyJudge, ASuspendedGyroIsStillVotedOnAndThreeLossesDisableIt) 
   EXPECT_EQ(judge.outvoted_total(), 3U);
 }
 
+TEST(GyroConsistencyJudge, LostVotesAreCountedInTotalAndNeverStartOver) {
+  GyroConsistencyJudge judge = active_judge();
+  ASSERT_EQ(judge.observe_interval(covered_interval(0.3, 0.6, 0.3)).event, GyroConsistencyEvent::kOutvoted);
+  ASSERT_EQ(judge.observe_interval(covered_interval(0.3, 0.6, 0.3)).event, GyroConsistencyEvent::kOutvoted);
+  ASSERT_EQ(judge.observe_interval(covered_interval(0.3, 0.3, 0.3)).event, GyroConsistencyEvent::kConfirmed);
+  EXPECT_EQ(judge.outvoted_total(), 2U);  // coming back does not reset the count
+  EXPECT_EQ(judge.observe_interval(covered_interval(0.3, 0.6, 0.3)).event, GyroConsistencyEvent::kOutvoted);
+  EXPECT_EQ(judge.state(), GyroConsistencyState::kDisabledInconsistent);
+}
+
+TEST(GyroConsistencyJudge, AStartWithTwoLostVotesIsDisabledByTheNextOne) {
+  GyroConsistencyJudge judge(GyroConsistencyState::kActive, 2);
+  EXPECT_EQ(judge.outvoted_total(), 2U);
+  EXPECT_EQ(judge.observe_interval(covered_interval(0.3, 0.6, 0.3)).event, GyroConsistencyEvent::kOutvoted);
+  EXPECT_EQ(judge.state(), GyroConsistencyState::kDisabledInconsistent);
+  EXPECT_EQ(GyroConsistencyJudge(GyroConsistencyState::kActive, 3).state(), GyroConsistencyState::kDisabledInconsistent);
+}
+
+TEST(GyroConsistencyJudge, AJudgeStartedSuspendedComesBackOnlyThroughLidar) {
+  GyroConsistencyJudge judge(GyroConsistencyState::kSuspended);
+  EXPECT_EQ(judge.state(), GyroConsistencyState::kSuspended);
+  EXPECT_EQ(judge.observe_interval(covered_interval(0.7, 0.5)).event, GyroConsistencyEvent::kNone);
+  EXPECT_EQ(judge.state(), GyroConsistencyState::kSuspended);
+  EXPECT_EQ(judge.observe_interval(covered_interval(0.4, 0.4, 0.4)).event, GyroConsistencyEvent::kConfirmed);
+  EXPECT_EQ(judge.state(), GyroConsistencyState::kActive);
+}
+
 TEST(GyroConsistencyJudge, SumsOfTheVerificationAreReportedPerKind) {
   GyroConsistencyJudge judge;
   judge.observe_interval(covered_interval(0.05, 0.04, 0.045));
@@ -1679,6 +1708,7 @@ struct GyroDriveOptions {
   double optimization_failure_sec = -1.0;
   double wheel_time_backwards_sec = -1.0;
   double initialize_sec = -1.0;
+  std::optional<std::size_t> initialize_when_outvoted_total;  // initialize() once the lost votes reach this
   bool has_prior_map = false;  // false: mapping without a map or GNSS (never reaches TRACKING)
   bool should_save_map = false;  // mapping only: save_map() after the drive and read each stage back
 };
@@ -1697,6 +1727,8 @@ struct GyroDriveResult {
   bool saw_suspended = false;
   // Yaw error (deg) of every keyframe in trajectory.csv, by save stage ("preliminary", "optimized", "final").
   std::map<std::string, std::vector<double>> saved_yaw_errors_deg;
+  std::optional<GyroFusionStatus> status_before_initialize;
+  std::optional<GyroFusionStatus> status_after_initialize;
   std::optional<GyroFusionStatus> status_before_backwards;
   std::optional<GyroFusionStatus> status_after_backwards;
   std::size_t scans_processed = 0;
@@ -1824,6 +1856,13 @@ GyroDriveResult run_gyro_drive(const GyroDriveOptions& options) {
     result.max_pending_scans = std::max(result.max_pending_scans, localizer.pending_scan_count());
     const GyroFusionStatus status = localizer.gyro_fusion_status();
     if (status.consistency == GyroConsistencyState::kActive && !result.first_active_sec) result.first_active_sec = time_sec;
+    if (options.initialize_when_outvoted_total && !result.status_after_initialize &&
+        status.consistency_outvoted_total == *options.initialize_when_outvoted_total &&
+        status.consistency == GyroConsistencyState::kSuspended) {
+      result.status_before_initialize = status;
+      localizer.initialize(truth_at(time_sec));
+      result.status_after_initialize = localizer.gyro_fusion_status();
+    }
     result.saw_suspended |= status.consistency_outvoted_total > 0;
     if (output) {
       result.samples.push_back({time_sec, yaw_error_deg(output->map_to_base, truth_at(time_sec)), output->state,
@@ -2030,15 +2069,30 @@ TEST(LocalizerGyroDrive, T8_ADoubleScaleOrNoiseOnlyGyroNeverActivatesAndTheOutpu
   }
 }
 
-TEST(LocalizerGyroDrive, T8b_TheKnownLimitIsMeasuredNotJudged) {
-  GyroDriveOptions options = t1_options();  // wheel 1.4x, no LiDAR during the turn
-  options.gyro_transform = scaled_gyro(2.0);
+TEST(LocalizerGyroDrive, T8b_ADoubleScaleGyroBesideAWheelThatOverReportsNeverActivates) {
+  GyroDriveOptions wheel_only = t1_options();  // wheel 1.4x, no LiDAR during the turn
+  wheel_only.has_gyro = false;
+  const GyroDriveResult reference = run_gyro_drive(wheel_only);
+  GyroDriveOptions options = t1_options();
+  options.gyro_transform = scaled_gyro(2.0);  // the ratio to the wheel is about 1.43: above 1.2
+  const GyroDriveResult result = run_gyro_drive(options);
+  EXPECT_FALSE(result.first_active_sec.has_value());
+  EXPECT_EQ(result.status.rotation_factors_added_total, 0U);
+  ASSERT_EQ(result.samples.size(), reference.samples.size());
+  for (std::size_t index = 0; index < result.samples.size(); ++index) {
+    EXPECT_EQ(result.samples[index].map_to_base.matrix(), reference.samples[index].map_to_base.matrix()) << index;
+  }
+}
+
+TEST(LocalizerGyroDrive, T8c_TheLimitThatRemainsIsMeasuredNotJudged) {
+  GyroDriveOptions options = t1_options();  // wheel 1.4x: a 1.5x gyro has a ratio of 1.07, inside the range
+  options.gyro_transform = scaled_gyro(1.5);
   const GyroDriveResult result = run_gyro_drive(options);
   ASSERT_FALSE(result.samples.empty());
-  std::printf("[ MEASURED ] T8b active=%d max_yaw_error_deg=%.3f outvoted_total=%zu final_state=%d\n",
-              result.first_active_sec.has_value(), result.max_yaw_error_deg(), result.status.consistency_outvoted_total,
-              static_cast<int>(result.status.consistency));
-  EXPECT_TRUE(result.first_active_sec.has_value());  // the known limit: passes without LiDAR
+  std::printf("[ MEASURED ] T8c active=%d max_yaw_error_deg=%.3f final_yaw_error_deg=%.3f outvoted_total=%zu final_state=%d\n",
+              result.first_active_sec.has_value(), result.max_yaw_error_deg(), result.samples.back().yaw_error_deg,
+              result.status.consistency_outvoted_total, static_cast<int>(result.status.consistency));
+  EXPECT_TRUE(result.first_active_sec.has_value());
 }
 
 TEST(LocalizerGyroDrive, T9_AGyroThatGoesWrongLaterIsSuspendedAndEventuallyDisabled) {
@@ -2059,6 +2113,22 @@ TEST(LocalizerGyroDrive, T9_AGyroThatGoesWrongLaterIsSuspendedAndEventuallyDisab
             reference.max_yaw_error_deg(suspended_after_sec + 5.0, 1.0e9) + 1.0);
   std::printf("[ MEASURED ] T9 outvoted_total=%zu final_state=%d\n", result.status.consistency_outvoted_total,
               static_cast<int>(result.status.consistency));
+}
+
+TEST(LocalizerGyroDrive, T9_InitializeInTheMiddleKeepsTheSuspensionAndTheLostVotes) {
+  GyroDriveOptions options;
+  const double second_turn_begin = options.course.turn_windows()[1].first;
+  options.gyro_transform = [=](double time_sec, double standard) {
+    return std::optional<double>(time_sec >= second_turn_begin - 2.0 ? 2.0 * standard : standard);
+  };
+  options.initialize_when_outvoted_total = 2;
+  const GyroDriveResult result = run_gyro_drive(options);
+  ASSERT_TRUE(result.status_after_initialize.has_value());
+  EXPECT_EQ(result.status_after_initialize->consistency, GyroConsistencyState::kSuspended);
+  EXPECT_EQ(result.status_after_initialize->consistency_outvoted_total, 2U);
+  // The next lost vote disables the gyro for good.
+  EXPECT_EQ(result.status.consistency, GyroConsistencyState::kDisabledInconsistent);
+  EXPECT_GE(result.status.consistency_outvoted_total, 3U);
 }
 
 TEST(LocalizerGyroDrive, T10_AWheelSpinningInPlaceDoesNotStopACorrectGyro) {
