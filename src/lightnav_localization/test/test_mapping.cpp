@@ -1221,3 +1221,64 @@ TEST(MappingInitialization, CurvedTravelYieldsCurrentHeading) {
               kReferenceYaw + kWheelRotation);
   EXPECT_NEAR(yaw, kReferenceYaw + kWheelRotation, 1e-9);
 }
+
+// Issue #92: the rotation factors are kept in the factor history, so the saved map and trajectory
+// (batch optimisation) carry the gyro too. The wheel over-reports an in-place turn by 40 %.
+namespace {
+double saved_final_yaw_error_deg(GyroConsistencyState initial_state, const std::string& name) {
+  const SegmentedCourse course({5.0, 5.0}, {1.0}, 0.6, 0.5, 2.0);
+  const SyntheticWorld world(course.centerline(), true);
+  LocalizerParameters parameters;
+  parameters.mapping = true;
+  parameters.initial_gyro_consistency = initial_state;
+  Localizer localizer(parameters, PointList{}, std::nullopt);
+  localizer.set_lidar_match_hook_for_test([](MatchResult& result) { result.is_accepted = false; });
+  const auto truth_at = [&course](double time_sec) { return course.truth_at(time_sec); };
+  localizer.initialize(truth_at(0.0));
+  constexpr double kStepSec = 0.02;
+  Eigen::Isometry3d odom = Eigen::Isometry3d::Identity();
+  for (int step = 0; step <= static_cast<int>(course.total_sec() / kStepSec); ++step) {
+    const double time_sec = step * kStepSec;
+    std::optional<double> gyro_increment;
+    if (step > 0) {
+      const Eigen::Isometry3d relative = truth_at(time_sec - kStepSec).inverse() * truth_at(time_sec);
+      const double true_yaw = std::atan2(relative.rotation()(1, 0), relative.rotation()(0, 0));
+      Eigen::Isometry3d reported = Eigen::Isometry3d::Identity();
+      reported.translation().x() = relative.translation().norm();
+      reported.linear() = Eigen::AngleAxisd(1.4 * true_yaw, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+      odom = odom * reported;
+      gyro_increment = true_yaw;
+    }
+    if (step > 0 && step % 5 == 0 && time_sec >= 0.1) {
+      localizer.on_scan(time_sec, world.synthesize_scan(truth_at, time_sec - 0.1, 0.1, true, 360, 8));
+    }
+    localizer.on_wheel_odom(time_sec, odom, gyro_increment);
+  }
+  const std::string directory = unique_directory(name);
+  MapOutputParameters output_parameters;
+  output_parameters.map_output_dir = directory;
+  output_parameters.map_voxel_size_m = 0.2;
+  output_parameters.batch_max_iterations = 100;
+  output_parameters.created = "2026-01-01T00:00:00Z";
+  MapOutputResult output_result;
+  std::string error;
+  EXPECT_TRUE(localizer.save_map(output_parameters, output_result, error)) << error;
+  const std::vector<CsvRow> trajectory = read_trajectory((std::filesystem::path(directory) / "trajectory.csv").string());
+  std::error_code ignored;
+  std::filesystem::remove_all(directory, ignored);
+  if (trajectory.empty()) return 1.0e9;
+  const Eigen::Isometry3d truth = truth_at(trajectory.back().stamp_sec);
+  const double truth_yaw = std::atan2(truth.rotation()(1, 0), truth.rotation()(0, 0));
+  return std::abs(std::remainder(trajectory.back().yaw - truth_yaw, 2.0 * M_PI)) * 180.0 / M_PI;
+}
+}  // namespace
+
+TEST(MapBuilder, RotationFactorsReachTheSavedTrajectory) {
+  const double with_gyro_deg = saved_final_yaw_error_deg(GyroConsistencyState::kActive, "gyro_saved_active");
+  const double without_gyro_deg =
+      saved_final_yaw_error_deg(GyroConsistencyState::kDisabledInconsistent, "gyro_saved_disabled");
+  std::printf("[ MEASURED ] saved trajectory final yaw error: gyro %.3f deg, wheel only %.3f deg\n",
+              with_gyro_deg, without_gyro_deg);
+  EXPECT_LT(with_gyro_deg, 2.0);
+  EXPECT_GT(without_gyro_deg, 15.0);
+}
