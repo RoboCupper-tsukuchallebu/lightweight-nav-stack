@@ -1737,3 +1737,38 @@ TEST_F(LocalizationNodeTest, LocalizationYamlListsTheNewParametersWithTheNodeDef
     }
   }
 }
+
+// docker/config/robot.yaml and docker/config/localization_indoor.yaml are read by the node as params_file, as
+// localization.launch.py passes them. A key whose type differs from the declared one makes the node throw at construction,
+// and a value the node rejects fails configure. What the tools pass on the command line (map_file, map_yaml, mode,
+// map_output_dir) is added here.
+TEST_F(LocalizationNodeTest, DockerParamsFilesConfigureInBothModes) {
+  const std::filesystem::path config_directory =
+      std::filesystem::path(__FILE__).parent_path().parent_path().parent_path().parent_path() / "docker" / "config";
+  struct ParamsFileCase {
+    const char* file_name;
+    double expected_wheel_sigma_yaw_per_m;
+    bool expected_loop_closure_enabled;
+  };
+  for (const ParamsFileCase& params_file_case :
+       {ParamsFileCase{"robot.yaml", 0.2, true}, ParamsFileCase{"localization_indoor.yaml", 0.01, false}}) {
+    const std::filesystem::path params_path = config_directory / params_file_case.file_name;
+    ASSERT_TRUE(std::filesystem::exists(params_path)) << params_path;
+    for (const char* mode : {"localization", "mapping"}) {
+      SCOPED_TRACE(std::string(params_file_case.file_name) + " in " + mode);
+      auto options = make_options(map_file_.string(), map_yaml_.string(), mode);
+      options.arguments({"--ros-args", "--params-file", params_path.string()});
+      options.append_parameter_override("map_output_dir", (temp_directory_ / "params_file_map").string());
+      ASSERT_NO_THROW(create_node(options));
+      EXPECT_EQ(node_->configure().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE);
+      // The values of the file reached the node (a wrong node name in the file would leave the code defaults).
+      EXPECT_DOUBLE_EQ(node_->get_parameter("absolute_sigma_tilt_rad").as_double(), 0.3);
+      EXPECT_DOUBLE_EQ(node_->get_parameter("absolute_sigma_z_m").as_double(), 2.0);
+      EXPECT_DOUBLE_EQ(node_->get_parameter("wheel_sigma_yaw_per_m").as_double(),
+                       params_file_case.expected_wheel_sigma_yaw_per_m);
+      EXPECT_EQ(node_->get_parameter("loop_closure_enabled").as_bool(),
+                params_file_case.expected_loop_closure_enabled);
+      close_node();
+    }
+  }
+}

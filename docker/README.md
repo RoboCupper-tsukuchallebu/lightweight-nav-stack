@@ -28,7 +28,7 @@ are in `src/lightnav_localization/README.md`, section "設定ファイルの値�
 2. **Right after power-on, mapping waits for the map origin, for a few minutes.** A fix is used for the origin only while the
    error that the receiver reports for it is at most 10 m (`init_gps_reported_std_max_m`; about the first 3.5 minutes after
    power-on in the recording of Issue #93). While it waits, `last_error` of `/lightnav/localization/status` says
-   `waiting for a GPS fix with reported std <= 10 m (latest <value> m)`. **Start driving after that wait has disappeared
+   `waiting for a GPS fix with reported std <= 10.0 m (latest <value> m)`. **Start driving after that wait has disappeared
    from `last_error`.** The part driven during the wait does not enter the map.
 3. Drive the course. To build a map with loops closed, **stop the vehicle first, then call `save_map` before stopping the
    container**:
