@@ -36,4 +36,13 @@ MapMetadata read_map_metadata(const std::string& file_path);
 // works without GPS. A file that exists but is malformed still throws.
 MapMetadata read_map_metadata_or_no_origin(const std::string& file_path);
 
+// The note a localization node reports (log WARN and LocalizationStatus.last_error) for a map that is only a
+// preliminary save.
+extern const char* const kPreliminaryMapNote;
+
+// True when the file exists and says batch_optimized: false (a save cut short after its first stage).
+// A missing file is false (no map.yaml is not a preliminary map); a malformed file throws like
+// read_map_metadata.
+bool is_preliminary_map(const std::string& file_path);
+
 }  // namespace lightnav_localization

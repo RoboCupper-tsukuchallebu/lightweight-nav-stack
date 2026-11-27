@@ -135,6 +135,13 @@ MapMetadata read_map_metadata(const std::string& file_path) {
   return metadata;
 }
 
+const char* const kPreliminaryMapNote = "map is a preliminary save (not batch optimized)";
+
+bool is_preliminary_map(const std::string& file_path) {
+  if (file_path.empty() || !std::filesystem::exists(file_path)) return false;
+  return !read_map_metadata(file_path).batch_optimized;
+}
+
 MapMetadata read_map_metadata_or_no_origin(const std::string& file_path) {
   if (!std::filesystem::exists(file_path)) return MapMetadata{};
   return read_map_metadata(file_path);

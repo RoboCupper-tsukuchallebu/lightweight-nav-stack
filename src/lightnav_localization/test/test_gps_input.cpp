@@ -197,3 +197,33 @@ TEST(GpsInput, OrdinaryFixUsesMahalanobisGateBeyondTwoMeters) {
   ASSERT_TRUE(decision.gate_would_reject);
   EXPECT_FALSE(*decision.gate_would_reject);
 }
+
+TEST(ReportedStdLimit, RefusesOnlyAFixThatReportsMoreThanThePositiveLimit) {
+  GpsFix fix;
+  fix.reported_std_m = 49.0;
+  EXPECT_TRUE(is_reported_std_above_limit(fix, 10.0));
+  fix.reported_std_m = 10.0;
+  EXPECT_FALSE(is_reported_std_above_limit(fix, 10.0));  // the limit itself is allowed
+  fix.reported_std_m = 3.0;
+  EXPECT_FALSE(is_reported_std_above_limit(fix, 10.0));
+}
+
+TEST(ReportedStdLimit, ZeroLimitAndAFixWithoutAReportAreNeverRefused) {
+  GpsFix fix;
+  fix.reported_std_m = 49.0;
+  EXPECT_FALSE(is_reported_std_above_limit(fix, 0.0));
+  fix.reported_std_m = 0.0;  // no usable report
+  EXPECT_FALSE(is_reported_std_above_limit(fix, 10.0));
+  fix.reported_std_m = std::numeric_limits<double>::quiet_NaN();
+  EXPECT_FALSE(is_reported_std_above_limit(fix, 10.0));
+}
+
+TEST(ReportedStdLimit, TheStdOfThePoseGraphDoesNotDependOnTheReport) {
+  GpsParameters parameters;
+  GpsFix fix;
+  fix.status = GpsFixStatus::kFix;
+  const double without_report = parameters.horizontal_std_m(fix);
+  fix.reported_std_m = 49.0;
+  EXPECT_DOUBLE_EQ(parameters.horizontal_std_m(fix), without_report);
+  EXPECT_DOUBLE_EQ(without_report, 2.0);  // a single-point fix: 2.0 m from the table
+}

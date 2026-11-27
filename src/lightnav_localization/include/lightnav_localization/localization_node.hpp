@@ -94,6 +94,8 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
   void add_alignment_scan(const PointList& scan);
   void handle_pending_scans();
   GpsFix to_gps_fix(const sensor_msgs::msg::NavSatFix& message) const;
+  // False (with last_error and a throttled WARN) while the fix reports a std above the limit.
+  bool accepts_reported_std_for_start(const GpsFix& fix);
   bool is_usable_initial_fix(const GpsFix& fix) const;
   bool is_usable_mapping_fix(const GpsFix& fix) const;
   // Remembers the status and sigma of the newest fix before gps_min_status can drop it.
@@ -158,6 +160,8 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
   double path_min_step_m_ = 0.1;
   int path_max_poses_ = 20000;
   double init_gps_max_std_m_ = 3.0;
+  double init_gps_reported_std_max_m_ = 0.0;  // 0 = off
+  bool is_waiting_for_reported_std_ = false;
   int gps_min_status_ = -1;  // NavSatStatus value; fixes below it never reach the Localizer
   double gps_min_interval_s_ = 0.0;
   int num_threads_ = 4;
@@ -170,6 +174,7 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
   std::optional<GpsOrigin> gps_origin_;
   std::optional<GpsConverter> gps_converter_;
   bool map_has_no_gps_origin_ = false;
+  bool is_preliminary_map_ = false;  // the loaded map.yaml says batch_optimized: false
 
   // Localizer and initial alignment.
   std::unique_ptr<Localizer> localizer_;
