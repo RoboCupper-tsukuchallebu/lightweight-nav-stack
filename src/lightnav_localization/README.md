@@ -68,6 +68,7 @@ LiDAR の外部パラメータ（`base_frame→点群の frame_id`）と GPS ア
 | `/wheel/odom`（`wheel_odom_topic`） | `nav_msgs/Odometry` | reliable, depth 50 | `odom`→`base_footprint`、50 Hz |
 | `/velodyne_points`（`points_topic`） | `sensor_msgs/PointCloud2` | reliable, depth 5 | organized / `is_dense: false` / NaN 可。`x,y,z,time` を読み、`time` が無ければ 0、非有限の点は捨てる |
 | `/gps/fix`（`gps_topic`） | `sensor_msgs/NavSatFix` | reliable, depth 10 | ENU は `map.yaml` の原点基準 |
+| `imu_topic`（既定 `""` = 購読しない。ロボットでは `/imu/data_raw`） | `sensor_msgs/Imu` | best effort, keep last 2000 | 外付けのジャイロ（「IMU（外付けのジャイロ）」の節） |
 | `/lightnav/localization/odom` | `nav_msgs/Odometry` | reliable, depth 10 | `map`→`base_footprint`、共分散あり、stamp は入力 `/wheel/odom` と同一 |
 | `/lightnav/localization/status` | `lightnav_msgs/LocalizationStatus` | reliable, transient_local, depth 1 | `status_rate_hz`（既定 2 Hz）+ 状態変化時 |
 | `/lightnav/localization/aligned_scan` | `sensor_msgs/PointCloud2` | SensorDataQoS | デバッグ（`map` 座標） |
@@ -132,6 +133,7 @@ W-1 は既定で無効。スリップ判定の根拠は LiDAR の照合だけな
 | `map_file` / `map_yaml` | `""` | 地図 PCD / 原点 yaml（`map_file` は必須） |
 | `map_frame` / `odom_frame` / `base_frame` | `map` / `odom` / `base_footprint` | |
 | `gps_frame` | `gnss` | GPS アンテナの frame |
+| `imu_topic` ほか `imu_*` | `""`（無効）ほか | 外付け IMU。一覧は「IMU（外付けのジャイロ）」の節 |
 | `wheel_timeout_s` / `scan_timeout_s` / `gps_timeout_s` | 0.2 / 0.5 / 3.0 | 入力の鮮度 |
 | `init_gps_max_std_m` / `init_scan_count` / `init_yaw_step_deg` | 3.0 / 3 / 15 | 初期位置合わせ |
 | `init_gps_reported_std_max_m` | 0.0（判定しない） | 地図の原点と初期位置合わせに使う測位の、**受信機が申告する誤差**の上限。申告 ＝ 測位に付いている誤差の、東と北の大きい方の平方根（型が「不明」以外で、値が正で有限のとき）。超える間は原点・初期化を待ち、`last_error` に `waiting for a GPS fix with reported std <= <上限> m (latest <値> m)`（ログは WARN、2 秒に 1 回まで）を出す。使える測位が来たら消える。申告の無い測位は弾かない。走行中の姿勢グラフに入る標準偏差は変えない（状態ごとの表の値） |
@@ -226,70 +228,85 @@ performance は直近のスキャン処理時間とプロセスの CPU・メモ�
 - 申告の無い測位（誤差の型が「不明」）は `init_gps_reported_std_max_m` で弾かれない。ドライバの設定が変わって申告が出なくなると、この判定は黙って働かなくなる。
 - `map.yaml` が `batch_optimized: false` の地図（保存が段階 1 で打ち切られた仮の地図）は、localization が読むと警告のログと `last_error` の注記（`map is a preliminary save (not batch optimized)`）を出す。読み込みは拒まない。
 
-## IMU を後から足すとき
+## IMU（外付けのジャイロ。Issue #92）
 
-今は IMU を使わない（購読も TF の lookup もパラメータも無い）。Issue #43 の決定で、コードは入れず、足し方だけをここに書く。
-行番号は develop の 4d23464 時点のもので、ずれたら関数名で探す。
+外付けの IMU のジャイロで yaw の変化を補う。車輪の yaw は滑ると大きくずれる（2026-11-25 の記録で 15〜40°）ので、向きの変化は**車輪よりジャイロを優先**する。
+`imu_topic` が空（既定）なら、購読も TF の lookup も診断の項目も作らず、IMU が無いときと同じに動く。
 
-### 1. 最初の一歩: ジャイロの yaw 係数
+> **起動の手順（必須）**: IMU を使うときは、ロボットを**平らな床に置いてから、起動して 3 秒は機体に触れず、動かさない**。
+> 手で持ったまま、傾けたまま起動しない。この静止でジャイロのバイアスと上下軸を決めるため、最初の静止が坂や手の上だと上下軸が傾き、yaw の倍率がずれる（10° で約 1.5 %）。
 
-車輪の yaw はスケール誤差のぶんだけ曲がる（「既知の限界」の 1 つ目）。ジャイロの z 軸を、続く 2 つのキーフレームの間で積分し、
-その間の yaw の変化だけを係数として姿勢グラフに足す。ノードの鍵は今のまま `x` だけで、速度・バイアス・重力は状態に入れない。
-加速度計は使わない。まずこれで室内の戻り誤差と屋外の yaw のずれが減るかを測ってから、2 に進むかを決める。
+### 動き
 
-`PoseGraph`（`pose_graph.cpp`）:
+- **入力**: `imu_topic`（ロボットでは `/imu/data_raw`、約 966 Hz の生データ）の `sensor_msgs/Imu`。QoS は best effort、keep last 2000（スキャンの処理の間に届いたぶんを落とさないため）。時刻は `header.stamp` だけで判断し、ノードの時計と比べない（走行記録の再生でも同じに動く）。
+- **バイアスと上下軸**: 車輪オドメトリが止まっている区間（並進 0.01 m/s 未満・回転 0.02 rad/s 未満）の 0.5 秒あとから `imu_stationary_window_s` の間の、角速度の平均をバイアス、加速度の平均の向き（重力の反対）を上下軸とする。最初のバイアスが決まるまでジャイロは使わない（車輪の yaw のまま）。
+  TF（`base_frame`→IMU）は**照合にだけ**使い、重力で決めた上下軸との角度の差を診断に出す（`imu_up_axis_warn_deg` を超えたら警告）。TF が無くても動く。
+- **車輪のコールバックの順**: IMU の購読にたまったメッセージを `take()` で空になるまで取り込む → 車輪の姿勢を渡す → 前の車輪のサンプルから今までの yaw の変化を積分 → `Localizer::on_wheel_odom` に渡す。スキャンの処理は車輪のコールバックの中で走るので、先に取り込まないと増分が「無し」になる。
+- **整合を確かめてから使う**: 届いているが誤っているジャイロ（符号が逆、別の軸、倍率の誤り）を使わないため、状態を持つ。`unverified`（`on_configure` の直後。使わない）→ 車輪と LiDAR に合えば `active`（車輪の yaw の増分をジャイロで置き換え、キーフレームの間に yaw の回転係数を足す）。
+  `active` のあと、車輪と LiDAR がそろってジャイロと違う区間が出ると `suspended`（LiDAR で確かめ直すまで使わない）、累計 3 回で `disabled_inconsistent`（`on_configure` し直すまで使わない）。これらの状態と負けの累計は、`~/reload_map`・`~/set_initial_pose`・LOST の復帰で `Localizer` を作り直しても持ち越し、`on_cleanup`→`on_configure` で `unverified`・0 に戻す。
+  使わない間は車輪の yaw のまま（IMU が無いときと同じ動き）。
+- **途絶・遅延**: IMU が止まると車輪の yaw のまま（回転係数は足さない）。スキャンは IMU を待たない。戻れば次の車輪のサンプルから使う。状態は `LocalizationStatus` に出さず、`/diagnostics` だけに出す。
+- **mapping**: 回転係数は `~/save_map` と停止時のバッチ再最適化にも効く。
 
-- `add_rotation_factor(from_index, to_index, yaw_delta_rad, yaw_sigma_rad)` を足す。中身は Pose3 の `BetweenFactor` で、測定値は
-  「並進 0、roll と pitch が 0、yaw だけ `yaw_delta_rad`」。ノイズは `pose_noise`（63 行目）で作り、並進と roll・pitch の sigma は
-  大きく（拘束しない値に）して、yaw の sigma だけを効かせる。roll・pitch は車輪の平面拘束（`add_node_with_wheel_factor`、176〜185 行目）
-  が見ているので、ここでは触らない。
-- 雛形は `add_lidar_odometry_factor`（198〜209 行目）。すでにある 2 つの鍵に係数を 1 本足し、`pending_factors` に積み、
-  `record_history` が真なら `history_factors` にも積むだけ。新しい値も stamp も足さないので、`pending_values` / `pending_stamps` /
-  `restart_window` / `batch_optimize` は変わらない。mapping の保存時のバッチ再最適化にも、この係数が自動で入る。
-- `yaw_sigma_rad = gyro_sigma * sqrt(dt)`。`gyro_sigma` はジャイロの角度ランダムウォーク（rad/√s）、`dt` は 2 つのキーフレームの stamp の差。
-  下限は `sigma_floor_rad`（0.005）にそろえ、係数が硬い拘束にならないようにする。バイアスの残りぶん（`bias_sigma * dt`）を二乗和で足すかは、実機の静止データで決める。
-- 傾いた地面では、ジャイロの z を base の z とみなす近似が tilt のぶん外れる。平地の室内では問題にならない。
+### パラメータ
 
-`Localizer`（`localizer.hpp` / `localizer.cpp`）:
+すべて `on_configure` で読む。雑音の 3 つが有限で正、秒数としきい値が有限で正でないと失敗する（`imu_topic` が空でも検査する）。
 
-- 新しい `imu_buffer.hpp` / `imu_buffer.cpp` に `ImuBuffer` を作る。Eigen だけを使い、ROS に依存しない。サンプル（stamp と、base 系の角速度の z）を持ち、
-  `integrate_yaw(from_sec, to_sec)` が台形積分で yaw の変化を返す（両端は補間、範囲外は `nullopt`）。`prune_before` で古いサンプルを捨てる。
-  `PoseBuffer`（`pose_buffer.hpp`）と同じ作りにし、保持は `kWheelBufferSec`（3 秒、`localizer.cpp` 19 行目）にそろえる。
-  `CMakeLists.txt` の `lightnav_localization_core` のソース一覧（30〜43 行目）に足す。新しい依存は要らない。
-- `LocalizerParameters`（`localizer.hpp` 23〜48 行目）に IMU の設定（`gyro_sigma`、`imu_to_base` の回転、静止判定の閾値）を足す。`lidar_to_base` と同じ置き方。
-- `Localizer::on_imu(stamp_sec, angular_velocity_in_imu)` を `on_scan` / `on_gps`（`localizer.hpp` 78〜79 行目）の隣に足す。
-  `Implementation` の `PoseBuffer buffer`（`localizer.cpp` 106 行目）の隣に `ImuBuffer` を持つ。
-- `process_scan`（`localizer.cpp` 321 行目）のキーフレームの分岐で、`add_node_with_wheel_factor` と `add_lidar_odometry_factor`（380〜385 行目）の直後に、
-  `last.stamp` から `pending.stamp` までの yaw の変化を `ImuBuffer` から取り、取れたら `add_rotation_factor(last.index, index, ...)` を足す。
-  `refresh_after_optimize`（392 行目）より前に足す。最適化に失敗して窓を作り直すと、ノードの番号が振り直されるため。
-  取れないとき（IMU の途絶、範囲外）は係数を足さず、今までどおり進める。
-- `drain`（452 行目）の `scan_ready` は、車輪が scan の終わりまで届くのを待つ（459 行目）。IMU は待たない方がよい。IMU が止まっても scan が詰まらない（待ち行列は `kMaxPendingScans` = 20 まで）。
-  代わりに、係数を省いた回数を数えて `/diagnostics` に出す（GNSS の `gate_rejected_total` と同じ作り）。待つかどうかは仕様として決める。
-- バイアスは、静止中のジャイロ z の平均で推定する。静止は、車輪オドメトリの移動がほぼ 0 の区間が一定の秒数続いたとき（`on_wheel_odom` が `last_wheel_pose` との差を見ている）。
-  走行中は更新しない。「室内（GNSS 無し）」の手順 2 の、mapping 開始時に `INITIALIZING` を抜けるまで静止する区間が、そのまま初期のバイアス推定に使える。
+| パラメータ | 既定 | 意味 |
+|---|---:|---|
+| `imu_topic` | `""` | 空 = 無効。ロボットでは `/imu/data_raw` |
+| `imu_yaw_prediction_enabled` | `true` | 車輪の yaw の増分をジャイロで置き換える。`false` なら回転係数だけ |
+| `imu_gyro_noise_density_rad_s_sqrt_hz` | 1.0e-3 | ジャイロの白色雑音（振動のぶん大きく取る） |
+| `imu_gyro_bias_sigma_rad_s` | 5.0e-4 | バイアスの推定の残り |
+| `imu_gyro_scale_sigma` | 0.01 | 感度の誤差（回転量に比例） |
+| `imu_max_gap_s` | 0.05 | サンプルの間がこれより空いた区間は「ジャイロで覆われていない」とする |
+| `imu_max_rate_rad_s` | 10.0 | これを超える角速度のサンプルは捨てる |
+| `imu_stationary_window_s` | 2.0 | バイアスと上下軸を求める静止区間の長さ（3 秒未満） |
+| `imu_bias_max_abs_rad_s` / `imu_bias_max_std_rad_s` | 0.05 / 0.1 | 静止区間を捨てる条件（角速度の平均の大きさ / 標準偏差） |
+| `imu_up_axis_warn_deg` | 10.0 | TF と重力の上下軸の差がこれを超えたら警告 |
+| `imu_timeout_s` | 0.5 | 車輪の `header.stamp` が IMU の `header.stamp` よりこの秒数を超えて進むと「途絶」 |
 
-`LocalizationNode`（`localization_node.cpp`）:
+`docker/config/robot.yaml` と `localization_indoor.yaml` は変えていない（既定は無効）。使うときは `imu_topic: /imu/data_raw` を足す。
 
-- パラメータ `imu_topic`（既定 `""` = 無効）を足す（`declare_parameters` 141〜224 行目、`read_parameters` 227 行目）。空を許すので、256〜260 行目の
-  「入力 topic が空でない」検査には入れない。**空のときは購読を作らず、`Localizer::on_imu` も呼ばない。今の挙動は何も変わらない。**
-- `on_configure`（570〜578 行目）で、`imu_topic` が空でなければ `sensor_msgs/Imu` を購読する。QoS は IMU のドライバに合わせる（best effort なら `SensorDataQoS`）。
-  `handle_imu` は `handle_wheel_odom`（799 行目）と同じく `is_active()` を確かめ、非有限の値を捨ててから `Localizer::on_imu` を呼ぶ。
-- TF は `base_frame → imu` の回転だけを使う。`resolve_gps_extrinsic`（724〜742 行目）と同じ作りで `resolve_imu_extrinsic` を足し、frame は `sensor_msgs/Imu` の `header.frame_id`
-  から取る（`resolve_lidar_extrinsic`、699〜722 行目と同じ）。取れるまでは IMU のサンプルを捨て、`last_error` に `waiting for TF base -> imu` を出す。
-  角速度を base 系に回してから z 成分を取るので、IMU が傾いて付いていても使える。`reset_runtime_state`（486 行目）で、この取得済みの印を戻す。
+### `/diagnostics` の `localization_node: IMU`
 
-足す試験:
+`imu_topic` が空でないときだけ出る。IMU が無くても推定は続くので、ERROR にはしない。WARN になるのは、`state` が `ready` 以外、`consistency` が `inconsistent`・`suspended`・`disabled_inconsistent`、TF との上下軸の差が上限超えのとき。
+3 要素の値は `x,y,z` で、無いものは `unavailable`。
 
-- `test_pose_graph.cpp`: 車輪の yaw にスケール誤差を入れ、真の yaw の変化を `add_rotation_factor` に渡すと、係数が無いときより yaw の誤差が小さい。
-  並進は係数で動かない。`record_history` が真のとき `batch_optimize` に係数が入る。既存の 5 件は係数を足さない限り変わらない。
-- 新しい `test_imu_buffer.cpp`（`CMakeLists.txt` の試験名の一覧、99〜100 行目付近に `imu_buffer` を足す）: 一定の角速度で `ω * dt` になる。両端の補間。範囲外は `nullopt`。`prune_before`。
-  `imu_to_base` に 90 度の roll を付けたとき、z 成分が正しく取れる。静止区間のバイアスの推定。
-- `test_localizer.cpp`: IMU を入れないときの出力が今と同じ（係数が 0 本）。合成コース（`synthetic_world.hpp`）で車輪の yaw にスケール誤差を入れ、GPS 無しで、IMU がある方が yaw の誤差が小さい。
-  IMU が途中で止まっても例外が出ず、出力が続き、省いた回数が増える。
-- `test_localization_node.cpp`: `imu_topic` が空なら購読が作られない。指定すると購読ができ、TF が無いと `last_error` に出る。
-- 実機: 「室内（GNSS 無し）」の手順 4 の戻り誤差を、IMU 有りと無しで比べる（合否は変えず、評価値として記録する）。
+| key | 中身 |
+|---|---|
+| `state` | `waiting_for_data`（まだ 1 つも届かない）/ `waiting_for_stationary`（バイアス未定）/ `ready` / `stale`（途絶） |
+| `consistency` | `unverified` / `inconsistent`（`unverified` のまま「外れ」が 3 回以上）/ `active` / `suspended` / `disabled_inconsistent` |
+| `consistency_confirmed_total` / `consistency_outvoted_total` / `consistency_rejected_total` | 「通る」「多数決で負け」「外れ」の回数（負けは `on_configure` からの累計） |
+| `last_yaw_deltas_rad` / `verification_sums_rad` | 最後のキーフレーム区間の車輪・ジャイロ・LiDAR の yaw の変化 / 確かめの区間の和 |
+| `sample_rate_hz` / `last_sample_age_s` | 直近 1 秒の頻度 / 車輪の最後の時刻 − IMU の最後の時刻 |
+| `gyro_bias_rad_s` / `yaw_bias_rad_s` / `bias_age_s` / `bias_updates_total` / `bias_rejected_total` | バイアス（3 軸）、上下軸の成分、更新からの秒数、採用・捨てた静止区間 |
+| `up_axis_in_imu` / `tf_up_axis_disagreement_deg` | 重力から決めた上向きの単位ベクトル（IMU の座標）。TF との差（TF が無ければ `unavailable`） |
+| `yaw_rate_rad_s` | 最新の、バイアスを引いた yaw の角速度 |
+| `yaw_increments_gyro_total` / `yaw_increments_wheel_total` | `active` の間に、増分をジャイロで渡した / 「無し」だった車輪サンプルの数 |
+| `rotation_factors_added_total` / `rotation_factors_skipped_total` | 足した回転係数 / 覆いが 95 % に届かず省いた回数 |
+| `slip_detected_total` / `slip_max_rad` | 車輪とジャイロの yaw の差が 0.05 rad を超えたキーフレームの数 / 差の最大 |
+| `dropped_samples_total` | 捨てたサンプル（有限でない値、角速度の上限、時刻の逆行） |
 
-### 2. 完全な preintegration（`CombinedImuFactor`）が大きな変更になる理由
+`Localizer` 側の累計は、`Localizer` を作り直すと 0 に戻る（`consistency_outvoted_total` だけは戻さない）。
+
+### 整合の検査で止まったときの見方
+
+- **`unverified` のまま `inconsistent`（WARN）**: 旋回してもジャイロが車輪・LiDAR と合わない。`verification_sums_rad`（W, G, L）と `last_yaw_deltas_rad` を見る。G の符号が W・L と逆なら取り付けの上下軸か、別のトピックを渡している。G が約 0 なら別の軸。倍率が合わないなら感度の誤り。
+- **`up_axis_in_imu` が (0, 0, ±1) から大きく外れている**: 起動時の静止が傾いていた。TF の差（`tf_up_axis_disagreement_deg`）が 10° を超えるなら、URDF の IMU の roll・pitch が実機と違う。`up_axis_in_imu` がそのまま URDF に入れる値の手がかりになる。
+- **`suspended` / `disabled_inconsistent`**: 車輪と LiDAR がそろってジャイロと違った。`consistency_outvoted_total` と `last_yaw_deltas_rad` を記録して、数の決まりを見直す材料にする。`disabled_inconsistent` は `on_configure` し直すまで戻らない。
+- **`stale`**: IMU が止まった。ケーブルとドライバを見る。この間は車輪の yaw のまま。
+
+### 分かっている限界
+
+- `on_configure` のあと最初の旋回では、車輪が合わせて 0.2 rad 回ったあとの最初のキーフレーム（旋回の始まりから 1.5 秒以内）までは車輪の yaw のまま。そこで回転係数が入り、出力は毎秒 0.1 rad で追いつく。確かめが通るまで、直進が続いても車輪の yaw の偏りはそのまま入る。
+- **LiDAR の照合が無いまま確かめが通ったときは、倍率の誤ったジャイロも通りうる**（車輪の報告との比が 0.6〜1.2 倍のとき）。通ったあとも LiDAR の照合が受け入れられなければ見つからず、mapping では曲がった地図がそのまま保存される。単位の誤り、符号の反転、別の軸は通らない。
+- ゆっくりした旋回（1 区間あたりの差が 0.05 rad に届かない）での倍率の誤りと、止まらない長い走行でのバイアスのずれは、LiDAR との差が 1 区間で 0.05 rad を超えるまで見つからない。
+- 「多数決で負け」が累計 3 回になると、`on_configure` し直すまで車輪の yaw に戻る（今と同じ動き）。
+- `active` の途中でジャイロの符号だけが変わった場合、内部のオドメトリが大きくずれて LiDAR の照合が受け入れられず、「負け」が数えられない（LiDAR の値が無いと負けにならないため）。最初から反転したものは使わない。
+- 上下軸は最初の静止で決めて、その起動の間使う。静止は車輪で判定するので、手で持って傾けたまま落ち着いた区間も採用されうる。
+
+### 次の段階: 完全な preintegration（`CombinedImuFactor`）が大きな変更になる理由
 
 加速度計まで使い、速度とバイアスを状態に入れる方式。精度は上がりうるが、姿勢グラフが「`x` の鎖」である前提が多くの場所に入っているため、`PoseGraph` と `Localizer` の両方を作り直すことになる。
 
@@ -312,7 +329,7 @@ performance は直近のスキャン処理時間とプロセスの CPU・メモ�
 - **ビルドの環境**。`CombinedImuFactor` は GTSAM の navigation モジュールにある。pixi と Docker（apt）で GTSAM の版が同じか、リンクできるかを先に確かめる。
 - **既存の基準の再計測**。`test_mapping` の K / K2 の基準（0.45 m / 1.0 m）は鍵の追加で変わりうる。値に合わせて基準を動かさず、計測し直して理由を残す。
 
-1 を入れて測った結果、ジャイロの yaw だけでは足りない（坂の roll・pitch、速度の推定が要る）と分かった場合にだけ、2 を別の Issue として起こす。
+ジャイロの yaw（上の実装）を実機で測った結果、これだけでは足りない（坂の roll・pitch、速度の推定が要る）と分かった場合にだけ、この節の方式を別の Issue として起こす。
 
 ## 試験
 

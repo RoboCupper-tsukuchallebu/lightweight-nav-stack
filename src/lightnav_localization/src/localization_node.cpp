@@ -1217,10 +1217,10 @@ void LocalizationNode::drain_imu_subscription() {
 
 std::optional<double> LocalizationNode::compute_gyro_yaw_delta(double stamp_sec) const {
   if (!gyro_yaw_tracker_ || !localizer_ || !previous_wheel_stamp_sec_) return std::nullopt;
-  if (localizer_->gyro_fusion_status().consistency == GyroConsistencyState::kDisabledInconsistent)
-    return std::nullopt;
   if (!(stamp_sec > *previous_wheel_stamp_sec_)) return std::nullopt;
-  return gyro_yaw_tracker_->integrate_yaw(*previous_wheel_stamp_sec_, stamp_sec);
+  return gyro_yaw_delta_for_localizer(
+      localizer_->gyro_fusion_status().consistency,
+      gyro_yaw_tracker_->integrate_yaw(*previous_wheel_stamp_sec_, stamp_sec));
 }
 
 void LocalizationNode::remember_gyro_fusion_state() {

@@ -42,6 +42,14 @@
 
 namespace lightnav_localization {
 
+// The yaw change the node passes to Localizer::on_wheel_odom (Issue #92 section 3.3). While the
+// consistency is disabled_inconsistent nothing is passed, whatever the gyro integrated.
+inline std::optional<double> gyro_yaw_delta_for_localizer(
+    GyroConsistencyState consistency, const std::optional<double>& integrated_delta_rad) {
+  if (consistency == GyroConsistencyState::kDisabledInconsistent) return std::nullopt;
+  return integrated_delta_rad;
+}
+
 // Lifecycle node for localization mode (Issue #29). The ROS-free pipeline lives in Localizer; this
 // class owns parameter/TF/message plumbing, the initial alignment and the status/TF publications.
 class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {

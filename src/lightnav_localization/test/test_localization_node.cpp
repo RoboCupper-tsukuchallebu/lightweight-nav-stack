@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <thread>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -2001,6 +2002,9 @@ TEST_F(LocalizationNodeImuTest, ReloadMapKeepsTheTrackerAndOnlyCleanupConfigureR
 namespace {
 
 constexpr double kTurnRateRadPerSec = 0.5236;  // 90 deg in 3 s
+constexpr double kQuickTurnRateRadPerSec = 1.0472;  // 90 deg in 1.5 s (keeps the tests short)
+constexpr double kQuickTurnSec = 1.5;
+constexpr double kSettleSec = 1.2;  // a little more than the 1 s period of /diagnostics
 
 }  // namespace
 
@@ -2008,9 +2012,12 @@ class LocalizationNodeImuTurnTest : public LocalizationNodeImuTest {
  protected:
   // Wheel 50 Hz, scans 10 Hz, IMU 200 Hz. The robot turns in place at `true_yaw_rate_rad_s`; the IMU
   // reports `gyro_scale` times that rate (-1: opposite sign). Phases chain: the heading carries over.
-  void run_phase(double duration_s, double true_yaw_rate_rad_s, double gyro_scale) {
+  // `wheel_scale` is how many times the true rotation the wheel odometry reports (1.4: a slip).
+  void run_phase(double duration_s, double true_yaw_rate_rad_s, double gyro_scale,
+                 double wheel_scale = 1.0) {
     const rclcpp::Time phase_start = node_->get_clock()->now();
     const double start_yaw = kTruthYaw + heading_offset_rad_;
+    const double wheel_start_yaw = kTruthYaw + wheel_offset_rad_;
     auto next_wheel = std::chrono::steady_clock::now();
     auto next_scan = next_wheel;
     auto next_imu = next_wheel;
@@ -2023,12 +2030,15 @@ class LocalizationNodeImuTurnTest : public LocalizationNodeImuTest {
       pose.translation() = kTruthPosition;
       pose.linear() = Eigen::AngleAxisd(start_yaw + true_yaw_rate_rad_s * elapsed_s,
                                         Eigen::Vector3d::UnitZ()).toRotationMatrix();
+      Eigen::Isometry3d wheel_pose = pose;
+      wheel_pose.linear() = Eigen::AngleAxisd(wheel_start_yaw + wheel_scale * true_yaw_rate_rad_s * elapsed_s,
+                                              Eigen::Vector3d::UnitZ()).toRotationMatrix();
       if (now >= next_imu) {
         publish_imu(stamp, gyro_scale * true_yaw_rate_rad_s);
         while (next_imu <= now) next_imu += 5ms;
       }
       if (now >= next_wheel) {
-        publish_wheel_at(stamp, pose);
+        publish_wheel_at(stamp, wheel_pose);
         while (next_wheel <= now) next_wheel += 20ms;
       }
       if (now >= next_scan) {
@@ -2037,7 +2047,9 @@ class LocalizationNodeImuTurnTest : public LocalizationNodeImuTest {
       }
       executor_.spin_some(5ms);
     }
-    heading_offset_rad_ += true_yaw_rate_rad_s * (node_->get_clock()->now() - phase_start).seconds();
+    const double phase_seconds = (node_->get_clock()->now() - phase_start).seconds();
+    heading_offset_rad_ += true_yaw_rate_rad_s * phase_seconds;
+    wheel_offset_rad_ += wheel_scale * true_yaw_rate_rad_s * phase_seconds;
   }
 
   // Tracking at the truth, then 3.5 s standing still so that the IMU becomes ready.
@@ -2070,17 +2082,25 @@ class LocalizationNodeImuTurnTest : public LocalizationNodeImuTest {
 
   std::size_t imu_count(const std::string& key) const { return std::stoul(imu_values().at(key)); }
 
-  double heading_offset_rad_ = 0.0;
+  // |published yaw - true yaw| in degrees, in the map frame (the map starts at the truth).
+  double truth_yaw_error_deg() const {
+    const double error_rad = yaw_from_quaternion(last_odom_.pose.pose.orientation) -
+                             (kTruthYaw + heading_offset_rad_);
+    return std::abs(std::remainder(error_rad, 2.0 * M_PI)) * 180.0 / M_PI;
+  }
+
+  double heading_offset_rad_ = 0.0;  // the true heading, relative to kTruthYaw
+  double wheel_offset_rad_ = 0.0;    // the heading the wheel odometry reports, relative to kTruthYaw
 };
 
-TEST_F(LocalizationNodeImuTurnTest, ATurnWithACorrectGyroMakesTheConsistencyActiveAndIncrementsReachTheLocalizer) {
+TEST_F(LocalizationNodeImuTurnTest, ATurnWithACorrectGyroMakesTheConsistencyActiveAndASlipAfterwardsIsCorrected) {
   create_imu_node();
   std::atomic<int> scan_hook_calls{0};
   node_->set_scan_processing_hook_for_test([&scan_hook_calls] { ++scan_hook_calls; });
   bring_up();
   start_and_wait_until_ready();
-  run_phase(3.0, kTurnRateRadPerSec, 1.0);
-  run_phase(2.0, 0.0, 1.0);
+  run_phase(kQuickTurnSec, kQuickTurnRateRadPerSec, 1.0);
+  run_phase(kSettleSec, 0.0, 1.0);
   EXPECT_EQ(imu_values().at("consistency"), "active");
   EXPECT_EQ(diagnostics_levels_.at(kImuDiagnosticsName), diagnostic_msgs::msg::DiagnosticStatus::OK);
   EXPECT_GE(imu_count("consistency_confirmed_total"), 1U);
@@ -2090,6 +2110,16 @@ TEST_F(LocalizationNodeImuTurnTest, ATurnWithACorrectGyroMakesTheConsistencyActi
   EXPECT_GT(imu_count("yaw_increments_gyro_total"), 20U);
   EXPECT_GT(imu_count("yaw_increments_gyro_total"), 10U * imu_count("yaw_increments_wheel_total"));
   EXPECT_GT(scan_hook_calls.load(), 0);
+
+  // The wheels now report 1.4 times the true rotation (a slip) while the gyro and the LiDAR see the
+  // true one: the estimate follows the gyro.
+  const std::size_t factors_before_slip = imu_count("rotation_factors_added_total");
+  run_phase(kQuickTurnSec, kQuickTurnRateRadPerSec, 1.0, 1.4);
+  run_phase(kSettleSec + 1.0, 0.0, 1.0);
+  EXPECT_EQ(imu_values().at("consistency"), "active");
+  EXPECT_GT(imu_count("rotation_factors_added_total"), factors_before_slip);
+  EXPECT_EQ(imu_count("consistency_outvoted_total"), 0U);
+  EXPECT_LT(truth_yaw_error_deg(), 3.0);
 }
 
 TEST_F(LocalizationNodeImuTurnTest, AGyroWithTheOppositeSignIsNeverUsed) {
@@ -2097,7 +2127,7 @@ TEST_F(LocalizationNodeImuTurnTest, AGyroWithTheOppositeSignIsNeverUsed) {
   bring_up();
   start_and_wait_until_ready();
   run_phase(4.0, kTurnRateRadPerSec, -1.0);
-  run_phase(2.0, 0.0, -1.0);
+  run_phase(kSettleSec, 0.0, -1.0);
   EXPECT_EQ(imu_values().at("consistency"), "inconsistent");
   EXPECT_EQ(diagnostics_levels_.at(kImuDiagnosticsName), diagnostic_msgs::msg::DiagnosticStatus::WARN);
   EXPECT_EQ(imu_count("rotation_factors_added_total"), 0U);
@@ -2113,19 +2143,19 @@ TEST_F(LocalizationNodeImuTurnTest, TheConsistencyAndTheOutvoteCountSurviveARelo
   node_->set_scan_processing_hook_for_test([&scan_hook_calls] { ++scan_hook_calls; });
   bring_up();
   start_and_wait_until_ready();
-  run_phase(3.0, kTurnRateRadPerSec, 1.0);
-  run_phase(2.0, 0.0, 1.0);
+  run_phase(kQuickTurnSec, kQuickTurnRateRadPerSec, 1.0);
+  run_phase(kSettleSec, 0.0, 1.0);
   ASSERT_EQ(imu_values().at("consistency"), "active");
 
   reload_map_and_set_initial_pose_at_the_current_heading();
-  run_phase(2.0, 0.0, 1.0);
+  run_phase(kSettleSec, 0.0, 1.0);
   EXPECT_EQ(imu_values().at("consistency"), "active");
   EXPECT_EQ(imu_count("consistency_outvoted_total"), 0U);
 
   // A slow turn with a gyro of 1.5 times the scale: the wheels and LiDAR agree and outvote it. (A gyro
   // of the opposite sign would move the internal odometry so far that the LiDAR match is refused.)
   run_phase(1.5, 0.3, 1.5);
-  run_phase(2.0, 0.0, 1.0);
+  run_phase(kSettleSec, 0.0, 1.0);
   const std::string consistency_before = imu_values().at("consistency");
   const std::size_t outvoted_before = imu_count("consistency_outvoted_total");
   EXPECT_TRUE(consistency_before == "suspended" || consistency_before == "disabled_inconsistent")
@@ -2135,7 +2165,7 @@ TEST_F(LocalizationNodeImuTurnTest, TheConsistencyAndTheOutvoteCountSurviveARelo
 
   const int hook_calls_before_reload = scan_hook_calls.load();
   reload_map_and_set_initial_pose_at_the_current_heading();
-  run_phase(2.5, 0.0, 1.0);
+  run_phase(kSettleSec, 0.0, 1.0);
   EXPECT_EQ(imu_values().at("consistency"), consistency_before);
   EXPECT_EQ(imu_count("consistency_outvoted_total"), outvoted_before);
   EXPECT_GT(scan_hook_calls.load(), hook_calls_before_reload);
@@ -2146,7 +2176,135 @@ TEST_F(LocalizationNodeImuTurnTest, TheConsistencyAndTheOutvoteCountSurviveARelo
   ASSERT_EQ(node_->configure().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE);
   ASSERT_EQ(node_->activate().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE);
   diagnostics_values_.clear();
-  run_phase(1.5, 0.0, 1.0);
+  run_phase(kSettleSec, 0.0, 1.0);
   EXPECT_EQ(imu_values().at("consistency"), "unverified");
   EXPECT_EQ(imu_count("consistency_outvoted_total"), 0U);
+}
+
+// Nothing is passed to the Localizer while the consistency is disabled_inconsistent (the node's branch).
+TEST(GyroYawDeltaForLocalizer, NothingIsPassedWhileDisabledInconsistent) {
+  const std::optional<double> integrated = 0.01;
+  EXPECT_EQ(gyro_yaw_delta_for_localizer(GyroConsistencyState::kDisabledInconsistent, integrated),
+            std::nullopt);
+  for (const GyroConsistencyState state :
+       {GyroConsistencyState::kUnverified, GyroConsistencyState::kActive, GyroConsistencyState::kSuspended}) {
+    EXPECT_EQ(gyro_yaw_delta_for_localizer(state, integrated), integrated);
+    EXPECT_EQ(gyro_yaw_delta_for_localizer(state, std::nullopt), std::nullopt);
+  }
+}
+
+// An IMU TF turned by 90 degrees disagrees with the gravity-based up axis by 90 degrees (a warning);
+// without a TF the value is unavailable and there is no warning.
+TEST_F(LocalizationNodeImuTest, TheTfUpAxisIsComparedWithGravityAndMissingTfIsUnavailable) {
+  create_imu_node();
+  bring_up();
+  run_standing_still(3500ms, true);
+  EXPECT_EQ(imu_values().at("state"), "ready");
+  EXPECT_EQ(imu_values().at("tf_up_axis_disagreement_deg"), "unavailable");
+  EXPECT_EQ(diagnostics_levels_.at(kImuDiagnosticsName), diagnostic_msgs::msg::DiagnosticStatus::OK);
+
+  geometry_msgs::msg::TransformStamped transform;
+  transform.header.stamp = helper_->now();
+  transform.header.frame_id = "base_footprint";
+  transform.child_frame_id = "imu_link";
+  transform.transform.rotation.x = std::sin(M_PI / 4.0);  // 90 degrees about x
+  transform.transform.rotation.w = std::cos(M_PI / 4.0);
+  static_broadcaster_->sendTransform(transform);
+  run_standing_still(2500ms, true);
+  EXPECT_NEAR(std::stod(imu_values().at("tf_up_axis_disagreement_deg")), 90.0, 2.0);
+  EXPECT_EQ(diagnostics_levels_.at(kImuDiagnosticsName), diagnostic_msgs::msg::DiagnosticStatus::WARN);
+}
+
+// Load (Issue #92 section 4.4): the IMU at 966 Hz, the wheel at 50 Hz, the scans at 10 Hz, and every scan
+// takes 50 ms inside the wheel callback. The inputs come from a second thread, so that the samples pile
+// up in the subscriptions while the node is busy. Standing still, a 90 degree turn, standing still.
+class LocalizationNodeImuLoadTest : public LocalizationNodeImuTurnTest {
+ protected:
+  static constexpr double kImuRateHz = 966.0;
+  static constexpr double kStandstillSec = 3.0;
+  static constexpr double kScenarioSec = 8.0;
+
+  void publish_wheel_from_thread(const rclcpp::Time& stamp, const Eigen::Isometry3d& pose) {
+    // Not publish_wheel_at: that one records the stamp in a set the executor thread reads.
+    nav_msgs::msg::Odometry message;
+    message.header.stamp = stamp;
+    message.header.frame_id = "odom";
+    message.child_frame_id = "base_footprint";
+    message.pose.pose.position.x = pose.translation().x();
+    message.pose.pose.position.y = pose.translation().y();
+    message.pose.pose.position.z = pose.translation().z();
+    const Eigen::Quaterniond orientation(pose.rotation());
+    message.pose.pose.orientation.x = orientation.x();
+    message.pose.pose.orientation.y = orientation.y();
+    message.pose.pose.orientation.z = orientation.z();
+    message.pose.pose.orientation.w = orientation.w();
+    message.pose.covariance[0] = 1e-4;
+    message.pose.covariance[7] = 1e-4;
+    message.pose.covariance[35] = 1e-4;
+    wheel_publisher_->publish(message);
+  }
+
+  void run_loaded_scenario() {
+    const auto start = std::chrono::steady_clock::now();
+    const rclcpp::Time start_stamp = node_->get_clock()->now();
+    double next_wheel_sec = 0.0;
+    double next_scan_sec = 0.0;
+    const long long sample_count = static_cast<long long>(kScenarioSec * kImuRateHz);
+    for (long long index = 0; index < sample_count; ++index) {
+      const double scheduled_sec = static_cast<double>(index) / kImuRateHz;
+      std::this_thread::sleep_until(start + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                                std::chrono::duration<double>(scheduled_sec)));
+      const rclcpp::Time stamp = start_stamp + rclcpp::Duration::from_seconds(scheduled_sec);
+      const double turn_sec = std::clamp(scheduled_sec - kStandstillSec, 0.0, kQuickTurnSec);
+      const bool is_turning = scheduled_sec >= kStandstillSec && scheduled_sec < kStandstillSec + kQuickTurnSec;
+      Eigen::Isometry3d pose = Eigen::Isometry3d::Identity();
+      pose.translation() = kTruthPosition;
+      pose.linear() = Eigen::AngleAxisd(kTruthYaw + kQuickTurnRateRadPerSec * turn_sec,
+                                        Eigen::Vector3d::UnitZ()).toRotationMatrix();
+      publish_imu(stamp, is_turning ? kQuickTurnRateRadPerSec : 0.0);
+      while (next_wheel_sec <= scheduled_sec) {
+        publish_wheel_from_thread(start_stamp + rclcpp::Duration::from_seconds(next_wheel_sec), pose);
+        next_wheel_sec += 0.02;
+      }
+      while (next_scan_sec <= scheduled_sec) {
+        publish_scan_at(start_stamp + rclcpp::Duration::from_seconds(next_scan_sec), pose);
+        next_scan_sec += 0.1;
+      }
+    }
+    heading_offset_rad_ = kQuickTurnRateRadPerSec * kQuickTurnSec;
+    wheel_offset_rad_ = heading_offset_rad_;
+  }
+
+  // Runs the scenario with the scan processing delayed by 50 ms and prints the measured numbers.
+  double run_with_scan_delay_and_report() {
+    create_imu_node();
+    node_->set_scan_processing_hook_for_test([] { std::this_thread::sleep_for(50ms); });
+    bring_up();
+    start_tracking_at_truth();
+    std::atomic<bool> is_done{false};
+    std::thread publisher([this, &is_done] {
+      run_loaded_scenario();
+      is_done = true;
+    });
+    while (!is_done) executor_.spin_some(5ms);
+    publisher.join();
+    spin_for(1500ms);
+    const std::size_t gyro_total = imu_count("yaw_increments_gyro_total");
+    const std::size_t wheel_total = imu_count("yaw_increments_wheel_total");
+    const double ratio = static_cast<double>(gyro_total) / static_cast<double>(gyro_total + wheel_total);
+    std::printf("[ MEASURED ] load: gyro increments %zu, wheel increments %zu, ratio %.4f, skipped factors %zu, "
+                "added factors %zu, yaw error %.3f deg, consistency %s\n",
+                gyro_total, wheel_total, ratio, imu_count("rotation_factors_skipped_total"),
+                imu_count("rotation_factors_added_total"), truth_yaw_error_deg(),
+                imu_values().at("consistency").c_str());
+    return ratio;
+  }
+};
+
+TEST_F(LocalizationNodeImuLoadTest, ScansOf50MsAt966HzImuStillGiveGyroIncrementsToTheLocalizer) {
+  const double ratio = run_with_scan_delay_and_report();
+  EXPECT_GE(ratio, 0.95);
+  EXPECT_LE(imu_count("rotation_factors_skipped_total"), 1U);
+  EXPECT_EQ(imu_values().at("consistency"), "active");
+  EXPECT_LT(truth_yaw_error_deg(), 3.0);
 }
