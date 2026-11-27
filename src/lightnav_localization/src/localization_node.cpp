@@ -1462,7 +1462,8 @@ void LocalizationNode::maybe_start_mapping() {
       initial_position_from_gps_ = false;
       map_has_no_gps_origin_ = true;
     } else {
-      node_error_ = "waiting for a GPS fix for the mapping origin";
+      // The reason of a refused fix (reported std above the limit) is more specific: keep it.
+      if (!is_waiting_for_reported_std_) node_error_ = "waiting for a GPS fix for the mapping origin";
       return;
     }
   }
