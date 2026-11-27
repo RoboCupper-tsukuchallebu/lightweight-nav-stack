@@ -19,6 +19,8 @@ localization_node:
 
     # Initial alignment (Issue #2 section 8, localization mode).
     init_gps_max_std_m: 3.0
+    # Mapping origin / initial alignment only: refuse a fix whose receiver-reported std is above this (0 = off). Issue #93.
+    init_gps_reported_std_max_m: 0.0
     # GNSS input contract (Issue #43 section 4.3). The defaults keep every fix; docker/config/robot.yaml sets 1 and 1.0.
     gps_min_status: -1
     gps_min_interval_s: 0.0
@@ -71,6 +73,20 @@ localization_node:
     wheel_sigma_yaw_per_m: 0.01
     planar_sigma_z_per_m: 0.05
     planar_sigma_tilt_rad: 0.05
+    # Weak absolute references on every node (0 = off). Issue #93: the tilt reference works in mapping and
+    # localization, the height reference in mapping only.
+    absolute_sigma_tilt_rad: 0.0
+    absolute_sigma_z_m: 0.0
+
+    # Mapping save (Issue #93). Loop closing runs only for ~/save_map, never for the stop-time save.
+    loop_closure_enabled: false
+    loop_closure_min_path_gap_m: 50.0
+    loop_closure_query_spacing_m: 10.0
+    loop_closure_search_radius_m: 5.0
+    loop_closure_search_radius_per_m: 0.05
+    loop_closure_max_search_radius_m: 20.0
+    loop_closure_max_rounds: 3
+    map_save_keyframe_clouds: false
 
     # Prior-map matching.
     map_submap_rebuild_distance_m: 50.0

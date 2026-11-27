@@ -34,6 +34,7 @@
 
 #include "lightnav_localization/localization_node.hpp"
 #include "lightnav_localization/map_metadata.hpp"
+#include "lightnav_localization/map_save.hpp"
 #include "lightnav_localization/pcd_io.hpp"
 #include "synthetic_world.hpp"
 
@@ -121,9 +122,11 @@ class LocalizationNodeTest : public ::testing::Test {
     metadata.origin_latitude_deg = kOrigin.latitude_deg;
     metadata.origin_longitude_deg = kOrigin.longitude_deg;
     metadata.origin_altitude_m = kOrigin.altitude_m;
+    metadata.batch_optimized = true;  // a preliminary map adds a note to last_error (tested separately)
     write_map_metadata(map_yaml_.string(), metadata);
     MapMetadata no_origin_metadata;
     no_origin_metadata.has_gps_origin = false;
+    no_origin_metadata.batch_optimized = true;
     write_map_metadata(no_origin_yaml_.string(), no_origin_metadata);
   }
 
@@ -1509,4 +1512,228 @@ TEST_F(LocalizationNodeTest, TracksWithoutGpsOnAMapWithoutGpsOrigin) {
       Eigen::Vector2d(last_odom_.pose.pose.position.x, last_odom_.pose.pose.position.y) -
       kTruthPosition.head<2>();
   EXPECT_LT(position_error.norm(), 0.2);
+}
+
+// ---- Issue #93: save_map twice, the stop-time save without loops, the reported-std limit, preliminary maps.
+
+TEST_F(LocalizationNodeTest, SecondSaveMapWithoutNewKeyframesSucceedsWithoutSavingAgain) {
+  const std::filesystem::path output_directory = temp_directory_ / "mapping_save_twice";
+  create_node(make_mapping_options(output_directory));
+  bring_up();
+  const Eigen::Isometry3d last_pose = drive_mapping_forward();
+  ASSERT_GT(odom_count_, 0) << last_status_.last_error;
+
+  const auto first = call_save_map();
+  ASSERT_NE(first, nullptr);
+  ASSERT_TRUE(first->success) << first->message;
+  EXPECT_NE(first->message.find("loop closures: off"), std::string::npos) << first->message;
+  const auto saved = snapshot_map_files(output_directory);
+
+  drive_mapping([&last_pose](double /*elapsed*/) { return last_pose; }, 1000ms);
+  const auto second = call_save_map();
+  ASSERT_NE(second, nullptr);
+  EXPECT_TRUE(second->success) << second->message;
+  EXPECT_EQ(second->message, lightnav_localization::kMapAlreadySavedMessage);
+  const auto after_second = snapshot_map_files(output_directory);
+  ASSERT_EQ(saved.size(), after_second.size());
+  for (std::size_t index = 0; index < saved.size(); ++index) {
+    EXPECT_EQ(saved[index].first, after_second[index].first) << "file " << index;
+    EXPECT_EQ(saved[index].second, after_second[index].second) << "file " << index;
+  }
+}
+
+rclcpp::NodeOptions with_loop_closing_enabled(rclcpp::NodeOptions options) {
+  std::vector<rclcpp::Parameter> overrides = options.parameter_overrides();
+  overrides.emplace_back("loop_closure_enabled", true);
+  options.parameter_overrides(overrides);
+  return options;
+}
+
+TEST_F(LocalizationNodeTest, StopTimeSaveDoesNotRunLoopClosingEvenWhenEnabled) {
+  const std::filesystem::path output_directory = temp_directory_ / "mapping_stop_without_loops";
+  create_node(with_loop_closing_enabled(make_mapping_options(output_directory)));
+  bring_up();
+  const Eigen::Isometry3d last_pose = drive_mapping_forward();
+  ASSERT_GT(odom_count_, 0) << last_status_.last_error;
+  drive_mapping([&last_pose](double /*elapsed*/) { return last_pose; }, 500ms);
+
+  ASSERT_EQ(node_->deactivate().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE);
+
+  const MapMetadata metadata = read_map_metadata((output_directory / "map.yaml").string());
+  EXPECT_EQ(metadata.save_stage, lightnav_localization::MapSaveStage::kFinal);
+  EXPECT_FALSE(metadata.loop_closure_count.has_value());
+}
+
+TEST_F(LocalizationNodeTest, SaveMapRunsLoopClosingWhenEnabledAndReportsTheCount) {
+  const std::filesystem::path output_directory = temp_directory_ / "mapping_save_with_loops";
+  create_node(with_loop_closing_enabled(make_mapping_options(output_directory)));
+  bring_up();
+  drive_mapping_forward();
+  ASSERT_GT(odom_count_, 0) << last_status_.last_error;
+
+  const auto response = call_save_map();
+  ASSERT_NE(response, nullptr);
+  ASSERT_TRUE(response->success) << response->message;
+  EXPECT_EQ(response->message.find("loop closures: off"), std::string::npos) << response->message;
+  EXPECT_NE(response->message.find("loop closures: "), std::string::npos) << response->message;
+  const MapMetadata metadata = read_map_metadata((output_directory / "map.yaml").string());
+  EXPECT_EQ(metadata.save_stage, lightnav_localization::MapSaveStage::kFinal);
+  // A straight drive has no loop: the detection ran and found none (0), which is not the same as not run.
+  ASSERT_TRUE(metadata.loop_closure_count.has_value());
+  EXPECT_EQ(*metadata.loop_closure_count, 0);
+}
+
+namespace {
+constexpr double kLargeReportedStdM = 5.0;
+constexpr double kReportedStdLimitM = 1.0;
+}  // namespace
+
+// A fix that reports `reported_std_m` (the receiver's own estimate: DIAGONAL_KNOWN, as the real driver does).
+TEST_F(LocalizationNodeTest, MappingOriginWaitsForTheReportedStdAndTheWaitNoteDisappears) {
+  const std::filesystem::path output_directory = temp_directory_ / "mapping_reported_std";
+  rclcpp::NodeOptions options = make_mapping_options(output_directory);
+  std::vector<rclcpp::Parameter> overrides = options.parameter_overrides();
+  overrides.emplace_back("init_gps_reported_std_max_m", kReportedStdLimitM);
+  options.parameter_overrides(overrides);
+  create_node(options);
+  bring_up();
+
+  const auto publish_fix_reporting = [this](double reported_std_m) {
+    sensor_msgs::msg::NavSatFix fix = make_gnss_fix(node_->get_clock()->now(), 0, 0.0);
+    fix.position_covariance[0] = reported_std_m * reported_std_m;
+    fix.position_covariance[4] = reported_std_m * reported_std_m;
+    gps_publisher_->publish(fix);
+  };
+  ASSERT_TRUE(run_until(
+      [&]() {
+        publish_fix_reporting(kLargeReportedStdM);
+        return last_status_.last_error.find("waiting for a GPS fix with reported std <= 1.0 m") !=
+               std::string::npos;
+      },
+      4000ms, kInputWheel | kInputScans))
+      << last_status_.last_error;
+  EXPECT_NE(last_status_.last_error.find("(latest 5.0 m)"), std::string::npos) << last_status_.last_error;
+  EXPECT_EQ(odom_count_, 0);
+
+  ASSERT_TRUE(run_until(
+      [&]() {
+        publish_fix_reporting(0.5);
+        return last_status_.last_error.find("waiting for a GPS fix") == std::string::npos;
+      },
+      4000ms, kInputWheel | kInputScans))
+      << last_status_.last_error;
+}
+
+TEST_F(LocalizationNodeTest, LocalizationInitialAlignmentWaitsForTheReportedStdAndATrustedFixClearsTheNote) {
+  rclcpp::NodeOptions options = make_options(map_file_.string(), map_yaml_.string());
+  options.append_parameter_override("init_gps_reported_std_max_m", kReportedStdLimitM);
+  create_node(options);
+  bring_up();
+
+  const auto publish_fix_reporting = [this](double reported_std_m) {
+    sensor_msgs::msg::NavSatFix fix = make_gnss_fix(node_->get_clock()->now(), 0, 0.0);
+    fix.position_covariance[0] = reported_std_m * reported_std_m;
+    fix.position_covariance[4] = reported_std_m * reported_std_m;
+    gps_publisher_->publish(fix);
+  };
+  ASSERT_TRUE(run_until(
+      [&]() {
+        publish_fix_reporting(kLargeReportedStdM);
+        return last_status_.last_error.find("waiting for a GPS fix with reported std <= 1.0 m") !=
+               std::string::npos;
+      },
+      4000ms, kInputWheel | kInputScans))
+      << last_status_.last_error;
+  EXPECT_EQ(last_status_.state, LocalizationStatus::INITIALIZING);
+  EXPECT_EQ(odom_count_, 0);
+
+  ASSERT_TRUE(run_until(
+      [&]() {
+        publish_fix_reporting(0.5);
+        return last_status_.last_error.find("waiting for a GPS fix") == std::string::npos;
+      },
+      4000ms, kInputWheel | kInputScans))
+      << last_status_.last_error;
+}
+
+TEST_F(LocalizationNodeTest, ReportedStdLimitOfZeroAndAFixWithoutAReportAreNotRefused) {
+  rclcpp::NodeOptions options = make_options(map_file_.string(), map_yaml_.string());
+  options.append_parameter_override("init_gps_reported_std_max_m", kReportedStdLimitM);
+  create_node(options);
+  bring_up();
+  ASSERT_TRUE(run_until(
+      [this]() {
+        sensor_msgs::msg::NavSatFix fix = make_gnss_fix(node_->get_clock()->now(), 0, 0.0);
+        fix.position_covariance_type = sensor_msgs::msg::NavSatFix::COVARIANCE_TYPE_UNKNOWN;
+        gps_publisher_->publish(fix);
+        return status_count_ > 0;
+      },
+      3000ms, kInputWheel | kInputScans));
+  EXPECT_EQ(last_status_.last_error.find("waiting for a GPS fix"), std::string::npos)
+      << last_status_.last_error;
+}
+
+TEST_F(LocalizationNodeTest, PreliminaryMapAddsANoteToLastErrorAndAnOptimizedMapDoesNot) {
+  const std::filesystem::path preliminary_yaml = temp_directory_ / "map_preliminary.yaml";
+  MapMetadata preliminary;
+  preliminary.has_gps_origin = true;
+  preliminary.origin_latitude_deg = kOrigin.latitude_deg;
+  preliminary.origin_longitude_deg = kOrigin.longitude_deg;
+  preliminary.origin_altitude_m = kOrigin.altitude_m;
+  preliminary.batch_optimized = false;
+  write_map_metadata(preliminary_yaml.string(), preliminary);
+  create_node(make_options(map_file_.string(), preliminary_yaml.string()));
+  bring_up();
+  ASSERT_TRUE(run_until([this]() { return status_count_ > 0; }, 2000ms, kInputWheel | kInputScans));
+  EXPECT_NE(last_status_.last_error.find(lightnav_localization::kPreliminaryMapNote), std::string::npos)
+      << last_status_.last_error;
+  close_node();
+
+  create_node(make_options(map_file_.string(), map_yaml_.string()));
+  bring_up();
+  ASSERT_TRUE(run_until([this]() { return status_count_ > 0; }, 2000ms, kInputWheel | kInputScans));
+  EXPECT_EQ(last_status_.last_error.find(lightnav_localization::kPreliminaryMapNote), std::string::npos)
+      << last_status_.last_error;
+}
+
+// config/localization.yaml lists every parameter of this issue, with the value the node declares as default.
+TEST_F(LocalizationNodeTest, LocalizationYamlListsTheNewParametersWithTheNodeDefaults) {
+  const std::filesystem::path config_path =
+      std::filesystem::path(__FILE__).parent_path().parent_path() / "config" / "localization.yaml";
+  std::ifstream stream(config_path);
+  ASSERT_TRUE(stream) << config_path;
+  std::map<std::string, std::string> yaml_values;
+  std::string line;
+  while (std::getline(stream, line)) {
+    const std::size_t indent = line.find_first_not_of(' ');
+    if (indent != 4 || line[indent] == '#') continue;
+    const std::size_t separator = line.find(':', indent);
+    if (separator == std::string::npos) continue;
+    const std::size_t value_begin = line.find_first_not_of(' ', separator + 1);
+    yaml_values[line.substr(indent, separator - indent)] =
+        value_begin == std::string::npos ? "" : line.substr(value_begin);
+  }
+  create_node(make_options(map_file_.string(), map_yaml_.string()));
+  for (const char* name :
+       {"absolute_sigma_tilt_rad", "absolute_sigma_z_m", "init_gps_reported_std_max_m",
+        "loop_closure_enabled", "loop_closure_min_path_gap_m", "loop_closure_query_spacing_m",
+        "loop_closure_search_radius_m", "loop_closure_search_radius_per_m",
+        "loop_closure_max_search_radius_m", "loop_closure_max_rounds", "map_save_keyframe_clouds"}) {
+    const auto found = yaml_values.find(name);
+    ASSERT_NE(found, yaml_values.end()) << name << " is missing from config/localization.yaml";
+    const rclcpp::Parameter declared = node_->get_parameter(name);
+    switch (declared.get_type()) {
+      case rclcpp::ParameterType::PARAMETER_BOOL:
+        EXPECT_EQ(found->second == "true", declared.as_bool()) << name;
+        break;
+      case rclcpp::ParameterType::PARAMETER_INTEGER:
+        EXPECT_EQ(std::stoll(found->second), declared.as_int()) << name;
+        break;
+      case rclcpp::ParameterType::PARAMETER_DOUBLE:
+        EXPECT_DOUBLE_EQ(std::stod(found->second), declared.as_double()) << name;
+        break;
+      default:
+        ADD_FAILURE() << name << " has an unexpected type";
+    }
+  }
 }

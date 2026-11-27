@@ -110,6 +110,13 @@ struct ScanTimeStatistics {
 // every 50 m; it only reads the immutable map and hands the result back through a future that the
 // calling thread collects, so no lock is needed and the 50 Hz path never waits for the rebuild.
 // ROS-free pipeline: deskew -> lidar odometry -> prior-map match -> GPS -> pose graph -> slew.
+// The pose graph parameters the Localizer actually builds its graph with. The absolute height reference
+// (absolute_sigma_z_m) is applied in mapping only: in localization the prior map decides the height, and
+// "the height of the first node" would be the height of wherever the localizer was initialised. The level
+// (tilt) reference applies in both modes. Invalid (negative / non-finite) values are passed on unchanged so
+// the pose graph rejects them.
+PoseGraphParameters graph_parameters_for_mode(const LocalizerParameters& parameters);
+
 class Localizer {
  public:
   // `map_points` may be empty (no prior map). `gps_origin` empty disables GPS.
@@ -138,6 +145,15 @@ class Localizer {
   std::size_t error_events_total() const;
   std::size_t pending_scan_count() const;
   void inject_optimization_failure_for_test();
+  // Test seam: replaces the loop closing of save_map (same contract as close_loops in map_save.hpp).
+  using LoopClosingFunction = std::function<bool(
+      PoseGraph&, const std::vector<KeyframeCloud>&, const LoopClosureParameters&, int,
+      std::vector<LoopClosure>&, std::string&, std::string&)>;
+  void set_loop_closing_for_test(LoopClosingFunction loop_closing);
+  // Test seam: the batch optimisation of save_map after `successful_calls` more calls fails (0 = the next:
+  // stage 2; 1 = the first optimisation inside the loop closing, or stage 3 without loop closing).
+  void inject_batch_failure_for_test(int successful_calls);
+  std::size_t loop_closure_factor_count_for_test() const;
   // Next prior-map rebuild: 1 = the worker throws, 2 = starting the worker throws system_error.
   void inject_map_rebuild_failure_for_test(int mode);
   // Poses (map_to_base, oldest first) of the keyframes in the LiDAR odometry sub-map.
@@ -188,9 +204,14 @@ class Localizer {
   // finished stage instead of nothing:
   //   1. preliminary: the poses as the online estimate left them (map.yaml batch_optimized: false),
   //   2. optimized: after the batch optimisation of every retained factor (position_std_m is nan),
-  //   3. final: after the loop closures (when enabled) and with the standard deviations.
+  //   3. final: after the loop closures (only when MapOutputParameters::should_close_loops) and with the
+  //      standard deviations.
   // `report_progress` is called with one line as soon as a stage is on disk.
-  // On failure the files of the stages that finished stay; `error` says what failed.
+  // On failure the files of the stages that finished stay; `error` says what failed. A failure in the loop
+  // closing or in stage 3 removes the loop closure factors again and restores the stage 2 result, so the
+  // next save starts from the same graph. When the previous save already wrote stage 2 or later and no
+  // keyframe has been added since, stage 1 is skipped: a map that went further is never overwritten by a
+  // preliminary one (if stage 2 then fails, the earlier map stays as it is).
   bool save_map(const MapOutputParameters& parameters, MapOutputResult& result,
                 std::string& error, const MapSaveProgress& report_progress = {});
 

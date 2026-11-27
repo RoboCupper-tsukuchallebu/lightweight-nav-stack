@@ -67,7 +67,8 @@ PointList build_map_points(const std::vector<KeyframeCloud>& keyframes,
   std::map<int, Eigen::Isometry3d> poses;
   for (const TrajectoryPoint& point : trajectory) poses[point.node_index] = point.map_to_base;
   // One allocation for the whole map. Reserving keyframe by keyframe copied everything assembled so far at
-  // every keyframe: 15 s of the save of a 37 min drive (1900 keyframes, 7 million points).
+  // every keyframe, so the time grew with the square of the keyframe count: this function alone took 15.6 s
+  // for a 37 min drive (1900 keyframes, 7 million points; 0.7 s with one allocation, measured on a Mac).
   std::size_t total_point_count = 0;
   for (const KeyframeCloud& keyframe : keyframes) {
     if (poses.count(keyframe.node_index) > 0) total_point_count += keyframe.points_in_base.size();
@@ -230,6 +231,8 @@ MapOutputResult write_map_outputs(const MapOutputParameters& parameters,
   metadata.created = parameters.created;
   metadata.keyframe_count = static_cast<int>(keyframes.size());
   metadata.batch_optimized = parameters.batch_optimized;
+  metadata.save_stage = parameters.save_stage;
+  metadata.loop_closure_count = parameters.loop_closure_count;
 
   // Write every file under a temporary name first; any failure leaves the previous three files as
   // they were. Directory-level rename is not used (it fails with ENOTEMPTY on a non-empty directory).

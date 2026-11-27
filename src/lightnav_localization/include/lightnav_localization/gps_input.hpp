@@ -25,7 +25,15 @@ struct GpsFix {
   bool has_known_covariance = false;  // position_covariance_type == KNOWN
   double known_std_m = 0.0;           // horizontal std when the covariance is known
   double hdop = 0.0;                  // 0 when unknown
+  // Horizontal std the receiver reports, from any covariance type except UNKNOWN (also the diagonal-only
+  // type): sqrt of the larger of the east / north variance. 0 when the fix carries no usable report. Used
+  // only by is_reported_std_above_limit(); the std that enters the pose graph does not use it.
+  double reported_std_m = 0.0;
 };
+
+// True when `limit_m` is positive, the fix carries a reported std (reported_std_m > 0) and it exceeds the
+// limit. A limit of 0 turns the check off; a fix without a report is never refused here.
+bool is_reported_std_above_limit(const GpsFix& fix, double limit_m);
 
 struct GpsParameters {
   double std_fix_m = 2.0;
