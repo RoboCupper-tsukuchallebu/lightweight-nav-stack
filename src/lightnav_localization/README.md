@@ -243,7 +243,7 @@ performance は直近のスキャン処理時間とプロセスの CPU・メモ�
   TF（`base_frame`→IMU）は**照合にだけ**使い、重力で決めた上下軸との角度の差を診断に出す（`imu_up_axis_warn_deg` を超えたら警告）。TF が無くても動く。
 - **車輪のコールバックの順**: IMU の購読にたまったメッセージを `take()` で空になるまで取り込む → 車輪の姿勢を渡す → 前の車輪のサンプルから今までの yaw の変化を積分 → `Localizer::on_wheel_odom` に渡す。スキャンの処理は車輪のコールバックの中で走るので、先に取り込まないと増分が「無し」になる。
 - **整合を確かめてから使う**: 届いているが誤っているジャイロ（符号が逆、別の軸、倍率の誤り）を使わないため、状態を持つ。`unverified`（`on_configure` の直後。使わない）→ 車輪と LiDAR に合えば `active`（車輪の yaw の増分をジャイロで置き換え、キーフレームの間に yaw の回転係数を足す）。
-  `active` のあと、車輪と LiDAR がそろってジャイロと違う区間が出ると `suspended`（LiDAR で確かめ直すまで使わない）、累計 3 回で `disabled_inconsistent`（`on_configure` し直すまで使わない）。これらの状態と負けの累計は、`~/reload_map`・`~/set_initial_pose`・LOST の復帰で `Localizer` を作り直しても持ち越し、`on_cleanup`→`on_configure` で `unverified`・0 に戻す。
+  `active` のあと、車輪と LiDAR がそろってジャイロと違う区間が出ると `suspended`（LiDAR で確かめ直すまで使わない）、累計 3 回で `disabled_inconsistent`（`on_configure` し直すまで使わない）。これらの状態と負けの累計は、`~/reload_map`（`Localizer` を作り直す）・`~/set_initial_pose`・LOST の復帰（`Localizer::initialize`）をまたいで持ち越し、`on_cleanup`→`on_configure` で `unverified`・0 に戻す。
   使わない間は車輪の yaw のまま（IMU が無いときと同じ動き）。
 - **途絶・遅延**: IMU が止まると車輪の yaw のまま（回転係数は足さない）。スキャンは IMU を待たない。戻れば次の車輪のサンプルから使う。状態は `LocalizationStatus` に出さず、`/diagnostics` だけに出す。
 - **mapping**: 回転係数は `~/save_map` と停止時のバッチ再最適化にも効く。
@@ -304,6 +304,7 @@ performance は直近のスキャン処理時間とプロセスの CPU・メモ�
 - ゆっくりした旋回（1 区間あたりの差が 0.05 rad に届かない）での倍率の誤りと、止まらない長い走行でのバイアスのずれは、LiDAR との差が 1 区間で 0.05 rad を超えるまで見つからない。
 - 「多数決で負け」が累計 3 回になると、`on_configure` し直すまで車輪の yaw に戻る（今と同じ動き）。
 - `active` の途中でジャイロの符号だけが変わった場合、内部のオドメトリが大きくずれて LiDAR の照合が受け入れられず、「負け」が数えられない（LiDAR の値が無いと負けにならないため）。最初から反転したものは使わない。
+  実機でジャイロが急に壊れた・つなぎ替えで符号が変わった疑いがあるときは、`slip_detected_total` と `slip_max_rad`（車輪とジャイロの yaw の差）が跳ねていないかを見る。
 - 上下軸は最初の静止で決めて、その起動の間使う。静止は車輪で判定するので、手で持って傾けたまま落ち着いた区間も採用されうる。
 
 ### 次の段階: 完全な preintegration（`CombinedImuFactor`）が大きな変更になる理由

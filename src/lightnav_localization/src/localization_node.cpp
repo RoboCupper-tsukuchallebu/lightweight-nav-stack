@@ -1241,6 +1241,8 @@ void LocalizationNode::try_resolve_imu_expected_up_axis(const std::string& imu_f
     gyro_yaw_tracker_->set_expected_up_axis(std::nullopt);
   }
   if (has_imu_expected_up_axis_) return;
+  // A replay that restarts moves the stamps back: count the retry period from the new time.
+  if (stamp_sec < last_imu_tf_attempt_sec_) last_imu_tf_attempt_sec_ = kNeverSec;
   if (stamp_sec - last_imu_tf_attempt_sec_ < kImuTfRetryPeriodSec) return;
   last_imu_tf_attempt_sec_ = stamp_sec;
   try {
