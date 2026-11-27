@@ -19,8 +19,6 @@ namespace {
 
 constexpr double kMapSubmapRadiusM = 100.0;
 constexpr double kWheelBufferSec = 3.0;
-// A rotation factor needs the gyro to cover this share of the keyframe interval (Issue #92, 3.3 step 5).
-constexpr double kMinimumGyroCoverageRatio = 0.95;
 // A keyframe interval where the raw wheel yaw and the gyro differ by more than this counts as a slip.
 constexpr double kSlipDifferenceRad = 0.05;
 // Where a rotation factor is added, the wheel factor's yaw standard deviation is at least this many
@@ -59,27 +57,6 @@ struct NodeRecord {
   double stamp;
   Eigen::Isometry3d odom_to_base = Eigen::Isometry3d::Identity();      // internal odometry
   Eigen::Isometry3d raw_odom_to_base = Eigen::Isometry3d::Identity();  // wheel pose as received
-};
-// What one wheel sample contributed to the yaw: `is_covered` when a gyro increment came with it.
-struct WheelYawSample {
-  double stamp_sec;
-  double interval_sec;
-  bool is_covered;
-  double gyro_yaw_rad;      // meaningful when covered
-  double raw_wheel_yaw_rad;
-};
-// Sums over the wheel samples of one keyframe interval.
-struct WheelYawInterval {
-  double total_sec = 0.0;
-  double covered_sec = 0.0;
-  double gyro_yaw_sum_rad = 0.0;
-  double uncovered_wheel_yaw_sum_rad = 0.0;
-  double raw_wheel_yaw_sum_rad = 0.0;
-  bool is_sufficiently_covered() const {
-    return total_sec > 0.0 && covered_sec >= kMinimumGyroCoverageRatio * total_sec;
-  }
-  // Gyro yaw over the covered part plus the raw wheel yaw over the rest.
-  double measured_yaw_rad() const { return gyro_yaw_sum_rad + uncovered_wheel_yaw_sum_rad; }
 };
 double yaw_of(const Eigen::Isometry3d& pose) {
   return std::atan2(pose.rotation()(1, 0), pose.rotation()(0, 0));
@@ -187,8 +164,6 @@ struct Localizer::Implementation {
   GyroConsistencyJudge gyro_judge;
   // Where the current verification span of the judge began (the node it started from).
   NodeRecord verification_start_node{0, 0.0};
-  // Stays false until a gyro increment is passed: then the wheel pose is used exactly as before.
-  bool has_received_gyro_yaw_delta = false;
   // True once a yaw replacement happened since the last reset. Until then the internal odometry IS the
   // raw wheel pose (not re-integrated), so nothing differs from the code without a gyro.
   bool has_replaced_yaw = false;
@@ -458,24 +433,6 @@ struct Localizer::Implementation {
     }
   }
 
-  // Samples with stamp in (begin, end]; consecutive keyframe intervals partition the samples.
-  WheelYawInterval summarize_wheel_samples(double begin_sec, double end_sec) const {
-    constexpr double kStampToleranceSec = 1e-6;
-    WheelYawInterval interval;
-    for (const WheelYawSample& sample : wheel_yaw_samples) {
-      if (sample.stamp_sec <= begin_sec || sample.stamp_sec > end_sec + kStampToleranceSec) continue;
-      interval.total_sec += sample.interval_sec;
-      interval.raw_wheel_yaw_sum_rad += sample.raw_wheel_yaw_rad;
-      if (sample.is_covered) {
-        interval.covered_sec += sample.interval_sec;
-        interval.gyro_yaw_sum_rad += sample.gyro_yaw_rad;
-      } else {
-        interval.uncovered_wheel_yaw_sum_rad += sample.raw_wheel_yaw_rad;
-      }
-    }
-    return interval;
-  }
-
   void process_scan(const PendingScan& pending) {
     if (scan_processing_hook) scan_processing_hook();
     const auto start = Clock::now();
@@ -576,7 +533,7 @@ struct Localizer::Implementation {
       // Gyro consistency check, then the rotation factor (only while the gyro is verified and covers the
       // interval). The check sees this interval first so that the keyframe that confirms the gyro
       // already carries its factor.
-      const WheelYawInterval interval = summarize_wheel_samples(last_keyframe_sec, pending.stamp);
+      const WheelYawInterval interval = summarize_wheel_yaw_samples(wheel_yaw_samples, last_keyframe_sec, pending.stamp);
       const double gyro_yaw_rad = interval.measured_yaw_rad();
       const std::optional<double> lidar_yaw_rad = lidar_result
           ? std::optional<double>(yaw_of(invert_isometry(*last_pose) * best)) : std::nullopt;
@@ -590,7 +547,10 @@ struct Localizer::Implementation {
             lidar_yaw_rad ? *lidar_yaw_rad : std::numeric_limits<double>::quiet_NaN());
       }
       const bool is_gyro_active = gyro_judge.state() == GyroConsistencyState::kActive;
-      const bool should_add_rotation_factor = is_gyro_active && interval.is_sufficiently_covered();
+      // The wheel samples are kept for a limited time only: a longer keyframe interval is not complete.
+      const bool is_interval_complete = pending.stamp - last_keyframe_sec <= kMaximumWheelSampleAgeSec;
+      const bool should_add_rotation_factor =
+          is_gyro_active && interval.is_sufficiently_covered() && is_interval_complete;
       const double wheel_gyro_difference_rad =
           should_add_rotation_factor ? std::abs(interval.raw_wheel_yaw_sum_rad - gyro_yaw_rad) : 0.0;
       // The gyro standard deviation of this interval alone, computed before the wheel factor is added.
@@ -924,21 +884,26 @@ std::optional<LocalizerOutput> Localizer::on_wheel_odom(double stamp_sec,
                                                         std::optional<double> gyro_yaw_delta_rad) {
   Implementation& self = *implementation_;
   if (!self.requested_initial_pose) return std::nullopt;
-  if (gyro_yaw_delta_rad) self.has_received_gyro_yaw_delta = true;
   const bool went_backwards = stamp_sec < self.last_wheel_sec;
   if (went_backwards) {
     self.buffer = PoseBuffer();
     self.raw_buffer = PoseBuffer();
-    // The replaced integration is dropped: the internal odometry is the raw wheel pose again.
-    self.has_replaced_yaw = false;
-    self.internal_odom = odom_to_base;
+    // Without a replacement the internal odometry is the raw wheel pose again (as before the gyro). With
+    // one, the replaced integration continues from the pose seen now as one more raw increment, so the
+    // internal yaw (and the output) does not jump back to the raw wheel yaw.
+    if (self.has_replaced_yaw) {
+      self.internal_odom = self.internal_odom * invert_isometry(self.raw_wheel_pose) * odom_to_base;
+    } else {
+      self.internal_odom = odom_to_base;
+    }
     self.raw_wheel_pose = odom_to_base;
     self.wheel_yaw_samples.clear();
+    self.gyro_judge.restart_accumulation();  // the verification span is cut at the gap
     self.pending_scans.clear();
     self.pending_gps.clear();
     self.record_event("wheel odometry time went backwards: buffers cleared");
     self.last_wheel_sec = stamp_sec;
-    self.last_wheel_pose = odom_to_base;
+    self.last_wheel_pose = self.internal_odom;
   }
   const double elapsed_sec = self.last_wheel_sec > kNeverSec ? stamp_sec - self.last_wheel_sec : 0.0;
   const double sample_interval_sec = elapsed_sec;

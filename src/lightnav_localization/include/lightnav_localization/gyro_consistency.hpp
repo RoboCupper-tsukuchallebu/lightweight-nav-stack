@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <deque>
 #include <optional>
 
 namespace lightnav_localization {
@@ -23,6 +24,7 @@ constexpr double kVerificationThresholdRad = 0.2;  // a check needs |W| or |L| a
 constexpr double kMinimumGyroToWheelRatio = 0.4;   // without LiDAR: |G| / |W| must be in this range
 constexpr double kMaximumGyroToWheelRatio = 1.8;
 constexpr double kMaximumAccumulationSec = 20.0;
+constexpr double kMinimumGyroCoverageRatio = 0.95;  // share of a keyframe interval the gyro must cover
 constexpr std::size_t kMaximumRejectionsBeforeWarning = 3;
 constexpr std::size_t kMaximumOutvotesBeforeDisabling = 3;
 }  // namespace gyro_consistency_constants
@@ -189,5 +191,53 @@ class GyroConsistencyJudge {
   std::size_t outvoted_total_ = 0;
   std::size_t rejected_total_ = 0;
 };
+
+// What one wheel sample contributed to the yaw: `is_covered` when a gyro increment came with it. The sample
+// covers the time (stamp_sec - interval_sec, stamp_sec].
+struct WheelYawSample {
+  double stamp_sec;
+  double interval_sec;
+  bool is_covered;
+  double gyro_yaw_rad;  // meaningful when covered
+  double raw_wheel_yaw_rad;
+};
+
+// Sums over the wheel samples of one keyframe interval.
+struct WheelYawInterval {
+  double total_sec = 0.0;
+  double covered_sec = 0.0;
+  double gyro_yaw_sum_rad = 0.0;
+  double uncovered_wheel_yaw_sum_rad = 0.0;
+  double raw_wheel_yaw_sum_rad = 0.0;
+  bool is_sufficiently_covered() const {
+    return total_sec > 0.0 &&
+           covered_sec >= gyro_consistency_constants::kMinimumGyroCoverageRatio * total_sec;
+  }
+  // Gyro yaw over the covered part plus the raw wheel yaw over the rest.
+  double measured_yaw_rad() const { return gyro_yaw_sum_rad + uncovered_wheel_yaw_sum_rad; }
+};
+
+// Sums the part of every wheel sample that lies inside (begin_sec, end_sec]. A sample that straddles a
+// keyframe time is split in proportion to the time on each side (the yaw is taken as uniform inside the
+// sample), so consecutive keyframe intervals partition the samples exactly.
+inline WheelYawInterval summarize_wheel_yaw_samples(const std::deque<WheelYawSample>& samples, double begin_sec,
+                                                    double end_sec) {
+  WheelYawInterval interval;
+  for (const WheelYawSample& sample : samples) {
+    if (sample.interval_sec <= 0.0) continue;
+    const double overlap_sec = std::min(sample.stamp_sec, end_sec) - std::max(sample.stamp_sec - sample.interval_sec, begin_sec);
+    if (overlap_sec <= 0.0) continue;
+    const double share = overlap_sec / sample.interval_sec;
+    interval.total_sec += overlap_sec;
+    interval.raw_wheel_yaw_sum_rad += share * sample.raw_wheel_yaw_rad;
+    if (sample.is_covered) {
+      interval.covered_sec += overlap_sec;
+      interval.gyro_yaw_sum_rad += share * sample.gyro_yaw_rad;
+    } else {
+      interval.uncovered_wheel_yaw_sum_rad += share * sample.raw_wheel_yaw_rad;
+    }
+  }
+  return interval;
+}
 
 }  // namespace lightnav_localization

@@ -91,6 +91,8 @@ class PoseGraph {
                                  const Eigen::Matrix<double, 6, 6>& information);
   // Relative yaw measured by a gyro between two nodes (both still in the window): a between factor on
   // the yaw only. Translation, roll and pitch are left unconstrained (very large standard deviations).
+  // The yaw error is the z component of the Pose3 log of the relative pose, which equals the yaw error
+  // only while roll and pitch are small (ground vehicle); on a steep slope it is a close approximation.
   // Enters the batch history when record_history is on. Call before optimize().
   void add_rotation_factor(int from_index, int to_index, double yaw_delta_rad, double yaw_sigma_rad);
   void add_map_factor(int index, const Eigen::Isometry3d& pose,

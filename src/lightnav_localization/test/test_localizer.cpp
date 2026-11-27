@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -14,6 +15,7 @@
 #include <string>
 
 #include "lightnav_localization/localizer.hpp"
+#include "golden_output.hpp"
 #include "synthetic_world.hpp"
 
 using namespace lightnav_localization;
@@ -1104,10 +1106,12 @@ enum class WheelCall { kTwoArguments, kNoGyroIncrement };
 
 // The 40 m short course (below the 50 m that triggers a prior-map rebuild on another thread).
 // `has_prior_map` false is the mapping mode without GNSS; true is localization with a prior map.
-ExactRunResult run_exactly(bool has_prior_map, WheelCall wheel_call) {
+ExactRunResult run_exactly(bool has_prior_map, WheelCall wheel_call,
+                          GyroConsistencyState initial_state = GyroConsistencyState::kUnverified) {
   const SyntheticWorld world(kShortCourse.centerline(), true);
   LocalizerParameters parameters;
   parameters.mapping = !has_prior_map;
+  parameters.initial_gyro_consistency = initial_state;
   if (wheel_call == WheelCall::kNoGyroIncrement) {
     parameters.graph.gyro_noise_density_rad_s_sqrt_hz = 0.5;
     parameters.graph.gyro_bias_sigma_rad_s = 0.25;
@@ -1161,7 +1165,49 @@ void expect_identical(const ExactRunResult& expected, const ExactRunResult& actu
   }
 }
 
+// The outputs of the code before the gyro existed (recorded at the commit this work branched from),
+// bit for bit. Another platform may differ in the last bits of the floating point results, so there the
+// kept numbers are compared with a tolerance instead.
+void expect_matches_recording_before_the_gyro(const char* file_name, const ExactRunResult& run) {
+  const std::filesystem::path path = std::filesystem::path(__FILE__).parent_path() / "data" / file_name;
+  const std::vector<GoldenOutput> golden = read_golden(path.string());
+  ASSERT_FALSE(golden.empty()) << path;
+  ASSERT_EQ(golden.size(), run.outputs.size());
+  std::size_t first_different_hash = golden.size();
+  for (std::size_t index = 0; index < golden.size(); ++index) {
+    const RecordedOutput& output = run.outputs[index];
+    if (hash_output(output.map_to_base, output.state, output.position_std_m) != golden[index].hash) {
+      first_different_hash = index;
+      break;
+    }
+  }
+  if (first_different_hash == golden.size()) return;
+#if defined(__APPLE__)
+  ADD_FAILURE() << "output " << first_different_hash << " differs from the recording before the gyro";
+#else
+  constexpr double kToleranceOtherPlatform = 1e-4;
+  for (std::size_t index = 0; index < golden.size(); ++index) {
+    if (!golden[index].has_values) continue;
+    const Eigen::Matrix4d matrix = run.outputs[index].map_to_base.matrix();
+    for (int row = 0; row < 3; ++row) {
+      for (int column = 0; column < 4; ++column) {
+        EXPECT_NEAR(matrix(row, column), golden[index].values[row * 4 + column], kToleranceOtherPlatform) << index;
+      }
+    }
+    EXPECT_NEAR(run.outputs[index].position_std_m, golden[index].values[12], kToleranceOtherPlatform) << index;
+  }
+#endif
+}
+
 void expect_unchanged_by_missing_gyro_increments(bool has_prior_map) {
+  const char* const golden_file_name =
+      has_prior_map ? "golden_localization_short_course.txt" : "golden_mapping_short_course.txt";
+  expect_matches_recording_before_the_gyro(golden_file_name, run_exactly(has_prior_map, WheelCall::kTwoArguments));
+  // A gyro that is already active but never gets an increment must not change anything either.
+  expect_matches_recording_before_the_gyro(
+      golden_file_name,
+      run_exactly(has_prior_map, WheelCall::kNoGyroIncrement, GyroConsistencyState::kActive));
+
   const ExactRunResult first = run_exactly(has_prior_map, WheelCall::kTwoArguments);
   const ExactRunResult second = run_exactly(has_prior_map, WheelCall::kTwoArguments);
   // The run itself must be repeatable, otherwise it cannot be used as the reference.
@@ -1651,6 +1697,8 @@ struct GyroDriveResult {
   bool saw_suspended = false;
   // Yaw error (deg) of every keyframe in trajectory.csv, by save stage ("preliminary", "optimized", "final").
   std::map<std::string, std::vector<double>> saved_yaw_errors_deg;
+  std::optional<GyroFusionStatus> status_before_backwards;
+  std::optional<GyroFusionStatus> status_after_backwards;
   std::size_t scans_processed = 0;
   std::size_t max_pending_scans = 0;
   bool is_tracking_at_end = false;
@@ -1766,7 +1814,9 @@ GyroDriveResult run_gyro_drive(const GyroDriveOptions& options) {
       has_initialized = true;
     }
     if (options.wheel_time_backwards_sec >= 0.0 && !has_gone_backwards && time_sec >= options.wheel_time_backwards_sec) {
+      result.status_before_backwards = localizer.gyro_fusion_status();
       localizer.on_wheel_odom(time_sec - 1.0, odom, std::nullopt);  // one sample from the past
+      result.status_after_backwards = localizer.gyro_fusion_status();
       has_gone_backwards = true;
     }
     const auto output = options.has_gyro ? localizer.on_wheel_odom(time_sec, odom, gyro_increment)
@@ -2135,4 +2185,61 @@ TEST(LocalizerGyroDrive, T3_MeasurementsForThePullRequest) {
   std::printf("[ MEASURED ] T3 first leg 30 m: final yaw error %.3f deg with gyro, %.3f deg without\n",
               long_first_leg.samples.back().yaw_error_deg, long_first_leg_reference.samples.back().yaw_error_deg);
   SUCCEED();
+}
+
+// ---- Review of PR #96 ----
+TEST(WheelYawSamples, ASampleOnAKeyframeTimeIsSplitInProportionToTheTimeOnEachSide) {
+  // 50 Hz samples turning at 0.5 rad/s (0.01 rad each, covered by an exact gyro of 0.005 rad each).
+  std::deque<WheelYawSample> samples;
+  for (int index = 1; index <= 100; ++index) samples.push_back({index * 0.02, 0.02, true, 0.005, 0.01});
+  // The keyframe at 1.01 s falls in the middle of the sample (1.00, 1.02].
+  const WheelYawInterval before = summarize_wheel_yaw_samples(samples, 0.0, 1.01);
+  const WheelYawInterval after = summarize_wheel_yaw_samples(samples, 1.01, 2.0);
+  EXPECT_NEAR(before.total_sec, 1.01, 1e-12);
+  EXPECT_NEAR(after.total_sec, 0.99, 1e-12);
+  EXPECT_NEAR(before.raw_wheel_yaw_sum_rad, 0.5 * 1.01, 1e-12);
+  EXPECT_NEAR(after.raw_wheel_yaw_sum_rad, 0.5 * 0.99, 1e-12);
+  EXPECT_NEAR(before.gyro_yaw_sum_rad, 0.25 * 1.01, 1e-12);
+  EXPECT_NEAR(before.gyro_yaw_sum_rad + after.gyro_yaw_sum_rad, 0.25 * 2.0, 1e-12);
+  EXPECT_TRUE(before.is_sufficiently_covered());
+}
+
+TEST(WheelYawSamples, AnUncoveredPartOfASplitSampleStaysWithItsSide) {
+  std::deque<WheelYawSample> samples = {{0.02, 0.02, true, 0.005, 0.01}, {0.04, 0.02, false, 0.0, 0.01}};
+  const WheelYawInterval first = summarize_wheel_yaw_samples(samples, 0.0, 0.03);
+  EXPECT_NEAR(first.covered_sec, 0.02, 1e-12);
+  EXPECT_NEAR(first.total_sec, 0.03, 1e-12);
+  EXPECT_NEAR(first.uncovered_wheel_yaw_sum_rad, 0.005, 1e-12);
+  EXPECT_NEAR(first.measured_yaw_rad(), 0.005 + 0.005, 1e-12);
+}
+
+TEST(LocalizerGyroDrive, TheOutputDoesNotJumpWhenTheWheelTimeGoesBackwardsWhileTheGyroIsUsed) {
+  GyroDriveOptions options;
+  options.initial_state = GyroConsistencyState::kActive;
+  options.wheel_yaw_scale = 1.4;  // the raw wheel yaw is 36 degrees off after the first turn
+  options.wheel_time_backwards_sec = options.course.turn_windows()[0].second + 3.0;
+  const GyroDriveResult result = run_gyro_drive(options);
+  double largest_step_deg = 0.0;
+  for (std::size_t index = 1; index < result.samples.size(); ++index) {
+    if (std::abs(result.samples[index].time_sec - options.wheel_time_backwards_sec) > 0.2) continue;
+    const Eigen::Matrix3d difference = result.samples[index - 1].map_to_base.rotation().transpose() *
+                                       result.samples[index].map_to_base.rotation();
+    largest_step_deg = std::max(largest_step_deg, std::abs(std::atan2(difference(1, 0), difference(0, 0))) * 180.0 / M_PI);
+  }
+  std::printf("[ MEASURED ] largest output yaw step around the backwards sample %.4f deg\n", largest_step_deg);
+  EXPECT_LT(largest_step_deg, 0.2);
+  EXPECT_LT(result.max_yaw_error_deg(options.wheel_time_backwards_sec, 1.0e9), 2.0);
+}
+
+TEST(LocalizerGyroDrive, TheVerificationSumsStartOverWhenTheWheelTimeGoesBackwards) {
+  GyroDriveOptions options;
+  options.course = SegmentedCourse({4.0, 4.0}, {1.0}, 0.6, 0.1);  // a slow turn: 0.1 rad per keyframe
+  options.wheel_yaw_scale = 1.0;
+  options.wheel_time_backwards_sec = options.course.turn_windows()[0].first + 1.7;
+  const GyroDriveResult result = run_gyro_drive(options);
+  ASSERT_TRUE(result.status_before_backwards.has_value());
+  ASSERT_TRUE(result.status_before_backwards->verification_sums_rad.has_value());
+  EXPECT_GT(std::abs((*result.status_before_backwards->verification_sums_rad)[0]), 0.05);
+  ASSERT_TRUE(result.status_after_backwards->verification_sums_rad.has_value());
+  EXPECT_EQ(*result.status_after_backwards->verification_sums_rad, Eigen::Vector3d::Zero());
 }

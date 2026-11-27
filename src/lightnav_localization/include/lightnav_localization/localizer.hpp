@@ -123,7 +123,7 @@ class Localizer {
   // Output for this wheel sample (nullopt while the state withholds odom). Also drains queued
   // scans/GPS that the odometry now covers. `gyro_yaw_delta_rad` is the gyro yaw change from the
   // previous wheel sample to this one; nullopt means "no increment for this sample". A Localizer that
-  // has never received a value takes exactly the same path as before the gyro was introduced.
+  // has never received a value produces exactly the same output as before the gyro was introduced.
   std::optional<LocalizerOutput> on_wheel_odom(double stamp_sec, const Eigen::Isometry3d& odom_to_base,
                                                std::optional<double> gyro_yaw_delta_rad = std::nullopt);
   // Queued until wheel odometry covers the end of the scan (stamp + largest time offset).
