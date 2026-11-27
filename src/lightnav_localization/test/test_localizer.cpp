@@ -1170,3 +1170,175 @@ TEST(LocalizerGyro, InitializeCarriesOverOnlyActiveAndDisabledInconsistent) {
     EXPECT_EQ(localizer.gyro_fusion_status().consistency, test_case.after_initialize);
   }
 }
+
+// ---- Yaw replacement, rotation factors and the raw wheel pose (Issue #92, section 3.3 steps 2, 4, 5). ----
+namespace {
+
+constexpr double kTurnYawScale = 1.4;  // the wheel over-reports every yaw change by 40 %
+
+double yaw_of_pose(const Eigen::Isometry3d& pose) {
+  return std::atan2(pose.rotation()(1, 0), pose.rotation()(0, 0));
+}
+
+double yaw_error_deg(const Eigen::Isometry3d& estimate, const Eigen::Isometry3d& truth) {
+  const Eigen::Matrix3d difference = truth.rotation().transpose() * estimate.rotation();
+  return std::abs(std::atan2(difference(1, 0), difference(0, 0))) * 180.0 / M_PI;
+}
+
+// Straight wheel steps along +x with a yaw change per step; no scans, so nothing but the odometry acts.
+Eigen::Isometry3d planar_step(double distance_m, double yaw_rad) {
+  Eigen::Isometry3d step = Eigen::Isometry3d::Identity();
+  step.translation().x() = distance_m;
+  step.linear() = Eigen::AngleAxisd(yaw_rad, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+  return step;
+}
+
+// Without scans the state stops publishing after a short while, so the drive stays short.
+constexpr int kStepsWithoutScans = 20;
+constexpr double kRawYawPerStepRad = 0.01;
+constexpr double kTrueYawPerStepRad = 0.005;
+
+Eigen::Isometry3d drive_without_scans(GyroConsistencyState initial_state, bool is_prediction_enabled,
+                                      bool should_give_gyro_increments) {
+  LocalizerParameters parameters;
+  parameters.initial_gyro_consistency = initial_state;
+  parameters.gyro_yaw_prediction_enabled = is_prediction_enabled;
+  Localizer localizer(parameters, PointList{}, std::nullopt);
+  localizer.initialize(Eigen::Isometry3d::Identity());
+  Eigen::Isometry3d odom = Eigen::Isometry3d::Identity();
+  Eigen::Isometry3d last_output = Eigen::Isometry3d::Identity();
+  for (int step = 0; step <= kStepsWithoutScans; ++step) {
+    if (step > 0) odom = odom * planar_step(0.01, kRawYawPerStepRad);
+    const auto output = should_give_gyro_increments
+        ? localizer.on_wheel_odom(step * kDt, odom, step > 0 ? std::optional<double>(kTrueYawPerStepRad) : std::nullopt)
+        : localizer.on_wheel_odom(step * kDt, odom);
+    if (output) last_output = output->map_to_base;
+  }
+  return last_output;
+}
+
+}  // namespace
+
+TEST(LocalizerGyro, ActiveGyroReplacesTheWheelYawOfTheOutput) {
+  const double raw_total_rad = kStepsWithoutScans * kRawYawPerStepRad;
+  const double true_total_rad = kStepsWithoutScans * kTrueYawPerStepRad;
+  const Eigen::Isometry3d replaced = drive_without_scans(GyroConsistencyState::kActive, true, true);
+  EXPECT_NEAR(yaw_of_pose(replaced), true_total_rad, 1e-9);
+  const Eigen::Isometry3d raw = drive_without_scans(GyroConsistencyState::kUnverified, true, false);
+  EXPECT_NEAR(yaw_of_pose(raw), raw_total_rad, 1e-9);
+}
+
+TEST(LocalizerGyro, GyroIsNotUsedUnlessActiveAndEnabled) {
+  const Eigen::Isometry3d raw = drive_without_scans(GyroConsistencyState::kUnverified, true, false);
+  // (kSuspended is not listed: initialize() turns it into kActive.)
+  for (const GyroConsistencyState state : {GyroConsistencyState::kUnverified,
+                                           GyroConsistencyState::kDisabledInconsistent}) {
+    EXPECT_EQ(drive_without_scans(state, true, true).matrix(), raw.matrix());
+  }
+  EXPECT_EQ(drive_without_scans(GyroConsistencyState::kActive, false, true).matrix(), raw.matrix());
+}
+
+namespace {
+
+struct GyroRunOptions {
+  GyroConsistencyState initial_state = GyroConsistencyState::kActive;
+  bool is_prediction_enabled = true;
+  double wheel_yaw_scale = kTurnYawScale;
+  int missing_gyro_every = 0;  // every n-th wheel sample comes without a gyro increment
+  bool is_lidar_rejected = true;
+};
+
+struct GyroRunResult {
+  double final_yaw_error_deg;
+  GyroFusionStatus status;
+};
+
+// The 40 m short course in mapping mode without GNSS. The LiDAR odometry is rejected (unless asked
+// otherwise) so that only the wheel and the gyro decide the heading.
+GyroRunResult run_with_gyro(const GyroRunOptions& options) {
+  const SyntheticWorld world(kShortCourse.centerline(), true);
+  LocalizerParameters parameters;
+  parameters.mapping = true;
+  parameters.initial_gyro_consistency = options.initial_state;
+  parameters.gyro_yaw_prediction_enabled = options.is_prediction_enabled;
+  Localizer localizer(parameters, PointList{}, std::nullopt);
+  if (options.is_lidar_rejected) {
+    localizer.set_lidar_match_hook_for_test([](MatchResult& result) { result.is_accepted = false; });
+  }
+  const auto truth_at = [](double time_sec) { return kShortCourse.truth_at(time_sec); };
+  localizer.initialize(truth_at(0.0));
+  Eigen::Isometry3d odom = Eigen::Isometry3d::Identity();
+  Eigen::Isometry3d last_output = truth_at(0.0);
+  const int step_count = static_cast<int>(kShortCourse.total_sec() / kDt);
+  for (int step = 0; step <= step_count; ++step) {
+    const double time_sec = step * kDt;
+    std::optional<double> gyro_increment;
+    if (step > 0) {
+      const Eigen::Isometry3d relative = truth_at(time_sec - kDt).inverse() * truth_at(time_sec);
+      const double true_yaw = std::atan2(relative.rotation()(1, 0), relative.rotation()(0, 0));
+      odom = odom * planar_step(relative.translation().norm(), true_yaw * options.wheel_yaw_scale);
+      const bool is_missing = options.missing_gyro_every > 0 && step % options.missing_gyro_every == 0;
+      if (!is_missing) gyro_increment = true_yaw;
+    }
+    if (step > 0 && step % static_cast<int>(0.2 / kDt) == 0 && time_sec >= kScanDuration) {
+      localizer.on_scan(time_sec, world.synthesize_scan(truth_at, time_sec - kScanDuration, kScanDuration, true, 360, 8));
+    }
+    const auto output = localizer.on_wheel_odom(time_sec, odom, gyro_increment);
+    if (output) last_output = output->map_to_base;
+  }
+  return {yaw_error_deg(last_output, truth_at(kShortCourse.total_sec())), localizer.gyro_fusion_status()};
+}
+
+}  // namespace
+
+TEST(LocalizerGyro, ActiveGyroKeepsTheHeadingWhenTheWheelOverReportsTheTurn) {
+  GyroRunOptions without_gyro_use;
+  without_gyro_use.initial_state = GyroConsistencyState::kUnverified;
+  const GyroRunResult wheel_only = run_with_gyro(without_gyro_use);
+  EXPECT_GT(wheel_only.final_yaw_error_deg, 20.0);  // 40 % of a 90 degree turn
+  EXPECT_EQ(wheel_only.status.rotation_factors_added_total, 0U);
+
+  const GyroRunResult with_gyro = run_with_gyro(GyroRunOptions{});
+  EXPECT_LT(with_gyro.final_yaw_error_deg, 2.0);
+  EXPECT_GT(with_gyro.status.rotation_factors_added_total, 0U);
+  EXPECT_EQ(with_gyro.status.rotation_factors_skipped_total, 0U);
+  EXPECT_GT(with_gyro.status.yaw_increments_gyro_total, 0U);
+  EXPECT_EQ(with_gyro.status.yaw_increments_wheel_total, 0U);
+  ASSERT_TRUE(with_gyro.status.last_yaw_deltas_rad.has_value());
+  EXPECT_TRUE(std::isnan((*with_gyro.status.last_yaw_deltas_rad)[2]));  // the LiDAR match was rejected
+}
+
+TEST(LocalizerGyro, SlipIsCountedFromTheRawWheelYaw) {
+  const GyroRunResult with_gyro = run_with_gyro(GyroRunOptions{});
+  EXPECT_GT(with_gyro.status.slip_detected_total, 0U);
+  EXPECT_GT(with_gyro.status.slip_max_rad, 0.05);
+  GyroRunOptions exact_wheel;
+  exact_wheel.wheel_yaw_scale = 1.0;
+  const GyroRunResult without_slip = run_with_gyro(exact_wheel);
+  EXPECT_EQ(without_slip.status.slip_detected_total, 0U);
+  EXPECT_LT(without_slip.status.slip_max_rad, 0.05);
+}
+
+TEST(LocalizerGyro, RotationFactorsNeedNinetyFivePercentCoverage) {
+  GyroRunOptions every_twentieth_missing;  // 5 % missing: exactly on the edge is allowed, 4 % is
+  every_twentieth_missing.missing_gyro_every = 25;
+  const GyroRunResult nearly_covered = run_with_gyro(every_twentieth_missing);
+  EXPECT_GT(nearly_covered.status.rotation_factors_added_total, 0U);
+  EXPECT_EQ(nearly_covered.status.rotation_factors_skipped_total, 0U);
+
+  GyroRunOptions every_fifth_missing;
+  every_fifth_missing.missing_gyro_every = 5;
+  const GyroRunResult poorly_covered = run_with_gyro(every_fifth_missing);
+  EXPECT_EQ(poorly_covered.status.rotation_factors_added_total, 0U);
+  EXPECT_GT(poorly_covered.status.rotation_factors_skipped_total, 0U);
+  EXPECT_GT(poorly_covered.status.yaw_increments_wheel_total, 0U);
+}
+
+TEST(LocalizerGyro, PredictionCanBeSwitchedOffWhileRotationFactorsStay) {
+  GyroRunOptions factors_only;
+  factors_only.is_prediction_enabled = false;
+  const GyroRunResult result = run_with_gyro(factors_only);
+  EXPECT_GT(result.status.rotation_factors_added_total, 0U);
+  EXPECT_EQ(result.status.yaw_increments_gyro_total, 0U);
+  EXPECT_LT(result.final_yaw_error_deg, 10.0);  // the factors alone pull the 40 % error down a lot
+}

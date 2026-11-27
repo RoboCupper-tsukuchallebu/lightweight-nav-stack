@@ -264,7 +264,8 @@ double gyro_yaw_sigma(const PoseGraphParameters& parameters, double interval_sec
 }
 
 int PoseGraph::add_node_with_wheel_factor(double stamp_sec, const Eigen::Isometry3d& guess,
-                                          const Eigen::Isometry3d& wheel_relative, double yaw_disagreement_rad) {
+                                          const Eigen::Isometry3d& wheel_relative, double yaw_disagreement_rad,
+                                          double minimum_yaw_sigma_rad) {
   Implementation& graph = *implementation_;
   const PoseGraphParameters& parameters = graph.parameters;
   const int previous = latest_index_;
@@ -272,7 +273,8 @@ int PoseGraph::add_node_with_wheel_factor(double stamp_sec, const Eigen::Isometr
   const double distance = wheel_relative.translation().head<2>().norm();
   const double sigma_translation =
       std::max(parameters.sigma_floor_m, parameters.wheel_sigma_translation_per_m * distance);
-  const double sigma_yaw = wheel_yaw_sigma(parameters, wheel_relative, yaw_disagreement_rad);
+  const double sigma_yaw =
+      std::max(wheel_yaw_sigma(parameters, wheel_relative, yaw_disagreement_rad), minimum_yaw_sigma_rad);
   const double sigma_z = std::max(parameters.sigma_floor_m, parameters.planar_sigma_z_per_m * distance);
   // Weak planar constraint: dz = droll = dpitch = 0 with the looser planar sigmas.
   Eigen::Isometry3d planar = wheel_relative;
@@ -320,8 +322,9 @@ void PoseGraph::add_rotation_factor(int from_index, int to_index, double yaw_del
   if (!std::isfinite(yaw_delta_rad) || !std::isfinite(yaw_sigma_rad) || yaw_sigma_rad <= 0.0) {
     throw std::invalid_argument("invalid rotation factor");
   }
-  // Roll, pitch and translation are not measured: their standard deviations are far above any
-  // plausible value, so these rows carry no information.
+  // Roll, pitch and translation are not measured. 100 rad and 1000 m are far above any plausible
+  // error, so these rows carry (almost) no information, yet stay finite so that the noise model
+  // remains a proper Gaussian (a hard "unconstrained" would need a different factor type).
   constexpr double kUnconstrainedRotationSigmaRad = 100.0;
   constexpr double kUnconstrainedTranslationSigmaM = 1000.0;
   const gtsam::Pose3 measured_relative(gtsam::Rot3::Yaw(yaw_delta_rad), gtsam::Point3(0.0, 0.0, 0.0));

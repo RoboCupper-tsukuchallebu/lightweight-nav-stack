@@ -19,6 +19,12 @@ namespace {
 
 constexpr double kMapSubmapRadiusM = 100.0;
 constexpr double kWheelBufferSec = 3.0;
+// A rotation factor needs the gyro to cover this share of the keyframe interval (Issue #92, 3.3 step 5).
+constexpr double kMinimumGyroCoverageRatio = 0.95;
+// A keyframe interval where the raw wheel yaw and the gyro differ by more than this counts as a slip.
+constexpr double kSlipDifferenceRad = 0.05;
+// Wheel samples older than this are dropped even if no keyframe has consumed them.
+constexpr double kMaximumWheelSampleAgeSec = 30.0;
 constexpr double kNeverSec = -1e9;
 constexpr double kMillisecondsPerSecond = 1000.0;
 constexpr std::size_t kMaxPendingScans = 20;
@@ -47,8 +53,33 @@ Eigen::Isometry3d invert_isometry(const Eigen::Isometry3d& transform) {
 struct NodeRecord {
   int index;
   double stamp;
-  Eigen::Isometry3d odom_to_base = Eigen::Isometry3d::Identity();
+  Eigen::Isometry3d odom_to_base = Eigen::Isometry3d::Identity();      // internal odometry
+  Eigen::Isometry3d raw_odom_to_base = Eigen::Isometry3d::Identity();  // wheel pose as received
 };
+// What one wheel sample contributed to the yaw: `is_covered` when a gyro increment came with it.
+struct WheelYawSample {
+  double stamp_sec;
+  double interval_sec;
+  bool is_covered;
+  double gyro_yaw_rad;      // meaningful when covered
+  double raw_wheel_yaw_rad;
+};
+// Sums over the wheel samples of one keyframe interval.
+struct WheelYawInterval {
+  double total_sec = 0.0;
+  double covered_sec = 0.0;
+  double gyro_yaw_sum_rad = 0.0;
+  double uncovered_wheel_yaw_sum_rad = 0.0;
+  double raw_wheel_yaw_sum_rad = 0.0;
+  bool is_sufficiently_covered() const {
+    return total_sec > 0.0 && covered_sec >= kMinimumGyroCoverageRatio * total_sec;
+  }
+  // Gyro yaw over the covered part plus the raw wheel yaw over the rest.
+  double measured_yaw_rad() const { return gyro_yaw_sum_rad + uncovered_wheel_yaw_sum_rad; }
+};
+double yaw_of(const Eigen::Isometry3d& pose) {
+  return std::atan2(pose.rotation()(1, 0), pose.rotation()(0, 0));
+}
 struct PendingScan {
   double stamp;
   double ready_stamp;
@@ -112,7 +143,8 @@ struct Localizer::Implementation {
   GpsConflictCounter conflict;
   std::optional<GpsOrigin> gps_origin;
   std::optional<GpsConverter> gps;
-  PoseBuffer buffer;
+  PoseBuffer buffer;  // internal odometry (the wheel pose with the yaw replaced while the gyro is used)
+  PoseBuffer raw_buffer;  // wheel poses as received
   PreparedTarget map_target;
   std::future<MapTargetBuild> pending_map_target;
   Eigen::Vector2d map_target_center = Eigen::Vector2d::Zero();
@@ -151,6 +183,13 @@ struct Localizer::Implementation {
   GyroConsistencyState gyro_consistency;
   // Stays false until a gyro increment is passed: then the wheel pose is used exactly as before.
   bool has_received_gyro_yaw_delta = false;
+  // True once a yaw replacement happened since the last reset. Until then the internal odometry IS the
+  // raw wheel pose (not re-integrated), so nothing differs from the code without a gyro.
+  bool has_replaced_yaw = false;
+  Eigen::Isometry3d internal_odom = Eigen::Isometry3d::Identity();
+  Eigen::Isometry3d raw_wheel_pose = Eigen::Isometry3d::Identity();
+  std::deque<WheelYawSample> wheel_yaw_samples;
+  GyroFusionStatus gyro_status;  // counters and last values; `consistency` is filled on read
   std::string last_error;
   std::string state_error;
   std::string event_error;
@@ -212,7 +251,7 @@ struct Localizer::Implementation {
             latest_node.stamp, current, current, parameters.initial_sigma_xy_m,
             parameters.initial_sigma_yaw_rad);
         nodes.clear();
-        nodes.push_back({restarted_index, latest_node.stamp, latest_node.odom_to_base});
+        nodes.push_back({restarted_index, latest_node.stamp, latest_node.odom_to_base, latest_node.raw_odom_to_base});
         lidar = LidarOdometry(parameters.lidar_odometry);
         lidar_nodes.clear();
         pose_cache.clear();
@@ -223,7 +262,7 @@ struct Localizer::Implementation {
         graph->add_first_node(latest_node.stamp, current, parameters.initial_sigma_xy_m,
                               parameters.initial_sigma_yaw_rad);
         nodes.clear();
-        nodes.push_back({0, latest_node.stamp, latest_node.odom_to_base});
+        nodes.push_back({0, latest_node.stamp, latest_node.odom_to_base, latest_node.raw_odom_to_base});
         lidar = LidarOdometry(parameters.lidar_odometry);
         lidar_nodes.clear();
         pose_cache.clear();
@@ -379,6 +418,57 @@ struct Localizer::Implementation {
     }
   }
 
+  // Folds one wheel sample into the internal odometry: the yaw of the raw increment is replaced by the
+  // gyro value when that is allowed, otherwise the raw increment is applied as it is.
+  void advance_odometry(double stamp_sec, double interval_sec, const Eigen::Isometry3d& wheel_pose,
+                        std::optional<double> gyro_yaw_delta_rad) {
+    const bool has_gyro_value = gyro_yaw_delta_rad && std::isfinite(*gyro_yaw_delta_rad);
+    const Eigen::Isometry3d raw_increment = invert_isometry(raw_wheel_pose) * wheel_pose;
+    const double raw_yaw = yaw_of(raw_increment);
+    const bool can_replace = gyro_consistency == GyroConsistencyState::kActive &&
+                             parameters.gyro_yaw_prediction_enabled;
+    if (can_replace && has_gyro_value) {
+      Eigen::Isometry3d replaced = raw_increment;
+      replaced.linear() = Eigen::AngleAxisd(*gyro_yaw_delta_rad - raw_yaw, Eigen::Vector3d::UnitZ())
+                              .toRotationMatrix() * raw_increment.linear();
+      internal_odom = internal_odom * replaced;
+      has_replaced_yaw = true;
+    } else if (has_replaced_yaw) {
+      internal_odom = internal_odom * raw_increment;
+    } else {
+      internal_odom = wheel_pose;
+    }
+    if (can_replace) {
+      if (has_gyro_value) ++gyro_status.yaw_increments_gyro_total;
+      else ++gyro_status.yaw_increments_wheel_total;
+    }
+    raw_wheel_pose = wheel_pose;
+    wheel_yaw_samples.push_back({stamp_sec, interval_sec, has_gyro_value,
+                                 has_gyro_value ? *gyro_yaw_delta_rad : 0.0, raw_yaw});
+    while (!wheel_yaw_samples.empty() &&
+           wheel_yaw_samples.front().stamp_sec < stamp_sec - kMaximumWheelSampleAgeSec) {
+      wheel_yaw_samples.pop_front();
+    }
+  }
+
+  // Samples with stamp in (begin, end]; consecutive keyframe intervals partition the samples.
+  WheelYawInterval summarize_wheel_samples(double begin_sec, double end_sec) const {
+    constexpr double kStampToleranceSec = 1e-6;
+    WheelYawInterval interval;
+    for (const WheelYawSample& sample : wheel_yaw_samples) {
+      if (sample.stamp_sec <= begin_sec || sample.stamp_sec > end_sec + kStampToleranceSec) continue;
+      interval.total_sec += sample.interval_sec;
+      interval.raw_wheel_yaw_sum_rad += sample.raw_wheel_yaw_rad;
+      if (sample.is_covered) {
+        interval.covered_sec += sample.interval_sec;
+        interval.gyro_yaw_sum_rad += sample.gyro_yaw_rad;
+      } else {
+        interval.uncovered_wheel_yaw_sum_rad += sample.raw_wheel_yaw_rad;
+      }
+    }
+    return interval;
+  }
+
   void process_scan(const PendingScan& pending) {
     if (scan_processing_hook) scan_processing_hook();
     const auto start = Clock::now();
@@ -397,6 +487,10 @@ struct Localizer::Implementation {
     const auto deskewed = deskew_scan(pending.scan, pending.stamp, buffer, parameters.lidar_to_base);
     const auto odom_now = buffer.interpolate(pending.stamp);
     if (!deskewed || !odom_now) return;
+    // Without a replacement the raw wheel pose is the internal one: the same value, not a copy of a
+    // second integration.
+    const auto raw_now = has_replaced_yaw ? raw_buffer.interpolate(pending.stamp) : odom_now;
+    if (!raw_now) return;
     const PointList cloud = downsample_voxel(*deskewed, parameters.voxel_size_m);
     last_scan_sec = pending.stamp;
 
@@ -409,7 +503,7 @@ struct Localizer::Implementation {
         latest_position_and_yaw_std = *std_values;
       }
       pose_cache[0] = initial;
-      nodes.push_back({0, pending.stamp, *odom_now});
+      nodes.push_back({0, pending.stamp, *odom_now, *raw_now});
       lidar.add_keyframe(initial, cloud);
       lidar_nodes.push_back(0);
       last_scan_odom_for_gate = *odom_now;
@@ -426,16 +520,23 @@ struct Localizer::Implementation {
     const NodeRecord last = nodes.back();
     const auto last_pose = pose_of(last.index);
     if (!last_pose) return;
-    const Eigen::Isometry3d wheel_relative = invert_isometry(last.odom_to_base) * *odom_now;
+    // Translation from the internal odometry, yaw from the raw wheel (the gyro must not be counted
+    // twice: the rotation factor carries it).
+    Eigen::Isometry3d wheel_relative = invert_isometry(last.odom_to_base) * *odom_now;
+    if (has_replaced_yaw) {
+      wheel_relative.linear() = (invert_isometry(last.raw_odom_to_base) * *raw_now).linear();
+    }
     const Eigen::Isometry3d prediction = corrector.target() * *odom_now;
 
     Eigen::Isometry3d best = prediction;
     std::optional<MatchResult> lidar_result;
     const double wheel_rate_interval_sec = parameters.lidar_odometry.slip_wheel_rate_window_s;
-    const auto recent_odom = buffer.interpolate(pending.stamp - wheel_rate_interval_sec);
+    const auto recent_odom = has_replaced_yaw
+        ? raw_buffer.interpolate(pending.stamp - wheel_rate_interval_sec)
+        : buffer.interpolate(pending.stamp - wheel_rate_interval_sec);
     double wheel_yaw_rate = 1.0;
     if (recent_odom) {
-      const Eigen::Isometry3d recent_relative = invert_isometry(*recent_odom) * *odom_now;
+      const Eigen::Isometry3d recent_relative = invert_isometry(*recent_odom) * *raw_now;
       wheel_yaw_rate = std::atan2(recent_relative.rotation()(1, 0), recent_relative.rotation()(0, 0)) / wheel_rate_interval_sec;
     }
     if (lidar.has_submap()) {
@@ -465,13 +566,37 @@ struct Localizer::Implementation {
         const Eigen::Matrix3d difference = wheel_relative.rotation().transpose() * lidar_relative.rotation();
         yaw_disagreement = std::abs(std::atan2(difference(1, 0), difference(0, 0)));
       }
-      const int index = graph->add_node_with_wheel_factor(pending.stamp, best, wheel_relative, yaw_disagreement);
+      // Gyro rotation factor (only while the gyro is verified and covers the interval).
+      const WheelYawInterval interval = summarize_wheel_samples(last_keyframe_sec, pending.stamp);
+      const bool is_gyro_active = gyro_consistency == GyroConsistencyState::kActive;
+      const bool should_add_rotation_factor = is_gyro_active && interval.is_sufficiently_covered();
+      const double gyro_yaw_rad = interval.measured_yaw_rad();
+      const double wheel_gyro_difference_rad =
+          should_add_rotation_factor ? std::abs(interval.raw_wheel_yaw_sum_rad - gyro_yaw_rad) : 0.0;
+      if (is_gyro_active && !should_add_rotation_factor) ++gyro_status.rotation_factors_skipped_total;
+      const int index = graph->add_node_with_wheel_factor(pending.stamp, best, wheel_relative, yaw_disagreement,
+                                                          wheel_gyro_difference_rad);
       if (lidar_result) {
         graph->add_lidar_odometry_factor(
             last.index, index, invert_isometry(*last_pose) * best,
             information_from_hessian(lidar_result->information, parameters.lidar_odometry_information));
       }
-      nodes.push_back({index, pending.stamp, *odom_now});
+      if (should_add_rotation_factor) {
+        const double sigma_rad = gyro_yaw_sigma(parameters.graph, interval.total_sec, gyro_yaw_rad,
+                                                std::abs(interval.uncovered_wheel_yaw_sum_rad));
+        graph->add_rotation_factor(last.index, index, gyro_yaw_rad, sigma_rad);
+        ++gyro_status.rotation_factors_added_total;
+        const double lidar_yaw_rad = lidar_result
+            ? yaw_of(invert_isometry(*last_pose) * best) : std::numeric_limits<double>::quiet_NaN();
+        gyro_status.last_yaw_deltas_rad =
+            Eigen::Vector3d(interval.raw_wheel_yaw_sum_rad, gyro_yaw_rad, lidar_yaw_rad);
+        if (wheel_gyro_difference_rad > kSlipDifferenceRad) ++gyro_status.slip_detected_total;
+        gyro_status.slip_max_rad = std::max(gyro_status.slip_max_rad, wheel_gyro_difference_rad);
+      }
+      while (!wheel_yaw_samples.empty() && wheel_yaw_samples.front().stamp_sec <= pending.stamp) {
+        wheel_yaw_samples.pop_front();
+      }
+      nodes.push_back({index, pending.stamp, *odom_now, *raw_now});
       max_keyframe_interval_sec = std::max(max_keyframe_interval_sec, pending.stamp - last_keyframe_sec);
       last_keyframe_sec = pending.stamp;
       last_keyframe_odom = *odom_now;
@@ -611,7 +736,7 @@ void Localizer::set_scan_processing_hook_for_test(std::function<void()> hook) {
 }
 
 GyroFusionStatus Localizer::gyro_fusion_status() const {
-  GyroFusionStatus status;
+  GyroFusionStatus status = implementation_->gyro_status;
   status.consistency = implementation_->gyro_consistency;
   return status;
 }
@@ -750,10 +875,16 @@ std::optional<LocalizerOutput> Localizer::on_wheel_odom(double stamp_sec,
                                                         std::optional<double> gyro_yaw_delta_rad) {
   Implementation& self = *implementation_;
   if (!self.requested_initial_pose) return std::nullopt;
-  // The yaw replacement is not built yet: a value is only remembered, the path stays the old one.
   if (gyro_yaw_delta_rad) self.has_received_gyro_yaw_delta = true;
-  if (stamp_sec < self.last_wheel_sec) {
+  const bool went_backwards = stamp_sec < self.last_wheel_sec;
+  if (went_backwards) {
     self.buffer = PoseBuffer();
+    self.raw_buffer = PoseBuffer();
+    // The replaced integration is dropped: the internal odometry is the raw wheel pose again.
+    self.has_replaced_yaw = false;
+    self.internal_odom = odom_to_base;
+    self.raw_wheel_pose = odom_to_base;
+    self.wheel_yaw_samples.clear();
     self.pending_scans.clear();
     self.pending_gps.clear();
     self.record_event("wheel odometry time went backwards: buffers cleared");
@@ -761,7 +892,10 @@ std::optional<LocalizerOutput> Localizer::on_wheel_odom(double stamp_sec,
     self.last_wheel_pose = odom_to_base;
   }
   const double elapsed_sec = self.last_wheel_sec > kNeverSec ? stamp_sec - self.last_wheel_sec : 0.0;
+  const double sample_interval_sec = elapsed_sec;
   if (!self.is_started) {
+    self.internal_odom = odom_to_base;
+    self.raw_wheel_pose = odom_to_base;
     self.corrector.reset(*self.requested_initial_pose * invert_isometry(odom_to_base));
     self.machine.start_tracking();
     self.last_scan_sec = stamp_sec;
@@ -769,11 +903,18 @@ std::optional<LocalizerOutput> Localizer::on_wheel_odom(double stamp_sec,
     self.last_wheel_pose = odom_to_base;
     self.is_started = true;
   }
+  else if (!went_backwards) {
+    self.advance_odometry(stamp_sec, sample_interval_sec, odom_to_base, gyro_yaw_delta_rad);
+  }
+  // From here on `odom` is the internal odometry; it equals `odom_to_base` until a replacement happens.
+  const Eigen::Isometry3d odom = self.internal_odom;
   self.distance_since_absolute_m +=
-      (odom_to_base.translation() - self.last_wheel_pose.translation()).head<2>().norm();
-  self.last_wheel_pose = odom_to_base;
+      (odom.translation() - self.last_wheel_pose.translation()).head<2>().norm();
+  self.last_wheel_pose = odom;
   self.last_wheel_sec = stamp_sec;
-  self.buffer.add(stamp_sec, odom_to_base);
+  self.raw_buffer.add(stamp_sec, odom_to_base);
+  self.raw_buffer.prune_before(stamp_sec - kWheelBufferSec);
+  self.buffer.add(stamp_sec, odom);
   self.buffer.prune_before(stamp_sec - kWheelBufferSec);
   // A scan older than the buffer can no longer be deskewed.
   const double oldest_usable_sec = stamp_sec - kWheelBufferSec;
@@ -787,17 +928,17 @@ std::optional<LocalizerOutput> Localizer::on_wheel_odom(double stamp_sec,
       self.pending_gps.end());
   self.drain();
 
-  const Eigen::Isometry3d map_to_odom = self.corrector.step(elapsed_sec, odom_to_base);
+  const Eigen::Isometry3d map_to_odom = self.corrector.step(elapsed_sec, odom);
   const StateInputs inputs = self.make_state_inputs(stamp_sec);
   const LocalizationState state = self.machine.update(inputs);
   if (!self.machine.should_publish_odom()) return std::nullopt;
 
   LocalizerOutput output;
-  output.map_to_base = map_to_odom * odom_to_base;
+  output.map_to_base = map_to_odom * odom;
   output.state = state;
   output.position_std_m = inputs.position_std_m;
-  output.is_large_correction = self.corrector.is_large_correction(odom_to_base);
-  output.pending_correction_m = self.corrector.pending_correction_m(odom_to_base);
+  output.is_large_correction = self.corrector.is_large_correction(odom);
+  output.pending_correction_m = self.corrector.pending_correction_m(odom);
   output.is_gps_conflict = self.conflict.is_conflict();
   return output;
 }
