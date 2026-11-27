@@ -19,7 +19,8 @@ informative; only the hash and, through it, the state are compared).
 | Toolchain | Made from (base commit) | Made on | Notes |
 |---|---|---|---|
 | `Darwin-arm64-Clang-21.1.8` | `7b909df` (PR-1 head); the same bytes also come out of `a1771d0` | macOS 26 (Darwin 25.6.0), arm64, the pixi environment's clang 21.1.8 | The first recording was made from `a1771d0`; recording again from `7b909df` with the procedure below gave identical files. |
-| `Linux-x86_64-GNU-<version>` | `7b909df` | the build machine (made by the coordinator) | to be added |
+| `Linux-x86_64-GNU-13.3.0` | `7b909df` | The build machine (AMD Ryzen 7 4700GE, Ubuntu 24.04), inside the image of the `test` stage of `docker/Dockerfile` (the CI `docker` job; the same apt gcc 13.3.0 and glibc as the production X13) | Written twice on the same machine: byte for byte identical. |
+| `Linux-x86_64-GNU-15.3.0` | `7b909df` | The same build machine, in the pixi linux-64 environment (the same gcc 15.3.0 as the CI `build-test (ubuntu-latest)`; libm is the glibc of the machine that runs it, 2.39) | libm comes from the glibc of the running machine, so another Ubuntu version of a runner (for example Ubuntu 26.04 in WSL) may not match. Being checked by the coordinator. |
 
 Add a row for every recording you commit.
 
