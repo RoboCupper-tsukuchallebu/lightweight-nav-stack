@@ -54,6 +54,16 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
   void set_map_match_hook_for_test(std::function<void(MatchResult&)> hook) {
     if (localizer_) localizer_->set_map_match_hook(std::move(hook));
   }
+  // Issue #92 test seams of the Localizer. The node keeps them and gives them to every Localizer it
+  // builds (set_initial_pose / reload_map / a rebuild), so they survive a rebuild.
+  void set_lidar_match_hook_for_test(std::function<void(MatchResult&)> hook) {
+    lidar_match_hook_for_test_ = hook;
+    if (localizer_) localizer_->set_lidar_match_hook_for_test(std::move(hook));
+  }
+  void set_scan_processing_hook_for_test(std::function<void()> hook) {
+    scan_processing_hook_for_test_ = hook;
+    if (localizer_) localizer_->set_scan_processing_hook_for_test(std::move(hook));
+  }
   void inject_optimization_failure_for_test() {
     if (localizer_) localizer_->inject_optimization_failure_for_test();
   }
@@ -237,6 +247,8 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
   GyroConsistencyState carried_gyro_consistency_ = GyroConsistencyState::kUnverified;
   std::size_t carried_gyro_outvoted_total_ = 0;
   std::optional<double> previous_wheel_stamp_sec_;
+  std::function<void(MatchResult&)> lidar_match_hook_for_test_;
+  std::function<void()> scan_processing_hook_for_test_;
 
   // Wheel input and the node-side buffer used for initial alignment/debug deskew.
   bool has_wheel_odom_ = false;

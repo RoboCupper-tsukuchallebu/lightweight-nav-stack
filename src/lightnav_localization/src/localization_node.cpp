@@ -1606,6 +1606,9 @@ bool LocalizationNode::try_start_initialization() {
     localizer_parameters_.initial_gyro_outvoted_total = carried_gyro_outvoted_total_;
     localizer_ =
         std::make_unique<Localizer>(localizer_parameters_, map_points_, gps_origin_);
+    if (lidar_match_hook_for_test_) localizer_->set_lidar_match_hook_for_test(lidar_match_hook_for_test_);
+    if (scan_processing_hook_for_test_)
+      localizer_->set_scan_processing_hook_for_test(scan_processing_hook_for_test_);
   }
   localizer_->initialize(map_to_base);
   is_localizer_initialized_ = true;

@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -1993,4 +1994,159 @@ TEST_F(LocalizationNodeImuTest, ReloadMapKeepsTheTrackerAndOnlyCleanupConfigureR
   diagnostics_values_.clear();
   run_standing_still(1500ms, false);
   EXPECT_EQ(imu_values().at("state"), "waiting_for_data");
+}
+
+// ---- Consistency, increments and the test seams, driven by an in-place turn (Issue #92 L3, third part) ----
+
+namespace {
+
+constexpr double kTurnRateRadPerSec = 0.5236;  // 90 deg in 3 s
+
+}  // namespace
+
+class LocalizationNodeImuTurnTest : public LocalizationNodeImuTest {
+ protected:
+  // Wheel 50 Hz, scans 10 Hz, IMU 200 Hz. The robot turns in place at `true_yaw_rate_rad_s`; the IMU
+  // reports `gyro_scale` times that rate (-1: opposite sign). Phases chain: the heading carries over.
+  void run_phase(double duration_s, double true_yaw_rate_rad_s, double gyro_scale) {
+    const rclcpp::Time phase_start = node_->get_clock()->now();
+    const double start_yaw = kTruthYaw + heading_offset_rad_;
+    auto next_wheel = std::chrono::steady_clock::now();
+    auto next_scan = next_wheel;
+    auto next_imu = next_wheel;
+    const auto end = next_wheel + std::chrono::duration<double>(duration_s);
+    while (std::chrono::steady_clock::now() < end) {
+      const auto now = std::chrono::steady_clock::now();
+      const rclcpp::Time stamp = node_->get_clock()->now();
+      const double elapsed_s = (stamp - phase_start).seconds();
+      Eigen::Isometry3d pose = Eigen::Isometry3d::Identity();
+      pose.translation() = kTruthPosition;
+      pose.linear() = Eigen::AngleAxisd(start_yaw + true_yaw_rate_rad_s * elapsed_s,
+                                        Eigen::Vector3d::UnitZ()).toRotationMatrix();
+      if (now >= next_imu) {
+        publish_imu(stamp, gyro_scale * true_yaw_rate_rad_s);
+        while (next_imu <= now) next_imu += 5ms;
+      }
+      if (now >= next_wheel) {
+        publish_wheel_at(stamp, pose);
+        while (next_wheel <= now) next_wheel += 20ms;
+      }
+      if (now >= next_scan) {
+        publish_scan_at(stamp, pose);
+        while (next_scan <= now) next_scan += 100ms;
+      }
+      executor_.spin_some(5ms);
+    }
+    heading_offset_rad_ += true_yaw_rate_rad_s * (node_->get_clock()->now() - phase_start).seconds();
+  }
+
+  // Tracking at the truth, then 3.5 s standing still so that the IMU becomes ready.
+  void start_and_wait_until_ready() {
+    start_tracking_at_truth();
+    run_phase(3.5, 0.0, 1.0);
+    ASSERT_EQ(imu_values().at("state"), "ready");
+    ASSERT_EQ(imu_values().at("consistency"), "unverified");
+  }
+
+  void reload_map_and_set_initial_pose_at_the_current_heading() {
+    auto reload_client = helper_->create_client<std_srvs::srv::Trigger>("/localization_node/reload_map");
+    auto reload_future =
+        reload_client->async_send_request(std::make_shared<std_srvs::srv::Trigger::Request>());
+    ASSERT_TRUE(run_until([&reload_future]() { return reload_future.wait_for(0ms) == std::future_status::ready; },
+                          3000ms, kInputWheel | kInputScans));
+    ASSERT_TRUE(reload_future.get()->success);
+    auto request = std::make_shared<SetInitialPose::Request>();
+    request->pose.header.frame_id = "map";
+    request->pose.pose.pose.position.x = kTruthPosition.x();
+    request->pose.pose.pose.position.y = kTruthPosition.y();
+    request->pose.pose.pose.position.z = kTruthPosition.z();
+    request->pose.pose.pose.orientation = quaternion_from_yaw(kTruthYaw + heading_offset_rad_);
+    request->pose.pose.covariance[35] = 0.0;
+    auto pose_future = set_initial_pose_client_->async_send_request(request);
+    ASSERT_TRUE(run_until([&pose_future]() { return pose_future.wait_for(0ms) == std::future_status::ready; },
+                          3000ms, kInputWheel | kInputScans));
+    ASSERT_TRUE(pose_future.get()->accepted);
+  }
+
+  std::size_t imu_count(const std::string& key) const { return std::stoul(imu_values().at(key)); }
+
+  double heading_offset_rad_ = 0.0;
+};
+
+TEST_F(LocalizationNodeImuTurnTest, ATurnWithACorrectGyroMakesTheConsistencyActiveAndIncrementsReachTheLocalizer) {
+  create_imu_node();
+  std::atomic<int> scan_hook_calls{0};
+  node_->set_scan_processing_hook_for_test([&scan_hook_calls] { ++scan_hook_calls; });
+  bring_up();
+  start_and_wait_until_ready();
+  run_phase(3.0, kTurnRateRadPerSec, 1.0);
+  run_phase(2.0, 0.0, 1.0);
+  EXPECT_EQ(imu_values().at("consistency"), "active");
+  EXPECT_EQ(diagnostics_levels_.at(kImuDiagnosticsName), diagnostic_msgs::msg::DiagnosticStatus::OK);
+  EXPECT_GE(imu_count("consistency_confirmed_total"), 1U);
+  EXPECT_EQ(imu_count("consistency_outvoted_total"), 0U);
+  EXPECT_GE(imu_count("rotation_factors_added_total"), 1U);
+  // The increments are counted only while active: they reach the Localizer through the wheel callback.
+  EXPECT_GT(imu_count("yaw_increments_gyro_total"), 20U);
+  EXPECT_GT(imu_count("yaw_increments_gyro_total"), 10U * imu_count("yaw_increments_wheel_total"));
+  EXPECT_GT(scan_hook_calls.load(), 0);
+}
+
+TEST_F(LocalizationNodeImuTurnTest, AGyroWithTheOppositeSignIsNeverUsed) {
+  create_imu_node();
+  bring_up();
+  start_and_wait_until_ready();
+  run_phase(4.0, kTurnRateRadPerSec, -1.0);
+  run_phase(2.0, 0.0, -1.0);
+  EXPECT_EQ(imu_values().at("consistency"), "inconsistent");
+  EXPECT_EQ(diagnostics_levels_.at(kImuDiagnosticsName), diagnostic_msgs::msg::DiagnosticStatus::WARN);
+  EXPECT_EQ(imu_count("rotation_factors_added_total"), 0U);
+  EXPECT_EQ(imu_count("yaw_increments_gyro_total"), 0U);
+  EXPECT_GE(imu_count("consistency_rejected_total"), 3U);
+}
+
+// active, and then suspended / disabled_inconsistent with the outvote count, survive a Localizer rebuild
+// (reload_map + set_initial_pose); the test seams are given to the new Localizer again.
+TEST_F(LocalizationNodeImuTurnTest, TheConsistencyAndTheOutvoteCountSurviveAReloadMap) {
+  create_imu_node();
+  std::atomic<int> scan_hook_calls{0};
+  node_->set_scan_processing_hook_for_test([&scan_hook_calls] { ++scan_hook_calls; });
+  bring_up();
+  start_and_wait_until_ready();
+  run_phase(3.0, kTurnRateRadPerSec, 1.0);
+  run_phase(2.0, 0.0, 1.0);
+  ASSERT_EQ(imu_values().at("consistency"), "active");
+
+  reload_map_and_set_initial_pose_at_the_current_heading();
+  run_phase(2.0, 0.0, 1.0);
+  EXPECT_EQ(imu_values().at("consistency"), "active");
+  EXPECT_EQ(imu_count("consistency_outvoted_total"), 0U);
+
+  // A slow turn with a gyro of 1.5 times the scale: the wheels and LiDAR agree and outvote it. (A gyro
+  // of the opposite sign would move the internal odometry so far that the LiDAR match is refused.)
+  run_phase(1.5, 0.3, 1.5);
+  run_phase(2.0, 0.0, 1.0);
+  const std::string consistency_before = imu_values().at("consistency");
+  const std::size_t outvoted_before = imu_count("consistency_outvoted_total");
+  EXPECT_TRUE(consistency_before == "suspended" || consistency_before == "disabled_inconsistent")
+      << consistency_before;
+  EXPECT_GE(outvoted_before, 1U);
+  EXPECT_EQ(diagnostics_levels_.at(kImuDiagnosticsName), diagnostic_msgs::msg::DiagnosticStatus::WARN);
+
+  const int hook_calls_before_reload = scan_hook_calls.load();
+  reload_map_and_set_initial_pose_at_the_current_heading();
+  run_phase(2.5, 0.0, 1.0);
+  EXPECT_EQ(imu_values().at("consistency"), consistency_before);
+  EXPECT_EQ(imu_count("consistency_outvoted_total"), outvoted_before);
+  EXPECT_GT(scan_hook_calls.load(), hook_calls_before_reload);
+
+  // on_cleanup -> on_configure goes back to unverified and 0.
+  ASSERT_EQ(node_->deactivate().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(node_->cleanup().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED);
+  ASSERT_EQ(node_->configure().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(node_->activate().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE);
+  diagnostics_values_.clear();
+  run_phase(1.5, 0.0, 1.0);
+  EXPECT_EQ(imu_values().at("consistency"), "unverified");
+  EXPECT_EQ(imu_count("consistency_outvoted_total"), 0U);
 }
