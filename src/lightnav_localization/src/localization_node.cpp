@@ -925,8 +925,9 @@ LocalizationNode::CallbackReturn LocalizationNode::on_configure(
     gyro_yaw_tracker_ = std::make_unique<GyroYawTracker>(gyro_yaw_parameters_);
     // best effort like the driver, and deep enough (about 2 s at 966 Hz) to hold the samples that
     // arrive while a scan is processed inside the wheel callback.
+    imu_subscription_qos_ = rclcpp::SensorDataQoS().keep_last(kImuSubscriptionDepth);
     imu_subscription_ = create_subscription<sensor_msgs::msg::Imu>(
-        imu_topic_, rclcpp::SensorDataQoS().keep_last(kImuSubscriptionDepth),
+        imu_topic_, imu_subscription_qos_,
         [this](sensor_msgs::msg::Imu::SharedPtr message) { handle_imu(message); });
   }
 

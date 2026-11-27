@@ -1835,11 +1835,14 @@ TEST_F(LocalizationNodeTest, ImuTopicCreatesABestEffortDeepSubscription) {
   EXPECT_EQ(helper_->count_subscribers(kImuTopic), 1U);
   const auto subscriptions = helper_->get_subscriptions_info_by_topic(kImuTopic);
   ASSERT_EQ(subscriptions.size(), 1U);
-  const rclcpp::QoS qos = subscriptions.front().qos_profile();
-  EXPECT_EQ(qos.reliability(), rclcpp::ReliabilityPolicy::BestEffort);
-  EXPECT_EQ(qos.history(), rclcpp::HistoryPolicy::KeepLast);
-  EXPECT_EQ(qos.depth(), 2000U);
   EXPECT_EQ(subscriptions.front().node_name(), "localization_node");
+  // The QoS the node asked for. (The graph reports the depth and the reliability differently on each RMW:
+  // on Linux CI it showed depth 0 and an odd reliability value, so they are not read from the graph.)
+  const std::optional<rclcpp::QoS> qos = node_->imu_subscription_qos_for_test();
+  ASSERT_TRUE(qos.has_value());
+  EXPECT_EQ(qos->reliability(), rclcpp::ReliabilityPolicy::BestEffort);
+  EXPECT_EQ(qos->history(), rclcpp::HistoryPolicy::KeepLast);
+  EXPECT_EQ(qos->depth(), 2000U);
 }
 
 TEST_F(LocalizationNodeTest, CleanupRemovesTheImuSubscriptionAndConfigureCreatesItAgain) {

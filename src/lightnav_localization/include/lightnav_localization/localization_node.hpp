@@ -72,6 +72,12 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
     scan_processing_hook_for_test_ = hook;
     if (localizer_) localizer_->set_scan_processing_hook_for_test(std::move(hook));
   }
+  // The QoS the IMU subscription was created with (nullopt without one). The graph does not report the
+  // depth the same way on every RMW, so a test reads it here.
+  std::optional<rclcpp::QoS> imu_subscription_qos_for_test() const {
+    if (!imu_subscription_) return std::nullopt;
+    return imu_subscription_qos_;
+  }
   void inject_optimization_failure_for_test() {
     if (localizer_) localizer_->inject_optimization_failure_for_test();
   }
@@ -304,6 +310,7 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr points_subscription_;
   rclcpp::Subscription<sensor_msgs::msg::NavSatFix>::SharedPtr gps_subscription_;
   rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_subscription_;
+  rclcpp::QoS imu_subscription_qos_{rclcpp::SensorDataQoS()};
   rclcpp::Service<lightnav_msgs::srv::SetInitialPose>::SharedPtr set_initial_pose_service_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr reload_map_service_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr save_map_service_;
