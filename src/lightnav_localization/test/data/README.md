@@ -1,26 +1,44 @@
 # Recordings of the code before the gyro (Issue #92)
 
-`golden_mapping_short_course.txt` and `golden_localization_short_course.txt` hold every output of the
-`drive_short_course` drive (see `../golden_output.hpp`) as it was produced by the `Localizer` of commit
-**a1771d0** (`feat/mapping-tilt-height-loop` before the gyro work, no `gyro_yaw_delta_rad` argument yet).
-`LocalizerGyro.*IsIdentical…` compares today's code with them: a bit-for-bit hash per output, and, on a
-platform whose floating point rounds differently, the state (exact) and the numbers (1e-4) of every output.
+`golden_<toolchain>_mapping_short_course.txt` and `golden_<toolchain>_localization_short_course.txt` hold
+every output of the `drive_short_course` drive (see `../golden_output.hpp`) as it was produced by the
+`Localizer` before the gyro work. In `test/test_localizer.cpp`, `LocalizerGyro.*IsIdentical…` compares today's
+code with the recording **of the same toolchain** bit for bit (a hash of every output). Floating point
+differs between toolchains (compiler, libm, CPU), so a toolchain without a recording **fails** the test
+("golden for toolchain <name> is missing; regenerate with test/data/README.md"); there is no loose comparison.
 
-One line per output: `<hash of every bit> <state> x y z roll pitch yaw position_std` (numbers with 10
-significant digits, for the tolerance path only).
+`<toolchain>` is `${CMAKE_SYSTEM_NAME}-${CMAKE_SYSTEM_PROCESSOR}-${CMAKE_CXX_COMPILER_ID}-${CMAKE_CXX_COMPILER_VERSION}`
+with every character outside `A-Za-z0-9._-` replaced by `_`; CMake passes it as `LIGHTNAV_GOLDEN_TOOLCHAIN`
+(see `CMakeLists.txt`). The test prints the name it looks for when the recording is missing.
+
+One line per output: `<hash of every bit> <state> x y z roll pitch yaw position_std` (the numbers are
+informative; only the hash and, through it, the state are compared).
+
+## Which recordings exist
+
+| Toolchain | Made from (base commit) | Made on | Notes |
+|---|---|---|---|
+| `Darwin-arm64-Clang-21.1.8` | `7b909df` (PR-1 head); the same bytes also come out of `a1771d0` | macOS 26 (Darwin 25.6.0), arm64, the pixi environment's clang 21.1.8 | The first recording was made from `a1771d0`; recording again from `7b909df` with the procedure below gave identical files. |
+| `Linux-x86_64-GNU-<version>` | `7b909df` | the build machine (made by the coordinator) | to be added |
+
+Add a row for every recording you commit.
 
 ## Recording again
 
-The recording must come from the sources of a1771d0, never from the current ones. The writer is
-`GoldenRecording.WriteWhenRequested` (it does nothing unless `LIGHTNAV_WRITE_GOLDEN` is set) and it only
-uses what `Localizer` offered at a1771d0.
+The recording must come from the sources **before the gyro**: use `7b909df` (the head of
+`feat/mapping-tilt-height-loop`, PR-1). It builds with gcc as well (`a1771d0` does not: `-Wdangling-else`
+in `test_mapping.cpp`). `a1771d0 .. 7b909df` leaves the outputs of the drive unchanged with the default
+parameters (reviewed), and on the Mac both commits give identical files. The writer is
+`GoldenRecording.WriteWhenRequested`; it does nothing unless `LIGHTNAV_WRITE_GOLDEN` is set, and it only uses
+what `Localizer` offered at that commit.
 
 ```sh
 # 1. a work tree of the base commit (needs its own pixi environment, or a link to an existing one)
-git worktree add ../lightnav-golden-base a1771d0
+git worktree add ../lightnav-golden-base 7b909df
 cd ../lightnav-golden-base
 
-# 2. copy the two support headers from this branch and add the writer to the base test file
+# 2. copy the support header from this branch, add the writer to the base test file and give the tests
+#    the toolchain name (the same lines as in this branch's CMakeLists.txt)
 cp <this-branch>/src/lightnav_localization/test/golden_output.hpp src/lightnav_localization/test/
 python3 - <<'PY'
 p = 'src/lightnav_localization/test/test_localizer.cpp'
@@ -34,19 +52,26 @@ TEST(GoldenRecording, WriteWhenRequested) {
 }
 '''
 open(p, 'w').write(s)
+p = 'src/lightnav_localization/CMakeLists.txt'
+s = open(p).read()
+anchor = '  target_include_directories(test_matcher SYSTEM PRIVATE'
+s = s.replace(anchor, '''  string(REGEX REPLACE "[^A-Za-z0-9._-]" "_" lightnav_golden_toolchain
+         "${CMAKE_SYSTEM_NAME}-${CMAKE_SYSTEM_PROCESSOR}-${CMAKE_CXX_COMPILER_ID}-${CMAKE_CXX_COMPILER_VERSION}")
+  target_compile_definitions(test_localizer PRIVATE LIGHTNAV_GOLDEN_TOOLCHAIN="${lightnav_golden_toolchain}")
+''' + anchor, 1)
+open(p, 'w').write(s)
 PY
 
-# 3. build and run with the variable set
+# 3. build and run with the variable set (the files are named after the toolchain)
 pixi run build
 mkdir -p /tmp/golden
 LIGHTNAV_WRITE_GOLDEN=/tmp/golden pixi run bash -c \
   'DYLD_LIBRARY_PATH=$PIXI_PROJECT_ROOT/install/lib ./build/lightnav_localization/test_localizer --gtest_filter=GoldenRecording.*'
 
-# 4. copy the two files into this directory and commit them
+# 4. copy the two files into this directory, add a row to the table above, and commit
 cp /tmp/golden/*.txt <this-branch>/src/lightnav_localization/test/data/
 ```
 
-(On Linux use `LD_LIBRARY_PATH` instead of `DYLD_LIBRARY_PATH`, or whatever the repository's test command
-sets.) The files change when the drive in `golden_output.hpp` changes, and they depend on the compiler and
-CPU (Apple clang / arm64 fuses multiply-add; gcc on x86-64 does not by default), so a recording made on
-one platform matches bit for bit on that platform only.
+On Linux use `LD_LIBRARY_PATH` instead of `DYLD_LIBRARY_PATH` (or whatever the repository's test command
+sets). The files change when the drive in `golden_output.hpp` changes, or when the compiler, its version or
+the CPU architecture changes (a new toolchain name, hence a new recording).
