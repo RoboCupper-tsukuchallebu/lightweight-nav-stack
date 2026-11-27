@@ -10,6 +10,21 @@ localization_node:
     wheel_odom_topic: /wheel/odom
     points_topic: /velodyne_points
     gps_topic: /gps/fix
+
+    # External IMU (Issue #92). imu_topic "" = disabled: no subscription, no tracker and no IMU entry in
+    # /diagnostics, exactly the behaviour without an IMU. On the robot use /imu/data_raw.
+    imu_topic: ""
+    imu_yaw_prediction_enabled: true
+    imu_gyro_noise_density_rad_s_sqrt_hz: 1.0e-3
+    imu_gyro_bias_sigma_rad_s: 5.0e-4
+    imu_gyro_scale_sigma: 0.01
+    imu_max_gap_s: 0.05
+    imu_max_rate_rad_s: 10.0
+    imu_stationary_window_s: 2.0
+    imu_bias_max_abs_rad_s: 0.05
+    imu_bias_max_std_rad_s: 0.1
+    imu_up_axis_warn_deg: 10.0
+    imu_timeout_s: 0.5
     publish_tf: true
     status_rate_hz: 2.0
     diagnostics_cpu_warn_percent: 200.0

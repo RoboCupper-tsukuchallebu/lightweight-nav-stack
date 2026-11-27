@@ -26,6 +26,7 @@
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/nav_sat_fix.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/msg/point_field.hpp>
@@ -1734,6 +1735,145 @@ TEST_F(LocalizationNodeTest, LocalizationYamlListsTheNewParametersWithTheNodeDef
         break;
       default:
         ADD_FAILURE() << name << " has an unexpected type";
+    }
+  }
+}
+
+// ---- External IMU (Issue #92 L3) ----
+
+namespace {
+
+constexpr char kImuTopic[] = "/imu/data_raw";
+constexpr char kImuDiagnosticsName[] = "localization_node: IMU";
+
+rclcpp::NodeOptions with_imu_topic(rclcpp::NodeOptions options, const std::string& imu_topic) {
+  options.append_parameter_override("imu_topic", imu_topic);
+  return options;
+}
+
+}  // namespace
+
+TEST_F(LocalizationNodeTest, ImuParametersDeclareTheContractDefaults) {
+  create_node(make_options(map_file_.string(), map_yaml_.string()));
+  EXPECT_EQ(node_->get_parameter("imu_topic").as_string(), "");
+  EXPECT_TRUE(node_->get_parameter("imu_yaw_prediction_enabled").as_bool());
+  EXPECT_DOUBLE_EQ(node_->get_parameter("imu_gyro_noise_density_rad_s_sqrt_hz").as_double(), 1.0e-3);
+  EXPECT_DOUBLE_EQ(node_->get_parameter("imu_gyro_bias_sigma_rad_s").as_double(), 5.0e-4);
+  EXPECT_DOUBLE_EQ(node_->get_parameter("imu_gyro_scale_sigma").as_double(), 0.01);
+  EXPECT_DOUBLE_EQ(node_->get_parameter("imu_max_gap_s").as_double(), 0.05);
+  EXPECT_DOUBLE_EQ(node_->get_parameter("imu_max_rate_rad_s").as_double(), 10.0);
+  EXPECT_DOUBLE_EQ(node_->get_parameter("imu_stationary_window_s").as_double(), 2.0);
+  EXPECT_DOUBLE_EQ(node_->get_parameter("imu_bias_max_abs_rad_s").as_double(), 0.05);
+  EXPECT_DOUBLE_EQ(node_->get_parameter("imu_bias_max_std_rad_s").as_double(), 0.1);
+  EXPECT_DOUBLE_EQ(node_->get_parameter("imu_up_axis_warn_deg").as_double(), 10.0);
+  EXPECT_DOUBLE_EQ(node_->get_parameter("imu_timeout_s").as_double(), 0.5);
+}
+
+// config/localization.yaml lists every IMU parameter with the value the node declares as default.
+TEST_F(LocalizationNodeTest, LocalizationYamlListsTheImuParametersWithTheNodeDefaults) {
+  const std::filesystem::path config_path =
+      std::filesystem::path(__FILE__).parent_path().parent_path() / "config" / "localization.yaml";
+  std::ifstream stream(config_path);
+  ASSERT_TRUE(stream) << config_path;
+  std::map<std::string, std::string> yaml_values;
+  std::string line;
+  while (std::getline(stream, line)) {
+    const std::size_t indent = line.find_first_not_of(' ');
+    if (indent != 4 || line[indent] == '#') continue;
+    const std::size_t separator = line.find(':', indent);
+    if (separator == std::string::npos) continue;
+    const std::size_t value_begin = line.find_first_not_of(' ', separator + 1);
+    yaml_values[line.substr(indent, separator - indent)] =
+        value_begin == std::string::npos ? "" : line.substr(value_begin);
+  }
+  create_node(make_options(map_file_.string(), map_yaml_.string()));
+  ASSERT_NE(yaml_values.find("imu_topic"), yaml_values.end());
+  EXPECT_EQ(yaml_values.at("imu_topic"), "\"\"");
+  EXPECT_EQ(node_->get_parameter("imu_topic").as_string(), "");
+  ASSERT_NE(yaml_values.find("imu_yaw_prediction_enabled"), yaml_values.end());
+  EXPECT_EQ(yaml_values.at("imu_yaw_prediction_enabled") == "true",
+            node_->get_parameter("imu_yaw_prediction_enabled").as_bool());
+  for (const char* name :
+       {"imu_gyro_noise_density_rad_s_sqrt_hz", "imu_gyro_bias_sigma_rad_s", "imu_gyro_scale_sigma",
+        "imu_max_gap_s", "imu_max_rate_rad_s", "imu_stationary_window_s", "imu_bias_max_abs_rad_s",
+        "imu_bias_max_std_rad_s", "imu_up_axis_warn_deg", "imu_timeout_s"}) {
+    const auto found = yaml_values.find(name);
+    ASSERT_NE(found, yaml_values.end()) << name << " is missing from config/localization.yaml";
+    EXPECT_DOUBLE_EQ(std::stod(found->second), node_->get_parameter(name).as_double()) << name;
+  }
+}
+
+// imu_topic "" means: no Imu subscription, and the /diagnostics names are the five of today.
+TEST_F(LocalizationNodeTest, EmptyImuTopicCreatesNoSubscriptionAndNoImuDiagnostics) {
+  create_node(make_options(map_file_.string(), map_yaml_.string()));
+  bring_up();
+  start_tracking_at_truth();
+  run_for(2000ms, kInputWheel | kInputScans);
+  EXPECT_EQ(helper_->count_subscribers(kImuTopic), 0U);
+  EXPECT_EQ(diagnostics_levels_.size(), 5U);
+  EXPECT_EQ(diagnostics_levels_.count("localization_node: GNSS"), 1U);
+  EXPECT_EQ(diagnostics_levels_.count("localization_node: state"), 1U);
+  EXPECT_EQ(diagnostics_levels_.count("localization_node: map match"), 1U);
+  EXPECT_EQ(diagnostics_levels_.count("localization_node: errors"), 1U);
+  EXPECT_EQ(diagnostics_levels_.count("localization_node: performance"), 1U);
+  EXPECT_EQ(diagnostics_levels_.count(kImuDiagnosticsName), 0U);
+}
+
+TEST_F(LocalizationNodeTest, ImuTopicCreatesABestEffortDeepSubscription) {
+  create_node(with_imu_topic(make_options(map_file_.string(), map_yaml_.string()), kImuTopic));
+  bring_up();
+  spin_for(300ms);
+  EXPECT_EQ(helper_->count_subscribers(kImuTopic), 1U);
+  const auto subscriptions = helper_->get_subscriptions_info_by_topic(kImuTopic);
+  ASSERT_EQ(subscriptions.size(), 1U);
+  const rclcpp::QoS qos = subscriptions.front().qos_profile();
+  EXPECT_EQ(qos.reliability(), rclcpp::ReliabilityPolicy::BestEffort);
+  EXPECT_EQ(qos.history(), rclcpp::HistoryPolicy::KeepLast);
+  EXPECT_EQ(qos.depth(), 2000U);
+  EXPECT_EQ(subscriptions.front().node_name(), "localization_node");
+}
+
+TEST_F(LocalizationNodeTest, CleanupRemovesTheImuSubscriptionAndConfigureCreatesItAgain) {
+  create_node(with_imu_topic(make_options(map_file_.string(), map_yaml_.string()), kImuTopic));
+  bring_up();
+  spin_for(300ms);
+  ASSERT_EQ(helper_->count_subscribers(kImuTopic), 1U);
+  ASSERT_EQ(node_->deactivate().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(node_->cleanup().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED);
+  spin_for(300ms);
+  EXPECT_EQ(helper_->count_subscribers(kImuTopic), 0U);
+  ASSERT_EQ(node_->configure().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE);
+  spin_for(300ms);
+  EXPECT_EQ(helper_->count_subscribers(kImuTopic), 1U);
+}
+
+// The three noise values must be positive and finite, the seconds and thresholds too; checked even
+// while imu_topic is empty.
+TEST_F(LocalizationNodeTest, ConfigureFailsWithInvalidImuParameters) {
+  const std::vector<rclcpp::Parameter> invalid_parameters = {
+      rclcpp::Parameter("imu_gyro_noise_density_rad_s_sqrt_hz", 0.0),
+      rclcpp::Parameter("imu_gyro_noise_density_rad_s_sqrt_hz", -1.0e-3),
+      rclcpp::Parameter("imu_gyro_bias_sigma_rad_s", 0.0),
+      rclcpp::Parameter("imu_gyro_bias_sigma_rad_s", -1.0),
+      rclcpp::Parameter("imu_gyro_scale_sigma", 0.0),
+      rclcpp::Parameter("imu_gyro_scale_sigma", -0.01),
+      rclcpp::Parameter("imu_gyro_scale_sigma", std::numeric_limits<double>::quiet_NaN()),
+      rclcpp::Parameter("imu_max_gap_s", 0.0),
+      rclcpp::Parameter("imu_max_rate_rad_s", -1.0),
+      rclcpp::Parameter("imu_stationary_window_s", 0.0),
+      rclcpp::Parameter("imu_stationary_window_s", 3.0),
+      rclcpp::Parameter("imu_bias_max_abs_rad_s", 0.0),
+      rclcpp::Parameter("imu_bias_max_std_rad_s", std::numeric_limits<double>::infinity()),
+      rclcpp::Parameter("imu_up_axis_warn_deg", 0.0),
+      rclcpp::Parameter("imu_timeout_s", -0.5)};
+  for (const std::string& imu_topic : std::vector<std::string>{std::string(), std::string(kImuTopic)}) {
+    for (const auto& parameter : invalid_parameters) {
+      auto options = with_imu_topic(make_options(map_file_.string(), map_yaml_.string()), imu_topic);
+      options.append_parameter_override(parameter.get_name(), parameter.get_parameter_value());
+      create_node(options);
+      EXPECT_EQ(node_->configure().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED)
+          << parameter.get_name() << " with imu_topic '" << imu_topic << "'";
+      close_node();
     }
   }
 }

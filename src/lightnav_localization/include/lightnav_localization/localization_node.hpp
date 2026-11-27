@@ -22,6 +22,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_lifecycle/lifecycle_node.hpp>
 #include <rclcpp_lifecycle/lifecycle_publisher.hpp>
+#include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/nav_sat_fix.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <std_srvs/srv/trigger.hpp>
@@ -30,6 +31,7 @@
 #include <tf2_ros/transform_listener.h>
 
 #include "lightnav_localization/gps_input.hpp"
+#include "lightnav_localization/gyro_yaw.hpp"
 #include "lightnav_localization/initial_alignment.hpp"
 #include "lightnav_localization/localizer.hpp"
 #include "lightnav_localization/map_builder.hpp"
@@ -65,6 +67,7 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
  private:
   void declare_parameters();
   bool read_parameters(std::string& error);
+  bool read_imu_parameters(std::string& error);
   bool load_map_data(std::string& error);
   void reset_runtime_state();
   bool is_active() const;
@@ -73,6 +76,12 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
   void handle_wheel_odom(const nav_msgs::msg::Odometry::SharedPtr message);
   void handle_point_cloud(const sensor_msgs::msg::PointCloud2::SharedPtr message);
   void handle_nav_sat_fix(const sensor_msgs::msg::NavSatFix::SharedPtr message);
+  // Issue #92: hands one IMU sample to the GyroYawTracker. Not called when imu_topic is empty.
+  void handle_imu(const sensor_msgs::msg::Imu::SharedPtr message);
+  // Looks up the TF base_frame -> imu frame once and gives its up axis to the tracker. The TF is only
+  // compared with the gravity-based up axis, never used to compute the yaw.
+  void try_resolve_imu_expected_up_axis(const std::string& imu_frame, double stamp_sec);
+  bool is_imu_enabled() const { return !imu_topic_.empty(); }
   void handle_watchdog();
   void handle_set_initial_pose(
       const std::shared_ptr<lightnav_msgs::srv::SetInitialPose::Request> request,
@@ -146,6 +155,10 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
   std::string wheel_odom_topic_;
   std::string points_topic_;
   std::string gps_topic_;
+  // Issue #92 external IMU. An empty imu_topic_ disables everything (no subscription, no tracker, no
+  // diagnostics entry), which keeps the node exactly as it was without the IMU.
+  std::string imu_topic_;
+  GyroYawParameters gyro_yaw_parameters_;
   bool publish_tf_ = true;
   double status_rate_hz_ = 2.0;
   double diagnostics_cpu_warn_percent_ = 200.0;
@@ -205,6 +218,12 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
   bool has_gps_antenna_to_base_ = false;
   Eigen::Vector3d gps_antenna_in_base_ = Eigen::Vector3d::Zero();
 
+  // IMU input (Issue #92). The tracker lives from on_configure to on_cleanup, across Localizer rebuilds.
+  std::unique_ptr<GyroYawTracker> gyro_yaw_tracker_;
+  std::string imu_frame_;
+  bool has_imu_expected_up_axis_ = false;
+  double last_imu_tf_attempt_sec_ = -1e9;
+
   // Wheel input and the node-side buffer used for initial alignment/debug deskew.
   bool has_wheel_odom_ = false;
   rclcpp::Time last_wheel_stamp_;
@@ -250,6 +269,7 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr wheel_subscription_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr points_subscription_;
   rclcpp::Subscription<sensor_msgs::msg::NavSatFix>::SharedPtr gps_subscription_;
+  rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_subscription_;
   rclcpp::Service<lightnav_msgs::srv::SetInitialPose>::SharedPtr set_initial_pose_service_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr reload_map_service_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr save_map_service_;
