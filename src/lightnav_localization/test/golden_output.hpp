@@ -168,8 +168,18 @@ std::vector<RecordedOutput> drive_short_course(bool has_prior_map, const Configu
   return outputs;
 }
 
-inline const char* golden_file_name(bool has_prior_map) {
-  return has_prior_map ? "golden_localization_short_course.txt" : "golden_mapping_short_course.txt";
+// The toolchain (system, CPU, compiler) the recording was made with: floating point results differ in the
+// last bits between them. CMake passes it (see CMakeLists.txt); a build without it records as "unknown".
+inline std::string golden_toolchain() {
+#ifdef LIGHTNAV_GOLDEN_TOOLCHAIN
+  return LIGHTNAV_GOLDEN_TOOLCHAIN;
+#else
+  return "unknown";
+#endif
+}
+
+inline std::string golden_file_name(bool has_prior_map) {
+  return "golden_" + golden_toolchain() + (has_prior_map ? "_localization" : "_mapping") + "_short_course.txt";
 }
 
 // Records the drive with the plain two argument call into `directory` (both scenarios).
@@ -180,7 +190,7 @@ inline void write_golden_recordings(const std::string& directory) {
         [](Localizer& localizer, double time_sec, const Eigen::Isometry3d& odom) {
           return localizer.on_wheel_odom(time_sec, odom);
         });
-    write_golden(directory + "/" + golden_file_name(has_prior_map), outputs);
+    write_golden(std::string(directory) + "/" + golden_file_name(has_prior_map), outputs);
   }
 }
 

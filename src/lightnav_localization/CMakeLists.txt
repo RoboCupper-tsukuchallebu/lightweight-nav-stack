@@ -113,6 +113,11 @@ if(BUILD_TESTING)
     target_compile_options(test_${test_name} PRIVATE -Wall -Wextra -Werror)
     add_test(NAME ${test_name} COMMAND test_${test_name})
   endforeach()
+  # The recordings of test_localizer (test/data/golden_<toolchain>_*.txt) depend on the compiler and the CPU:
+  # name the toolchain so that the test reads the recording made with the same one.
+  string(REGEX REPLACE "[^A-Za-z0-9._-]" "_" lightnav_golden_toolchain
+         "${CMAKE_SYSTEM_NAME}-${CMAKE_SYSTEM_PROCESSOR}-${CMAKE_CXX_COMPILER_ID}-${CMAKE_CXX_COMPILER_VERSION}")
+  target_compile_definitions(test_localizer PRIVATE LIGHTNAV_GOLDEN_TOOLCHAIN="${lightnav_golden_toolchain}")
   target_include_directories(test_matcher SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/small_gicp/include)
 
   add_executable(test_localization_node test/test_localization_node.cpp)

@@ -1090,37 +1090,21 @@ TEST(Localizer, RejectsInvalidSlipWheelRateWindow) {
 // ---- Without a gyro increment the Localizer must behave exactly as before (Issue #92, section 4.1). ----
 namespace {
 
-// Compares a run with the recording of the code before the gyro existed (commit a1771d0; see
-// test/data/README.md). Where the floating point rounds as it did when recording, every output must match
-// bit for bit. Elsewhere (another compiler or CPU: fused multiply-add changes the last bits) the state of
-// every output must still be identical and every number must agree within 1e-4.
+// Compares a run with the recording of the code before the gyro existed, made with the same toolchain
+// (test/data/README.md): every output must match bit for bit. Floating point differs between toolchains,
+// so a toolchain without a recording fails instead of being compared loosely.
 void expect_matches_recording_before_the_gyro(bool has_prior_map, const std::vector<RecordedOutput>& run) {
   const std::filesystem::path path =
       std::filesystem::path(__FILE__).parent_path() / "data" / golden_file_name(has_prior_map);
   const std::vector<GoldenOutput> golden = read_golden(path.string());
-  ASSERT_FALSE(golden.empty()) << path;
+  if (golden.empty()) {
+    FAIL() << "golden for toolchain " << golden_toolchain() << " is missing; regenerate with test/data/README.md ("
+           << path << ")";
+  }
   ASSERT_EQ(golden.size(), run.size());
-  std::size_t first_different_hash = golden.size();
   for (std::size_t index = 0; index < golden.size(); ++index) {
-    if (hash_output(run[index]) != golden[index].hash) {
-      first_different_hash = index;
-      break;
-    }
+    ASSERT_EQ(hash_output(run[index]), golden[index].hash) << "output " << index << " differs from the recording";
   }
-  if (first_different_hash == golden.size()) return;
-#if defined(__APPLE__)
-  ADD_FAILURE() << "output " << first_different_hash << " differs from the recording before the gyro";
-#else
-  constexpr double kToleranceOtherPlatform = 1e-4;
-  for (std::size_t index = 0; index < golden.size(); ++index) {
-    EXPECT_EQ(static_cast<int>(run[index].state), golden[index].state) << "output " << index;
-    const std::array<double, 7> values = output_values(run[index]);
-    for (std::size_t column = 0; column < values.size(); ++column) {
-      EXPECT_NEAR(values[column], golden[index].values[column], kToleranceOtherPlatform)
-          << "output " << index << " value " << column;
-    }
-  }
-#endif
 }
 
 enum class WheelCall { kTwoArguments, kNoGyroIncrement };
