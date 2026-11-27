@@ -5,10 +5,12 @@
 
 #include <Eigen/Geometry>
 #include <cstddef>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "lightnav_localization/gps_input.hpp"
+#include "lightnav_localization/map_metadata.hpp"
 #include "lightnav_localization/pcd_io.hpp"
 
 namespace lightnav_localization {
@@ -41,6 +43,8 @@ struct MapOutputParameters {
   // Localizer::save_map only: runs the loop closing between the optimized and the final stage. The caller
   // decides (the node passes true only for ~/save_map), so the stop-time save never closes loops.
   bool should_close_loops = false;
+  MapSaveStage save_stage = MapSaveStage::kUnknown;  // written to map.yaml
+  std::optional<int> loop_closure_count;             // written to map.yaml (final stage after loop closing)
 };
 
 struct MapOutputResult {
@@ -49,6 +53,7 @@ struct MapOutputResult {
   std::size_t loop_closure_count = 0;
   std::string loop_closure_report;  // one line per detection round; empty when detection is off
   std::string stage_report;  // when each stage of Localizer::save_map() reached the disk
+  double save_duration_s = 0.0;  // Localizer::save_map(): the whole save
 };
 
 // Transforms every keyframe cloud by its trajectory pose, concatenates them and voxel-downsamples

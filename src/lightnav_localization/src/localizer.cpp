@@ -184,6 +184,9 @@ struct Localizer::Implementation {
   std::optional<Eigen::Vector3d> latest_position_and_yaw_std;
   std::vector<KeyframeCloud> mapping_keyframes;
   bool mapping_paused = false;
+  // Keyframe count of the last save that reached stage 2 (the map files hold at least an optimized map).
+  std::optional<std::size_t> keyframe_count_of_optimized_save;
+  Localizer::LoopClosingFunction loop_closing = close_loops;
   std::optional<double> match_eigenvalue_ratio;
   std::optional<Eigen::Vector3d> match_weakest_axis;
 
@@ -621,6 +624,15 @@ std::vector<Eigen::Isometry3d> Localizer::lidar_keyframe_poses_for_test() const 
 }
 
 void Localizer::inject_optimization_failure_for_test() { implementation_->graph->inject_failure_once(); }
+void Localizer::set_loop_closing_for_test(LoopClosingFunction loop_closing) {
+  implementation_->loop_closing = std::move(loop_closing);
+}
+void Localizer::inject_batch_failure_for_test(int successful_calls) {
+  implementation_->graph->inject_batch_failure_after(successful_calls);
+}
+std::size_t Localizer::loop_closure_factor_count_for_test() const {
+  return implementation_->graph->loop_closure_factor_count();
+}
 
 double Localizer::last_scan_time_ms() const { return implementation_->scan_time_ms; }
 ScanTimeStatistics Localizer::take_scan_time_statistics() {
@@ -684,9 +696,16 @@ bool Localizer::save_map(const MapOutputParameters& parameters, MapOutputResult&
   output_parameters.has_gps_origin = self.gps_origin.has_value();
   if (self.gps_origin) output_parameters.gps_origin = *self.gps_origin;
   std::string stage_report;
-  const auto write_stage = [&](const char* stage_name, bool is_batch_optimized,
-                               const std::vector<BatchPose>& poses) {
-    output_parameters.batch_optimized = is_batch_optimized;
+  std::vector<LoopClosure> closures;
+  std::string closure_report;
+  const auto write_stage = [&](const char* stage_name, MapSaveStage stage, const std::vector<BatchPose>& poses) {
+    output_parameters.batch_optimized = stage != MapSaveStage::kPreliminary;
+    output_parameters.save_stage = stage;
+    // The loop closure count is written by the final stage only, and only when loop closing ran.
+    output_parameters.loop_closure_count =
+        stage == MapSaveStage::kFinal && parameters.should_close_loops
+            ? std::optional<int>(static_cast<int>(closures.size()))
+            : std::nullopt;
     result = write_map_outputs(output_parameters, self.mapping_keyframes,
                                make_trajectory(self.mapping_keyframes, poses));
     // The keyframe clouds do not depend on the poses: the first stage has written them.
@@ -697,33 +716,47 @@ bool Localizer::save_map(const MapOutputParameters& parameters, MapOutputResult&
     stage_report += std::string(stage_report.empty() ? "" : "; ") + line;
     if (report_progress) report_progress(line);
   };
-  std::vector<LoopClosure> closures;
-  std::string closure_report;
+  // After a failure past stage 2 the graph goes back to the stage 2 state, so the next save does not
+  // repeat the failure with the same loop closure factors.
+  const auto roll_back_loop_closing = [&]() {
+    self.graph->remove_loop_closure_factors();
+    closures.clear();
+  };
+  const std::size_t keyframe_count = self.mapping_keyframes.size();
+  const bool has_map_at_least_optimized = self.keyframe_count_of_optimized_save &&
+                                          *self.keyframe_count_of_optimized_save == keyframe_count;
   try {
-    write_stage("preliminary", false, self.graph->recorded_poses());
+    if (!has_map_at_least_optimized) {
+      write_stage("preliminary", MapSaveStage::kPreliminary, self.graph->recorded_poses());
+    }
     if (!self.graph->batch_optimize(parameters.batch_max_iterations, false)) {
       error = "batch optimization failed: " + self.graph->last_error();
       return false;
     }
-    write_stage("optimized", true, self.graph->batch_poses());
+    write_stage("optimized", MapSaveStage::kOptimized, self.graph->batch_poses());
+    self.keyframe_count_of_optimized_save = keyframe_count;
     if (parameters.should_close_loops &&
-        !close_loops(*self.graph, self.mapping_keyframes, self.parameters.loop_closure,
-                     parameters.batch_max_iterations, closures, closure_report, error)) {
+        !self.loop_closing(*self.graph, self.mapping_keyframes, self.parameters.loop_closure,
+                           parameters.batch_max_iterations, closures, closure_report, error)) {
+      roll_back_loop_closing();
       return false;
     }
     // The standard deviations (marginals) are computed once, on the last result.
     if (!self.graph->batch_optimize(parameters.batch_max_iterations, true)) {
       error = "batch optimization failed: " + self.graph->last_error();
+      roll_back_loop_closing();
       return false;
     }
-    write_stage("final", true, self.graph->batch_poses());
+    write_stage("final", MapSaveStage::kFinal, self.graph->batch_poses());
   } catch (const std::exception& exception) {
     error = exception.what();
+    roll_back_loop_closing();
     return false;
   }
   result.loop_closure_count = closures.size();
   result.loop_closure_report = closure_report;
   result.stage_report = stage_report;
+  result.save_duration_s = elapsed_ms(start) / kMillisecondsPerSecond;
   return true;
 }
 

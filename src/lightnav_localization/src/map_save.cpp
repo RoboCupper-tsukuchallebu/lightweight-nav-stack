@@ -1,6 +1,7 @@
 #include "lightnav_localization/map_save.hpp"
 
 #include <algorithm>
+#include <cstdio>
 #include <limits>
 #include <map>
 #include <stdexcept>
@@ -27,6 +28,18 @@ std::vector<TrajectoryPoint> make_trajectory(const std::vector<KeyframeCloud>& k
     trajectory.push_back(point);
   }
   return trajectory;
+}
+
+const char* const kMapAlreadySavedMessage = "map already saved (no keyframe added since)";
+
+std::string format_save_map_message(const MapOutputResult& result, const std::string& output_directory,
+                                    bool did_close_loops) {
+  char duration_text[32];
+  std::snprintf(duration_text, sizeof(duration_text), "%.1f", result.save_duration_s);
+  return "saved " + std::to_string(result.keyframe_count) + " keyframes, " +
+         std::to_string(result.map_point_count) + " map points to " + output_directory +
+         "; loop closures: " + (did_close_loops ? std::to_string(result.loop_closure_count) : "off") + "; " +
+         duration_text + " s";
 }
 
 bool close_loops(PoseGraph& graph, const std::vector<KeyframeCloud>& keyframes,

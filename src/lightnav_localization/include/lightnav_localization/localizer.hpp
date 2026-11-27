@@ -115,6 +115,15 @@ class Localizer {
   std::size_t error_events_total() const;
   std::size_t pending_scan_count() const;
   void inject_optimization_failure_for_test();
+  // Test seam: replaces the loop closing of save_map (same contract as close_loops in map_save.hpp).
+  using LoopClosingFunction = std::function<bool(
+      PoseGraph&, const std::vector<KeyframeCloud>&, const LoopClosureParameters&, int,
+      std::vector<LoopClosure>&, std::string&, std::string&)>;
+  void set_loop_closing_for_test(LoopClosingFunction loop_closing);
+  // Test seam: the batch optimisation of save_map after `successful_calls` more calls fails (0 = the next:
+  // stage 2; 1 = the first optimisation inside the loop closing, or stage 3 without loop closing).
+  void inject_batch_failure_for_test(int successful_calls);
+  std::size_t loop_closure_factor_count_for_test() const;
   // Next prior-map rebuild: 1 = the worker throws, 2 = starting the worker throws system_error.
   void inject_map_rebuild_failure_for_test(int mode);
   // Poses (map_to_base, oldest first) of the keyframes in the LiDAR odometry sub-map.
@@ -162,7 +171,11 @@ class Localizer {
   //   3. final: after the loop closures (only when MapOutputParameters::should_close_loops) and with the
   //      standard deviations.
   // `report_progress` is called with one line as soon as a stage is on disk.
-  // On failure the files of the stages that finished stay; `error` says what failed.
+  // On failure the files of the stages that finished stay; `error` says what failed. A failure in the loop
+  // closing or in stage 3 removes the loop closure factors again and restores the stage 2 result, so the
+  // next save starts from the same graph. When the previous save already wrote stage 2 or later and no
+  // keyframe has been added since, stage 1 is skipped: a map that went further is never overwritten by a
+  // preliminary one (if stage 2 then fails, the earlier map stays as it is).
   bool save_map(const MapOutputParameters& parameters, MapOutputResult& result,
                 std::string& error, const MapSaveProgress& report_progress = {});
 

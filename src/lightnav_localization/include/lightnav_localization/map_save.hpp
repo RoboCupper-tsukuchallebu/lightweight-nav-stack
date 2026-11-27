@@ -24,4 +24,13 @@ bool close_loops(PoseGraph& graph, const std::vector<KeyframeCloud>& keyframes,
                  const LoopClosureParameters& parameters, int batch_max_iterations,
                  std::vector<LoopClosure>& closures, std::string& report, std::string& error);
 
+// The success message of ~/save_map, e.g.
+//   saved 1899 keyframes, 1135156 map points to <dir>; loop closures: 6; 191.2 s
+// "loop closures: off" when the save did not close loops.
+std::string format_save_map_message(const MapOutputResult& result, const std::string& output_directory,
+                                    bool did_close_loops);
+
+// The success message of a ~/save_map that finds the map already saved (no keyframe added since).
+extern const char* const kMapAlreadySavedMessage;
+
 }  // namespace lightnav_localization

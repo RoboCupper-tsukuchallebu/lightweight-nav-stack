@@ -231,6 +231,8 @@ MapOutputResult write_map_outputs(const MapOutputParameters& parameters,
   metadata.created = parameters.created;
   metadata.keyframe_count = static_cast<int>(keyframes.size());
   metadata.batch_optimized = parameters.batch_optimized;
+  metadata.save_stage = parameters.save_stage;
+  metadata.loop_closure_count = parameters.loop_closure_count;
 
   // Write every file under a temporary name first; any failure leaves the previous three files as
   // they were. Directory-level rename is not used (it fails with ENOTEMPTY on a non-empty directory).

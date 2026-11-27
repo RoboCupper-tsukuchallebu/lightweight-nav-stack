@@ -1,3 +1,4 @@
+#include "lightnav_localization/map_save.hpp"
 #include "lightnav_localization/localization_node.hpp"
 
 #include <algorithm>
@@ -1528,6 +1529,13 @@ void LocalizationNode::handle_save_map(
     response->message = "localization node is not active";
     return;
   }
+  if (localizer_ && keyframe_count_at_save_map_ &&
+      localizer_->mapping_keyframe_count() == *keyframe_count_at_save_map_) {
+    // The previous save_map succeeded and nothing was recorded since: the files are already final.
+    response->success = true;
+    response->message = kMapAlreadySavedMessage;
+    return;
+  }
   std::string message;
   // Only an explicit save_map closes loops (when enabled); the stop-time save never does.
   response->success = save_mapping_outputs(message, localizer_parameters_.loop_closure.enabled);
@@ -1592,8 +1600,7 @@ bool LocalizationNode::save_mapping_outputs(std::string& message, bool should_cl
     message = "save_map failed: " + error;
     return false;
   }
-  message = "saved " + std::to_string(result.keyframe_count) + " keyframes, " +
-            std::to_string(result.map_point_count) + " map points to " + map_output_dir_;
+  message = format_save_map_message(result, map_output_dir_, should_close_loops);
   RCLCPP_INFO(get_logger(), "%s", message.c_str());
   if (!result.loop_closure_report.empty()) {
     RCLCPP_INFO(get_logger(), "loop closures: %zu in total; %s", result.loop_closure_count,

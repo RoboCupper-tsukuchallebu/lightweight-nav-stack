@@ -1,8 +1,14 @@
 #pragma once
 
+#include <optional>
 #include <string>
 
 namespace lightnav_localization {
+
+// Which stage of Localizer::save_map() wrote the map. kUnknown: an older map.yaml without the key.
+enum class MapSaveStage { kUnknown, kPreliminary, kOptimized, kFinal };
+
+const char* to_text(MapSaveStage stage);
 
 struct MapMetadata {
   bool has_gps_origin = false;
@@ -13,6 +19,10 @@ struct MapMetadata {
   std::string created;
   int keyframe_count = 0;
   bool batch_optimized = false;
+  MapSaveStage save_stage = MapSaveStage::kUnknown;  // not written when kUnknown
+  // Number of loop closures of the final stage. nullopt: loop closing was not run (also for older maps);
+  // 0: it ran and found none.
+  std::optional<int> loop_closure_count;
 };
 
 void write_map_metadata(const std::string& file_path, const MapMetadata& metadata);
