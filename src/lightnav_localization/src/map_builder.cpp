@@ -67,7 +67,8 @@ PointList build_map_points(const std::vector<KeyframeCloud>& keyframes,
   std::map<int, Eigen::Isometry3d> poses;
   for (const TrajectoryPoint& point : trajectory) poses[point.node_index] = point.map_to_base;
   // One allocation for the whole map. Reserving keyframe by keyframe copied everything assembled so far at
-  // every keyframe: 15 s of the save of a 37 min drive (1900 keyframes, 7 million points).
+  // every keyframe, so the time grew with the square of the keyframe count: this function alone took 15.6 s
+  // for a 37 min drive (1900 keyframes, 7 million points; 0.7 s with one allocation, measured on a Mac).
   std::size_t total_point_count = 0;
   for (const KeyframeCloud& keyframe : keyframes) {
     if (poses.count(keyframe.node_index) > 0) total_point_count += keyframe.points_in_base.size();

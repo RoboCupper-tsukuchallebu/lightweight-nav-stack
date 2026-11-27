@@ -913,6 +913,30 @@ void make_map_inputs(int keyframe_count, std::vector<KeyframeCloud>& keyframes,
 
 }  // namespace
 
+// A keyframe without a pose does not enter the map, and no keyframes (or no poses) give an empty map.
+TEST(MapBuilder, KeyframesWithoutAPoseAreLeftOutAndNoKeyframesGiveAnEmptyMap) {
+  std::vector<KeyframeCloud> keyframes;
+  std::vector<TrajectoryPoint> trajectory;
+  make_map_inputs(3, keyframes, trajectory);
+  const PointList full_map = build_map_points(keyframes, trajectory, 0.2);
+  ASSERT_EQ(full_map.size(), 3U);
+
+  KeyframeCloud keyframe_without_pose = keyframes.front();
+  keyframe_without_pose.node_index = 1000;
+  for (Eigen::Vector3f& point : keyframe_without_pose.points_in_base) point += Eigen::Vector3f(50.0F, 50.0F, 0.0F);
+  std::vector<KeyframeCloud> keyframes_with_stray = keyframes;
+  keyframes_with_stray.push_back(keyframe_without_pose);
+
+  const PointList map_with_stray = build_map_points(keyframes_with_stray, trajectory, 0.2);
+
+  ASSERT_EQ(map_with_stray.size(), full_map.size());
+  for (std::size_t index = 0; index < full_map.size(); ++index) {
+    EXPECT_TRUE(map_with_stray[index].isApprox(full_map[index])) << "point " << index;
+  }
+  EXPECT_TRUE(build_map_points({}, {}, 0.2).empty());
+  EXPECT_TRUE(build_map_points(keyframes, {}, 0.2).empty());
+}
+
 // Issue #43 D7 (3): a failure while writing must not leave a new map.pcd next to an old map.yaml.
 TEST(MapBuilder, FailedWriteKeepsThePreviousThreeFiles) {
   const std::string output_directory = unique_directory("atomic");
