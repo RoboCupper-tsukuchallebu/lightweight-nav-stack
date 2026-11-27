@@ -67,7 +67,25 @@ void check_range(double value, double limit, const std::string& key, const std::
   }
 }
 
+MapSaveStage parse_save_stage(const std::string& text, const std::string& file_path) {
+  for (const MapSaveStage stage :
+       {MapSaveStage::kPreliminary, MapSaveStage::kOptimized, MapSaveStage::kFinal}) {
+    if (text == to_text(stage)) return stage;
+  }
+  throw std::runtime_error("map.yaml (" + file_path + ") bad save_stage: " + text);
+}
+
 }  // namespace
+
+const char* to_text(MapSaveStage stage) {
+  switch (stage) {
+    case MapSaveStage::kPreliminary: return "preliminary";
+    case MapSaveStage::kOptimized: return "optimized";
+    case MapSaveStage::kFinal: return "final";
+    case MapSaveStage::kUnknown: break;
+  }
+  return "unknown";
+}
 
 void write_map_metadata(const std::string& file_path, const MapMetadata& metadata) {
   std::ofstream stream(file_path);
@@ -83,6 +101,8 @@ void write_map_metadata(const std::string& file_path, const MapMetadata& metadat
          << "created: " << metadata.created << '\n'
          << "keyframe_count: " << metadata.keyframe_count << '\n'
          << "batch_optimized: " << metadata.batch_optimized << '\n';
+  if (metadata.save_stage != MapSaveStage::kUnknown) stream << "save_stage: " << to_text(metadata.save_stage) << '\n';
+  if (metadata.loop_closure_count) stream << "loop_closure_count: " << *metadata.loop_closure_count << '\n';
   stream.flush();
   stream.close();
   if (stream.fail()) throw std::runtime_error("map.yaml write failed: " + file_path);
@@ -105,7 +125,21 @@ MapMetadata read_map_metadata(const std::string& file_path) {
   metadata.created = require(values, "created", file_path);
   metadata.keyframe_count = parse_int(require(values, "keyframe_count", file_path), "keyframe_count", file_path);
   metadata.batch_optimized = parse_bool(require(values, "batch_optimized", file_path), "batch_optimized", file_path);
+  // Both keys are newer than the format: a map.yaml without them still reads.
+  const auto stage = values.find("save_stage");
+  if (stage != values.end()) metadata.save_stage = parse_save_stage(stage->second, file_path);
+  const auto closure_count = values.find("loop_closure_count");
+  if (closure_count != values.end()) {
+    metadata.loop_closure_count = parse_int(closure_count->second, "loop_closure_count", file_path);
+  }
   return metadata;
+}
+
+const char* const kPreliminaryMapNote = "map is a preliminary save (not batch optimized)";
+
+bool is_preliminary_map(const std::string& file_path) {
+  if (file_path.empty() || !std::filesystem::exists(file_path)) return false;
+  return !read_map_metadata(file_path).batch_optimized;
 }
 
 MapMetadata read_map_metadata_or_no_origin(const std::string& file_path) {

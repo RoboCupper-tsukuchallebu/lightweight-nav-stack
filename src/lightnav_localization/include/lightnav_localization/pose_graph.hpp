@@ -87,6 +87,13 @@ class PoseGraph {
   // Starts from the previous batch result when there is one. `should_compute_marginals` false leaves
   // position_and_yaw_std empty (the marginals of a long drive take most of the time).
   bool batch_optimize(int max_iterations, bool should_compute_marginals = true);
+  // The loop closure factors added since the last remove_loop_closure_factors().
+  std::size_t loop_closure_factor_count() const;
+  // Drops every loop closure factor and puts batch_poses() / the batch initial guess back to what they
+  // were before the first one was added (the optimized map of the save stage before the loop closing).
+  void remove_loop_closure_factors();
+  // Test seam: the batch_optimize() call after `successful_calls` more calls fails as if GTSAM had thrown.
+  void inject_batch_failure_after(int successful_calls) { batch_failure_countdown_ = successful_calls; }
   const std::vector<BatchPose>& batch_poses() const;
   // Every recorded node at the estimate it had when it left the online window (the nodes still in the
   // window: their latest estimate). No optimisation runs, so this is available at once;
@@ -109,6 +116,7 @@ class PoseGraph {
   int latest_index_ = -1;
   std::string last_error_;
   bool should_fail_once_ = false;
+  int batch_failure_countdown_ = -1;
   mutable std::string covariance_error_;
 };
 

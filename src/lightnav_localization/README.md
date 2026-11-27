@@ -10,8 +10,22 @@ LiDAR・車輪オドメトリ・GPSをGTSAMの固定長窓の姿勢グラフで�
   最後に終わった段階の地図が残る（どの段階まで進んだかはログの `map save: ...` と `map.yaml` の `batch_optimized` で分かる）。
   1. 仮の地図: オンライン推定の姿勢のまま書く（最適化を待たない。`batch_optimized: false`、`position_std_m` は `nan`）。
   2. 最適化後: バッチ再最適化の結果で書く（`batch_optimized: true`、`position_std_m` は `nan`）。
-  3. 最終: ループ閉じ込み（有効な場合）のあと、標準偏差つきで書く。
-  最適化が失敗したときも、それまでに終わった段階の地図は残る（`save_map` は失敗を返す）。
+  3. 最終: ループ閉じ込み（行う場合）のあと、標準偏差つきで書く（`save_stage: final`）。ループ閉じ込みを行ったときだけ `loop_closure_count: <本数>` も書く。
+
+  | 保存のきっかけ | `loop_closure_enabled: false`（既定） | `loop_closure_enabled: true` |
+  |---|---|---|
+  | `~/save_map` の呼び出し | 段階 1 → 2 → 3（ループなし） | 段階 1 → 2 → **ループ閉じ込み** → 3 |
+  | 停止（deactivate / shutdown。`docker compose stop`） | 段階 1 → 2 → 3（ループなし） | 段階 1 → 2 → 3（**ループなし**） |
+
+  `map.yaml` の `save_stage`（`preliminary` / `optimized` / `final`）と `loop_closure_count` は、無くても読める（古い地図）。
+  - 最適化（段階 2）が失敗したら、保存は失敗を返し、段階 1 の地図が残る。ループ閉じ込みか段階 3 が失敗したら、失敗を返し、段階 2 の地図が残る。
+  - ループ閉じ込みか段階 3 が失敗したら、その呼び出しで足したループの拘束をすべて外し、姿勢グラフを段階 2 の状態に戻す。`save_map` の失敗では記録を止めないので、そのあとの停止時の保存は、ループなしで段階 3 まで進める。
+  - 前の保存が段階 2 以上まで書いていて、キーフレームが増えていなければ、次の保存は段階 1 を書かずに段階 2 から始める（進んだ地図を仮の地図で上書きしない）。
+  - `save_map` が成功したあと、キーフレームが増えていなければ、もう一度呼んでも保存し直さずに成功を返す（`message` は `map already saved (no keyframe added since)`）。成功の `message` は `saved <キーフレーム数> keyframes, <点の数> map points to <出力先>; loop closures: <本数 または off>; <秒> s`。
+  - `~/save_map` が成功したあとは記録を止め、停止時の保存は飛ばす（ループを閉じた地図が上書きされない）。**屋外では「`save_map` を呼んでから止める ＝ ループを閉じた地図」「呼ばずに止める ＝ ループなしの地図」**。
+  - ループ閉じ込みの間（Mac で 3 分強）、ノードはほかの処理をしない（位置も状態も出ない）。**機体を止めてから `save_map` を呼ぶ**。応答は終わるまで返らない。
+  - **停止時の保存の制限時間は 45 秒**（`docker/compose.yaml` の `sigterm_timeout:=45`、そのあと `sigkill_timeout:=10`、全体は `stop_grace_period: 60s`）。超えるとノードは強制終了され、最後に終わった段階の地図が残る。ループ閉じ込みの途中で止められたときは段階 2 の地図。
+  - ビューアのサービス画面から止めると `save_map` は呼ばれない（`docker compose stop` と同じ扱いで、ループなしの地図になる）。ループを閉じた地図が要るときは、止める前に `save_map` を呼ぶ。
 
 ## 起動
 
@@ -62,7 +76,7 @@ LiDAR の外部パラメータ（`base_frame→点群の frame_id`）と GPS ア
 | `/tf` `map→odom` | TF | — | `publish_tf: false` で停止 |
 | `~/set_initial_pose` | `lightnav_msgs/SetInitialPose` | 既定 | `frame_id=map`。orientation が単位元かつ `covariance[35] < 0` なら yaw 未指定 |
 | `~/reload_map` | `std_srvs/Trigger` | 既定 | `map_file` / `map_yaml` を読み直して再初期化 |
-| `~/save_map` | `std_srvs/Trigger` | 既定 | mapping モードだけ。バッチ再最適化して `map_output_dir` に保存する。成功するとその後のキーフレームの記録を止める（続きを記録するには mapping を起動し直す） |
+| `~/save_map` | `std_srvs/Trigger` | 既定 | mapping モードだけ。3 段階で `map_output_dir` に保存する（`loop_closure_enabled` が真ならループ閉じ込みも行う。詳細は冒頭）。成功するとその後のキーフレームの記録を止める（続きを記録するには mapping を起動し直す）。応答はループ閉じ込みが終わるまで返らない |
 
 ## 初期位置合わせ（localization モード）
 
@@ -120,12 +134,13 @@ W-1 は既定で無効。スリップ判定の根拠は LiDAR の照合だけな
 | `gps_frame` | `gnss` | GPS アンテナの frame |
 | `wheel_timeout_s` / `scan_timeout_s` / `gps_timeout_s` | 0.2 / 0.5 / 3.0 | 入力の鮮度 |
 | `init_gps_max_std_m` / `init_scan_count` / `init_yaw_step_deg` | 3.0 / 3 / 15 | 初期位置合わせ |
+| `init_gps_reported_std_max_m` | 0.0（判定しない） | 地図の原点と初期位置合わせに使う測位の、**受信機が申告する誤差**の上限。申告 ＝ 測位に付いている誤差の、東と北の大きい方の平方根（型が「不明」以外で、値が正で有限のとき）。超える間は原点・初期化を待ち、`last_error` に `waiting for a GPS fix with reported std <= <上限> m (latest <値> m)`（ログは WARN、2 秒に 1 回まで）を出す。使える測位が来たら消える。申告の無い測位は弾かない。走行中の姿勢グラフに入る標準偏差は変えない（状態ごとの表の値） |
 | `init_coarse_corr_m` / `init_fine_corr_m` / `init_inlier_ratio_min` | 2.0 / 0.5 / 0.6 | 初期 yaw 照合 |
 | `publish_tf` / `status_rate_hz` | true / 2.0 | |
 | `wheel_yaw_slip_threshold_rad` / `wheel_sigma_yaw_per_rad` / `wheel_sigma_yaw_per_m` | 0.0 / 0.1 / 0.01 | 既定では無効。閾値を正の値にすると、受理された LiDAR 照合と車輪のキーフレーム間の相対 yaw の差が閾値を超えた場合に限り、車輪 yaw の標準偏差をその差以上に広げる。それ以外は従来の式を使う |
 | `wheel_robust_kernel` / `wheel_robust_k` | huber / 8.0 | スリップと判定した車輪因子の白色化残差に適用する Huber または cauchy。地図・GPS の `huber_k` とは独立。σ を不一致の大きさまで広げるため白色化残差はおよそ 1σ 以下になり、カーネルは追加の保険で、現状ほぼ効かない。8.0 は暫定値 |
-| `absolute_sigma_tilt_rad` / `absolute_sigma_z_m` | 0.0 / 0.0 | 既定では無効（0）。正の値にすると、すべてのノードに「車体は水平に近い」「高さは最初のノードに近い」という弱い絶対の拘束を入れる。LiDAR オドメトリの roll / pitch / z は相対の拘束だけだと積み上がり、GNSS なしの 650 m の走行で高さが ±8 m 流れた（2026-11-25）。小さすぎると坂が潰れる: 0.05 rad では 10° の坂が平らになる。実走で試した値は 0.3 rad / 2.0 m（高さの流れ ±0.3 m。2 m 程度の高低差は残る） |
-| `loop_closure_enabled` | false | mapping の保存時（最終段階）に、同じ場所へ戻ったキーフレームの組を探してバッチ最適化に入れる。候補は「推定上で近い組」と「見え方が似ている組（推定が大きく外れていても見つかる）」。照合は大域初期化と同じ 2D 探索 + 3D 検証。37 分の走行で数分かかるので、停止の制限時間内には終わらない（その場合も前の段階の地図は残る） |
+| `absolute_sigma_tilt_rad` / `absolute_sigma_z_m` | 0.0 / 0.0 | 既定では無効（0）。正の値にすると、すべてのノードに「車体は水平に近い」（`absolute_sigma_tilt_rad`。mapping と localization の両方）「高さは最初のノードに近い」（`absolute_sigma_z_m`。**mapping のときだけ**。localization では正の値でも入れない: 地図との照合で高さが決まり、出発点と違う場所で初期化すると「最初のノードの高さ」がその場所の高さになって、高低差のあるコースで照合を引っぱるため）という弱い絶対の拘束を入れる。負や非有限の値は configure で拒む。LiDAR オドメトリの roll / pitch / z は相対の拘束だけだと積み上がり、GNSS なしの 650 m の走行で高さが ±8 m 流れた（2026-11-25）。小さすぎると坂が潰れる: 0.05 rad では 10° の坂が平らになる。実走で試した値は 0.3 rad / 2.0 m（高さの流れ ±0.3 m。2 m 程度の高低差は残る） |
+| `loop_closure_enabled` | false | 真のとき、**`~/save_map` の呼び出しのときだけ**（停止時の保存では行わない）、mapping の保存の段階 2 と 3 の間に、同じ場所へ戻ったキーフレームの組を探してバッチ最適化に入れる。候補は「推定上で近い組」と「見え方が似ている組（推定が大きく外れていても見つかる）」。照合は大域初期化と同じ 2D 探索 + 3D 検証。37 分の走行で数分かかる（Mac で 3 分強）。停止の制限時間（45 秒）内には終わらないので、停止時の保存では行わない |
 | `loop_closure_min_path_gap_m` / `loop_closure_query_spacing_m` | 50.0 / 10.0 | 経路に沿ってこれ以上離れた組だけを候補にする / 経路に沿ってこの間隔で照合する |
 | `loop_closure_search_radius_m` / `loop_closure_search_radius_per_m` / `loop_closure_max_search_radius_m` | 5.0 / 0.05 / 20.0 | 推定上で近い組を探す半径。基本 + 経路長 × 係数、上限つき |
 | `loop_closure_max_rounds` | 3 | 検出と最適化を繰り返す最大回数（1 回目の補正で次の候補が見つかる） |
@@ -172,7 +187,7 @@ performance は直近のスキャン処理時間とプロセスの CPU・メモ�
 
 ## GNSS の入力と `/diagnostics`
 
-`gps_topic`（`robot.yaml` は `/rtk/fix_all`）の fix は、購読コールバックで次の順に扱う: 最後に受けた fix の
+`gps_topic`（`robot.yaml` は `/fix`。CLAS 用ファームの受信機が出す Float / Fix。Issue #88）の fix は、購読コールバックで次の順に扱う: 最後に受けた fix の
 `gps_status`・`gps_std_m`（status の表の σ）を記録 → `gps_min_status` 未満なら捨てる → 初期化・mapping の原点 →
 `gps_min_interval_s` で間引く → `Localizer::on_gps`（Mahalanobis ゲート）。`LocalizationStatus` の
 `gps_status`・`gps_std_m` は、落とす前に記録した**最後に受けた fix** の値（Float から Single に落ちたことが見える）。
@@ -206,7 +221,10 @@ performance は直近のスキャン処理時間とプロセスの CPU・メモ�
 - mapping 中は LOST にしない（odom_only の 50 m／60 s と、位置の不確かさ `lost_position_std_m` の両方を
   無効にする。`drift_rate` の項が GNSS 欠測の距離で増えるため、後者を残すと約 30 s で LOST になる）。
   localization モードは従来どおり。
-- ループ閉じ込み・動的物体除去・地図更新は v1 の非スコープ。
+- ループ閉じ込みは `~/save_map` のときだけで、誤検出しうる（見え方が似た別の場所を結ぶ。動きが経路長の 0.2 倍を超える見え方の候補は試さない）。動的物体除去・地図更新は v1 の非スコープ。
+- 電源を入れてしばらくは受信機の申告する誤差が大きく、`init_gps_reported_std_max_m` が正のときは、その間は地図の原点と初期位置合わせに使われない（Issue #93 の bag では約 3.5 分）。待っている間に走った区間は地図に入らない。
+- 申告の無い測位（誤差の型が「不明」）は `init_gps_reported_std_max_m` で弾かれない。ドライバの設定が変わって申告が出なくなると、この判定は黙って働かなくなる。
+- `map.yaml` が `batch_optimized: false` の地図（保存が段階 1 で打ち切られた仮の地図）は、localization が読むと警告のログと `last_error` の注記（`map is a preliminary save (not batch optimized)`）を出す。読み込みは拒まない。
 
 ## IMU を後から足すとき
 
