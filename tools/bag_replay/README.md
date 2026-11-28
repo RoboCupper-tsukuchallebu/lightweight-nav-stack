@@ -42,6 +42,7 @@ tools/bag_replay/run_replay.sh --build --bag ~/bags/<bag のディレクトリ> 
 | `--hold-seconds` | 0 | 再生後、保存の前にこの秒数だけノードと bridge を生かす（Foxglove で見る時間） |
 | `--extra-topic TOPIC` | | センサー以外に再生する bag のトピック（繰り返し可） |
 | `--record-gnss-topic TOPIC` | | そのトピック（`NavSatFix`）を再生に加え、受け取った測位を `gnss.csv` に書く。ノードがそれを使うかは、ノードの `gps_topic` で決まる |
+| `--imu-topic TOPIC` | 空（IMU なし） | そのトピック（`sensor_msgs/Imu`）を再生に加え、ノードに `imu_topic:=TOPIC` を渡す。`summary.json` の `imu_diagnostics` と `missing_topics` が埋まる |
 | `--save-map-service` | なし | 再生が終わったら、停止の前に `~/save_map` を呼んで応答を待つ。mapping だけ |
 | `--save-timeout` | 600 | `save_map` の応答と、停止（SIGINT）後の保存を待つ上限（秒） |
 | `--initial-pose X,Y,YAW` | | ノードが active になったら `~/set_initial_pose` を呼ぶ（m・m・rad）。localization だけ |
@@ -55,6 +56,23 @@ tools/bag_replay/run_replay.sh --build --bag ~/bags/<bag のディレクトリ> 
 
 `gnss.csv` の列は `bag_time_ns,latitude,longitude,altitude,status,cov_east,cov_north,cov_up`。時刻は、受け取ったときの再生の時計（`/clock`、bag の時刻）です。
 **緯度・経度を含むので、PR・Issue・コミットに貼らない**（このリポジトリは公開予定）。載せるのは差の数値だけ。
+
+### IMU の有り無しを比べる（`--imu-topic`）
+
+`--extra-topic` と `--node-param imu_topic:=...` の両方を書かなくても、`--imu-topic` 1 つで、IMU のトピックの再生とノードへの `imu_topic` の受け渡しをします（片方を忘れて黙って IMU なしになるのを防ぐため）。
+同じ記録を、IMU あり・なし（置き換えだけを切る）で再生して比べる例:
+
+```bash
+tools/bag_replay/run_replay.sh --bag ~/bags/<IMU の入った bag> --out ~/work/with-imu    --mode mapping --imu-topic /imu/data_raw
+tools/bag_replay/run_replay.sh --bag ~/bags/<IMU の入った bag> --out ~/work/without-imu --mode mapping --imu-topic /imu/data_raw \
+  --node-param imu_yaw_prediction_enabled:=false
+```
+
+- `summary.json` の `imu_diagnostics`: 再生の間に最後に受け取った `/diagnostics` の `localization_node: IMU` の項目（key と値の辞書）。1 つも受け取らなかったとき、`--imu-topic` なしのときは `null`。
+- `summary.json` の `missing_topics`: `--imu-topic`・`--extra-topic`・`--record-gnss-topic` で頼んだが記録に無かったトピック（`[]` なら全部あった）。記録のトピックを先に読み、あるものだけを `ros2 bag play --topics` に渡します。無かったものは警告を出して再生は続けます。センサーのトピック（`/velodyne_points` など）は、これまでどおり常に渡します。
+- 記録に IMU が無くても、ノードには `imu_topic` を渡します（「有効だが 1 つも届かない」状態を作れます）。そのときは `missing_topics` に入り、`imu_diagnostics` は `null` か、ノードが出した「届いていない」状態になります。
+- 記録のトピックは `metadata.yaml` から読みます（記録の形式も `metadata.yaml` の `storage_identifier` から取り、mcap 固定ではありません）。`--imu-topic` なしでも毎回読むので、記録の場所の誤りや壊れた `metadata.yaml` では、トレースバックではなく `bag: cannot read the bag <場所> ...: <理由>` を出して終了コード 1 で止まります。
+- `--imu-topic` なしのときの再生するトピックとノードの起動引数は、これまでと同じです（頼んだトピックが記録に無いときの扱いだけ、上のとおり変わりました）。
 
 ### 保存の呼び出し（`--save-map-service`）
 

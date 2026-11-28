@@ -9,6 +9,9 @@ then SIGINT to the node so it saves map.pcd / map.yaml / trajectory.csv. Writes 
     status.csv, online_path.csv             LocalizationStatus samples and the online map->base_footprint poses (x, y, z, yaw)
     gnss.csv                                --record-gnss-topic: bag_time_ns,latitude,longitude,altitude,status,cov_east,cov_north,cov_up
     summary.json, node.log, play.log        numbers of the run (also printed at the end)
+                                            imu_diagnostics: last `localization_node: IMU` of /diagnostics ({key: value}; null when none
+                                            arrived or without --imu-topic); missing_topics: asked for (--extra-topic, --record-gnss-topic,
+                                            --imu-topic) but not in the bag: not played, a warning is printed
     map_topdown.png                         top-down render (render_map.py), mapping mode only
 
 Normally started through run_replay.sh; see README.md.
@@ -28,6 +31,7 @@ import time
 from pathlib import Path
 
 import rclpy
+from diagnostic_msgs.msg import DiagnosticArray
 from lifecycle_msgs.msg import Transition
 from lifecycle_msgs.srv import ChangeState
 from lightnav_msgs.msg import LocalizationStatus
@@ -57,6 +61,8 @@ DRAIN_TIMEOUT_S = 120.0
 PLAY_EXIT_GRACE_S = 15.0
 GNSS_CSV_HEADER = ["bag_time_ns", "latitude", "longitude", "altitude", "status", "cov_east", "cov_north", "cov_up"]
 GNSS_QOS_DEPTH = 100
+DIAGNOSTICS_TOPIC = "/diagnostics"
+DIAGNOSTICS_QOS_DEPTH = 100
 NANOSECONDS_PER_SECOND = 1e9
 STATUS_STATE_NAMES = {0: "INITIALIZING", 1: "TRACKING", 2: "GPS_ONLY", 3: "ODOM_ONLY", 4: "LOST", 5: "INPUT_STALE"}
 
@@ -79,6 +85,34 @@ def find_node_executable():
     sys.exit("localization_node executable not found under AMENT_PREFIX_PATH")
 
 
+class BagReadError(RuntimeError):
+    """The bag cannot be read: a wrong place, a missing or broken metadata.yaml, or a storage format nothing here can open."""
+
+
+def read_bag_metadata(bag_directory):
+    """The bag's metadata.yaml (rosbag2_py BagMetadata). Raises BagReadError with the place and the reason."""
+    import rosbag2_py
+
+    try:
+        return rosbag2_py.Info().read_metadata(str(bag_directory), "")
+    except Exception as error:  # rosbag2_py raises plain RuntimeError for each of these
+        raise BagReadError(f"cannot read the bag {bag_directory} (a rosbag2 directory with metadata.yaml is needed): {error}") from error
+
+
+def open_bag_reader(bag_directory):
+    """A SequentialReader on the bag, in the storage format its metadata.yaml names (storage_identifier; not fixed to mcap)."""
+    import rosbag2_py
+
+    storage_identifier = read_bag_metadata(bag_directory).storage_identifier
+    reader = rosbag2_py.SequentialReader()
+    try:
+        reader.open(rosbag2_py.StorageOptions(uri=str(bag_directory), storage_id=storage_identifier),
+                    rosbag2_py.ConverterOptions(input_serialization_format="cdr", output_serialization_format="cdr"))
+    except Exception as error:
+        raise BagReadError(f"cannot open the bag {bag_directory} (storage '{storage_identifier}'): {error}") from error
+    return reader
+
+
 def merge_static_transforms(messages):
     """One TFMessage with the newest transform of every (parent, child) pair; None when there are no messages."""
     newest_by_pair = {}
@@ -96,9 +130,7 @@ def read_static_transforms(bag_directory):
     Messages after --start-offset are played by `ros2 bag play` again; the duplicates are harmless."""
     import rosbag2_py
 
-    reader = rosbag2_py.SequentialReader()
-    reader.open(rosbag2_py.StorageOptions(uri=str(bag_directory), storage_id="mcap"),
-                rosbag2_py.ConverterOptions(input_serialization_format="cdr", output_serialization_format="cdr"))
+    reader = open_bag_reader(bag_directory)
     reader.set_filter(rosbag2_py.StorageFilter(topics=["/tf_static"]))
     messages = []
     while reader.has_next():
@@ -116,11 +148,12 @@ def percentile(sorted_values, fraction):
 class Recorder(Node):
     """Collects what the node publishes during the replay. All callbacks run on the executor thread."""
 
-    def __init__(self, republished_static_transforms, record_gnss_topic=None):
+    def __init__(self, republished_static_transforms, record_gnss_topic=None, is_imu_diagnostics_wanted=False):
         super().__init__("bag_replay_session")
         self.status_rows = []
         self.gnss_rows = []
         self.gnss_samples_without_clock = 0
+        self.imu_diagnostics = None  # {key: value} of the last `localization_node: IMU` status, None until one arrives
         self.latest_clock_ns = None
         self.online_path_rows = []
         self.delivered_scan_stamps = []
@@ -147,6 +180,15 @@ class Recorder(Node):
         if record_gnss_topic:
             self.create_subscription(NavSatFix, record_gnss_topic, self._on_gnss,
                                      QoSProfile(depth=GNSS_QOS_DEPTH, reliability=ReliabilityPolicy.BEST_EFFORT))
+        if is_imu_diagnostics_wanted:
+            # Best effort matches a reliable and a best-effort publisher alike.
+            self.create_subscription(DiagnosticArray, DIAGNOSTICS_TOPIC, self._on_diagnostics,
+                                     QoSProfile(depth=DIAGNOSTICS_QOS_DEPTH, reliability=ReliabilityPolicy.BEST_EFFORT))
+
+    def _on_diagnostics(self, message):
+        values = replay_arguments.find_diagnostic_values(message.status)
+        if values is not None:
+            self.imu_diagnostics = values
 
     def _on_clock(self, message):
         self.latest_clock_ns = message.clock.sec * int(NANOSECONDS_PER_SECOND) + message.clock.nanosec
@@ -224,12 +266,13 @@ def request_initial_pose(recorder, x, y, yaw):
     return call_service(recorder.set_initial_pose_client, request, SERVICE_TIMEOUT_S)
 
 
-def read_bag_start_time_s(bag_directory):
-    import rosbag2_py
+def read_recorded_topic_names(bag_directory):
+    """Names of the topics the bag holds, from its metadata.yaml. Raises BagReadError."""
+    return [entry.topic_metadata.name for entry in read_bag_metadata(bag_directory).topics_with_message_count]
 
-    reader = rosbag2_py.SequentialReader()
-    reader.open(rosbag2_py.StorageOptions(uri=str(bag_directory), storage_id="mcap"),
-                rosbag2_py.ConverterOptions(input_serialization_format="cdr", output_serialization_format="cdr"))
+
+def read_bag_start_time_s(bag_directory):
+    reader = open_bag_reader(bag_directory)
     return reader.get_metadata().starting_time.nanoseconds / NANOSECONDS_PER_SECOND
 
 
@@ -286,7 +329,7 @@ def start_node(arguments, out_directory, log_file):
         command += ["-p", f"map_file:={arguments.map_file}"]
     if arguments.map_yaml:
         command += ["-p", f"map_yaml:={arguments.map_yaml}"]
-    for extra in arguments.node_param:
+    for extra in [*arguments.node_param, *replay_arguments.imu_node_parameters(arguments.imu_topic)]:
         command += ["-p", extra]
     return subprocess.Popen(command, stdout=log_file, stderr=subprocess.STDOUT)
 
@@ -301,8 +344,7 @@ def start_foxglove(arguments, log_file):
     return process
 
 
-def start_player(arguments, log_file):
-    topics = replay_arguments.played_topics(PLAYED_TOPICS, arguments.extra_topic, arguments.record_gnss_topic)
+def start_player(arguments, topics, log_file):
     command = ["ros2", "bag", "play", str(arguments.bag), "--clock", "100", "--rate", str(arguments.rate),
                "--start-offset", str(arguments.start_offset), "--read-ahead-queue-size", "2000",
                "--disable-keyboard-controls", "--topics", *topics]
@@ -376,15 +418,23 @@ def main():
     out_directory = arguments.out
     (out_directory / "map").mkdir(parents=True, exist_ok=True)
     try:
+        # Always read, also without --imu-topic: only topics the bag holds are asked of `ros2 bag play` (Issue #92 §5).
+        recorded_topic_names = read_recorded_topic_names(arguments.bag)
         initial_pose = decide_initial_pose(arguments)
+        static_transforms = read_static_transforms(arguments.bag) if arguments.start_offset > 0.0 else None
+    except BagReadError as error:
+        sys.exit(f"bag: {error}")
     except replay_arguments.InitialPoseError as error:
         sys.exit(f"initial pose: {error}")
-    static_transforms = read_static_transforms(arguments.bag) if arguments.start_offset > 0.0 else None
+    topics_to_play, missing_topics = replay_arguments.split_by_recorded_topics(
+        PLAYED_TOPICS, arguments.extra_topic, arguments.record_gnss_topic, arguments.imu_topic, recorded_topic_names)
+    for topic in missing_topics:
+        print(f"warning: the bag has no topic {topic}; it is not played", file=sys.stderr)
     if arguments.start_offset > 0.0 and static_transforms is None:
         print("warning: the bag has no /tf_static message; the lidar extrinsic will not be found", file=sys.stderr)
 
     rclpy.init()
-    recorder = Recorder(static_transforms, arguments.record_gnss_topic)
+    recorder = Recorder(static_transforms, arguments.record_gnss_topic, is_imu_diagnostics_wanted=bool(arguments.imu_topic))
     executor = MultiThreadedExecutor(num_threads=2)
     executor.add_node(recorder)
     spin_thread = threading.Thread(target=executor.spin, daemon=True)
@@ -418,7 +468,7 @@ def main():
         else:
             play_log = (out_directory / "play.log").open("w")
             log_files.append(play_log)
-            player = start_player(arguments, play_log)
+            player = start_player(arguments, topics_to_play, play_log)
             processes.append(player)
             play_status = player.wait()
             print(f"ros2 bag play finished with exit code {play_status}", flush=True)
@@ -447,6 +497,8 @@ def main():
         write_csv(out_directory / "gnss.csv", GNSS_CSV_HEADER, recorder.gnss_rows)
     summary = summarize(arguments, recorder, wall_seconds, node_exit_code, out_directory)
     summary.update(session_results)
+    summary["imu_diagnostics"] = recorder.imu_diagnostics
+    summary["missing_topics"] = missing_topics
     if arguments.record_gnss_topic:
         summary["gnss_samples_recorded"] = len(recorder.gnss_rows)
         summary["gnss_samples_without_clock"] = recorder.gnss_samples_without_clock  # received before the first /clock: dropped

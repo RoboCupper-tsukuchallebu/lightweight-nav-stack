@@ -7,6 +7,7 @@ from pathlib import Path
 
 MAXIMUM_INITIAL_POSE_GAP_S = 2.0  # rows of the map trajectory further apart than this are not interpolated
 DEFAULT_SAVE_TIMEOUT_S = 600.0
+IMU_DIAGNOSTIC_NAME = "localization_node: IMU"  # name of the /diagnostics status the node publishes for the IMU (Issue #92)
 
 
 class InitialPoseError(ValueError):
@@ -65,13 +66,43 @@ def interpolate_initial_pose(rows, query_time_s, maximum_gap_s=MAXIMUM_INITIAL_P
     }
 
 
-def played_topics(sensor_topics, extra_topics, record_gnss_topic):
-    """Topics for `ros2 bag play --topics`: the sensor topics, the extra ones and the recorded GNSS topic, each once."""
+def played_topics(sensor_topics, extra_topics, record_gnss_topic, imu_topic=""):
+    """Topics for `ros2 bag play --topics`: the sensor topics, the extra ones, the recorded GNSS topic and the IMU topic, each once."""
     topics = list(sensor_topics)
-    for topic in [*extra_topics, record_gnss_topic]:
+    for topic in [*extra_topics, record_gnss_topic, imu_topic]:
         if topic and topic not in topics:
             topics.append(topic)
     return topics
+
+
+def split_by_recorded_topics(sensor_topics, extra_topics, record_gnss_topic, imu_topic, recorded_topic_names):
+    """(topics to play, requested topics the bag does not hold).
+
+    The sensor topics are always played (as before). The others (extra, GNSS, IMU) are played only when the bag holds
+    them: `ros2 bag play --topics` is not asked for a topic it cannot find. The missing ones keep the request order."""
+    recorded = set(recorded_topic_names)
+    sensor_topic_set = set(sensor_topics)
+    requested = [topic for topic in played_topics([], extra_topics, record_gnss_topic, imu_topic) if topic not in sensor_topic_set]
+    available = [topic for topic in requested if topic in recorded]
+    missing = [topic for topic in requested if topic not in recorded]
+    return played_topics(sensor_topics, available, None), missing
+
+
+def imu_node_parameters(imu_topic):
+    """`-p` arguments (NAME:=VALUE strings) that hand the IMU topic to the node; empty when no IMU topic is asked for."""
+    return [f"imu_topic:={imu_topic}"] if imu_topic else []
+
+
+def find_diagnostic_values(statuses, status_name=IMU_DIAGNOSTIC_NAME):
+    """{key: value} of the status called `status_name` in a /diagnostics array, or None when it is not there.
+
+    `statuses` is DiagnosticArray.status (anything with `.name` and `.values` of `.key`/`.value`). When several
+    statuses carry the name, the last one wins."""
+    found = None
+    for status in statuses:
+        if status.name == status_name:
+            found = {entry.key: entry.value for entry in status.values}
+    return found
 
 
 def build_parser(description):
@@ -92,6 +123,9 @@ def build_parser(description):
                         help="bag topic to play besides the sensor topics, e.g. /fix_all for GNSS (repeatable)")
     parser.add_argument("--record-gnss-topic", metavar="TOPIC",
                         help="play this NavSatFix topic and write what is received to gnss.csv (the node uses it only when its gps_topic is the same)")
+    parser.add_argument("--imu-topic", default="", metavar="TOPIC",
+                        help="IMU topic (sensor_msgs/Imu) to play from the bag and give the node as imu_topic:=TOPIC; "
+                             "summary.json gets imu_diagnostics, and missing_topics when the bag does not hold it (default: no IMU)")
     parser.add_argument("--save-map-service", action="store_true",
                         help="mapping only: after the replay, before the stop, call ~/save_map and write its answer to summary.json")
     parser.add_argument("--initial-pose", type=parse_initial_pose, metavar="X,Y,YAW",
