@@ -13,6 +13,7 @@
 #include <sys/resource.h>
 #include <limits>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -40,6 +41,12 @@ constexpr double kNeverSec = -1e9;
 constexpr double kValidTimestampFloorSec = -1e8;
 constexpr double kMicrosecondsPerSecond = 1e6;
 constexpr double kWheelBufferSec = 3.0;
+// About 2 s of IMU samples at 966 Hz (Issue #92 section 3.1).
+constexpr std::size_t kImuSubscriptionDepth = 2000;
+// Retry period of the base -> IMU TF lookup, in IMU header stamp seconds.
+constexpr double kImuTfRetryPeriodSec = 1.0;
+// Upper bound of IMU messages taken at the start of one wheel callback (Issue #92 section 3.3).
+constexpr std::size_t kMaxImuMessagesPerWheelSample = 5000;
 constexpr double kDefaultWatchdogPeriodSec = 0.02;
 constexpr double kDiagnosticsPeriodSec = 1.0;
 constexpr double kScanMaximumWarnMs = 100.0;
@@ -64,6 +71,50 @@ diagnostic_msgs::msg::KeyValue make_diagnostic_entry(const std::string& key,
 void add_diagnostic_value(DiagnosticStatus& status, const std::string& key,
                           const std::string& value) {
   status.values.push_back(make_diagnostic_entry(key, value));
+}
+
+std::string gyro_yaw_state_name(GyroYawState state) {
+  switch (state) {
+    case GyroYawState::kWaitingForData:
+      return "waiting_for_data";
+    case GyroYawState::kWaitingForStationary:
+      return "waiting_for_stationary";
+    case GyroYawState::kReady:
+      return "ready";
+    case GyroYawState::kStale:
+      return "stale";
+  }
+  return "unknown";
+}
+
+std::string gyro_consistency_name(GyroConsistencyState state, bool is_inconsistent_warning) {
+  switch (state) {
+    case GyroConsistencyState::kUnverified:
+      return is_inconsistent_warning ? "inconsistent" : "unverified";
+    case GyroConsistencyState::kActive:
+      return "active";
+    case GyroConsistencyState::kSuspended:
+      return "suspended";
+    case GyroConsistencyState::kDisabledInconsistent:
+      return "disabled_inconsistent";
+  }
+  return "unknown";
+}
+
+constexpr char kUnavailableText[] = "unavailable";
+
+std::string format_number(double value) {
+  return std::isfinite(value) ? std::to_string(value) : std::string(kUnavailableText);
+}
+
+std::string format_optional_number(const std::optional<double>& value) {
+  return value ? format_number(*value) : std::string(kUnavailableText);
+}
+
+// "x,y,z"; a non-finite component (the LiDAR yaw change without a LiDAR match) reads "unavailable".
+std::string format_optional_vector(const std::optional<Eigen::Vector3d>& value) {
+  if (!value) return kUnavailableText;
+  return format_number(value->x()) + "," + format_number(value->y()) + "," + format_number(value->z());
 }
 
 std::string localization_state_name(LocalizationState state) {
@@ -236,6 +287,19 @@ void LocalizationNode::declare_parameters() {
   declare_parameter<std::string>("wheel_odom_topic", "/wheel/odom");
   declare_parameter<std::string>("points_topic", "/velodyne_points");
   declare_parameter<std::string>("gps_topic", "/gps/fix");
+  // External IMU (Issue #92). Empty imu_topic = disabled.
+  declare_parameter<std::string>("imu_topic", "");
+  declare_parameter<bool>("imu_yaw_prediction_enabled", true);
+  declare_parameter<double>("imu_gyro_noise_density_rad_s_sqrt_hz", 1.0e-3);
+  declare_parameter<double>("imu_gyro_bias_sigma_rad_s", 5.0e-4);
+  declare_parameter<double>("imu_gyro_scale_sigma", 0.01);
+  declare_parameter<double>("imu_max_gap_s", 0.05);
+  declare_parameter<double>("imu_max_rate_rad_s", 10.0);
+  declare_parameter<double>("imu_stationary_window_s", 2.0);
+  declare_parameter<double>("imu_bias_max_abs_rad_s", 0.05);
+  declare_parameter<double>("imu_bias_max_std_rad_s", 0.1);
+  declare_parameter<double>("imu_up_axis_warn_deg", 10.0);
+  declare_parameter<double>("imu_timeout_s", 0.5);
   declare_parameter<bool>("publish_tf", true);
   declare_parameter<double>("status_rate_hz", 2.0);
   declare_parameter<double>("diagnostics_cpu_warn_percent", 200.0);
@@ -343,6 +407,43 @@ void LocalizationNode::declare_parameters() {
   declare_parameter<double>("drift_rate", 0.02);
 }
 
+// Reads and checks the IMU parameters of Issue #92. Checked even while imu_topic is empty, so that a
+// wrong value is not found only on the day the IMU is switched on.
+bool LocalizationNode::read_imu_parameters(std::string& error) {
+  const double noise_density = get_parameter("imu_gyro_noise_density_rad_s_sqrt_hz").as_double();
+  const double bias_sigma = get_parameter("imu_gyro_bias_sigma_rad_s").as_double();
+  const double scale_sigma = get_parameter("imu_gyro_scale_sigma").as_double();
+  gyro_yaw_parameters_.max_gap_s = get_parameter("imu_max_gap_s").as_double();
+  gyro_yaw_parameters_.max_rate_rad_s = get_parameter("imu_max_rate_rad_s").as_double();
+  gyro_yaw_parameters_.stationary_window_s = get_parameter("imu_stationary_window_s").as_double();
+  gyro_yaw_parameters_.bias_max_abs_rad_s = get_parameter("imu_bias_max_abs_rad_s").as_double();
+  gyro_yaw_parameters_.bias_max_std_rad_s = get_parameter("imu_bias_max_std_rad_s").as_double();
+  gyro_yaw_parameters_.up_axis_warn_deg = get_parameter("imu_up_axis_warn_deg").as_double();
+  gyro_yaw_parameters_.timeout_s = get_parameter("imu_timeout_s").as_double();
+
+  const auto is_finite_positive = [](double value) { return std::isfinite(value) && value > 0.0; };
+  if (!is_finite_positive(noise_density) || !is_finite_positive(bias_sigma) ||
+      !is_finite_positive(scale_sigma)) {
+    error = "imu_gyro_noise_density_rad_s_sqrt_hz, imu_gyro_bias_sigma_rad_s and "
+            "imu_gyro_scale_sigma must be positive and finite";
+    return false;
+  }
+  try {
+    // The constructor checks that every value is finite and positive, and that the standstill window
+    // fits in the time the samples are held.
+    const GyroYawTracker validation(gyro_yaw_parameters_);
+  } catch (const std::invalid_argument& exception) {
+    error = std::string("imu_* parameters are invalid: ") + exception.what();
+    return false;
+  }
+  localizer_parameters_.graph.gyro_noise_density_rad_s_sqrt_hz = noise_density;
+  localizer_parameters_.graph.gyro_bias_sigma_rad_s = bias_sigma;
+  localizer_parameters_.graph.gyro_scale_sigma = scale_sigma;
+  localizer_parameters_.gyro_yaw_prediction_enabled =
+      get_parameter("imu_yaw_prediction_enabled").as_bool();
+  return true;
+}
+
 bool LocalizationNode::read_parameters(std::string& error) {
   mode_ = get_parameter("mode").as_string();
   map_file_ = get_parameter("map_file").as_string();
@@ -354,6 +455,7 @@ bool LocalizationNode::read_parameters(std::string& error) {
   wheel_odom_topic_ = get_parameter("wheel_odom_topic").as_string();
   points_topic_ = get_parameter("points_topic").as_string();
   gps_topic_ = get_parameter("gps_topic").as_string();
+  imu_topic_ = get_parameter("imu_topic").as_string();
   publish_tf_ = get_parameter("publish_tf").as_bool();
   status_rate_hz_ = get_parameter("status_rate_hz").as_double();
   diagnostics_cpu_warn_percent_ = get_parameter("diagnostics_cpu_warn_percent").as_double();
@@ -604,6 +706,7 @@ bool LocalizationNode::read_parameters(std::string& error) {
   localizer_parameters_.map_submap_rebuild_distance_m =
       get_parameter("map_submap_rebuild_distance_m").as_double();
   localizer_parameters_.drift_rate = get_parameter("drift_rate").as_double();
+  if (!read_imu_parameters(error)) return false;
 
   const bool positive_parameters =
       localizer_parameters_.graph.window_s > 0.0 &&
@@ -743,6 +846,13 @@ void LocalizationNode::reset_runtime_state() {
   published_path_version_ = 0;
   has_visualization_publish_time_ = false;
   node_error_.clear();
+  gyro_yaw_tracker_.reset();
+  carried_gyro_consistency_ = GyroConsistencyState::kUnverified;
+  carried_gyro_outvoted_total_ = 0;
+  previous_wheel_stamp_sec_.reset();
+  imu_frame_.clear();
+  has_imu_expected_up_axis_ = false;
+  last_imu_tf_attempt_sec_ = kNeverSec;
 }
 
 bool LocalizationNode::is_active() const {
@@ -810,6 +920,16 @@ LocalizationNode::CallbackReturn LocalizationNode::on_configure(
   gps_subscription_ = create_subscription<sensor_msgs::msg::NavSatFix>(
       gps_topic_, rclcpp::QoS(10).reliable(),
       [this](sensor_msgs::msg::NavSatFix::SharedPtr message) { handle_nav_sat_fix(message); });
+
+  if (is_imu_enabled()) {
+    gyro_yaw_tracker_ = std::make_unique<GyroYawTracker>(gyro_yaw_parameters_);
+    // best effort like the driver, and deep enough (about 2 s at 966 Hz) to hold the samples that
+    // arrive while a scan is processed inside the wheel callback.
+    imu_subscription_qos_ = rclcpp::SensorDataQoS().keep_last(kImuSubscriptionDepth);
+    imu_subscription_ = create_subscription<sensor_msgs::msg::Imu>(
+        imu_topic_, imu_subscription_qos_,
+        [this](sensor_msgs::msg::Imu::SharedPtr message) { handle_imu(message); });
+  }
 
   set_initial_pose_service_ = create_service<lightnav_msgs::srv::SetInitialPose>(
       "~/set_initial_pose",
@@ -890,6 +1010,7 @@ LocalizationNode::CallbackReturn LocalizationNode::on_cleanup(
   wheel_subscription_.reset();
   points_subscription_.reset();
   gps_subscription_.reset();
+  imu_subscription_.reset();
   set_initial_pose_service_.reset();
   reload_map_service_.reset();
   save_map_service_.reset();
@@ -931,6 +1052,7 @@ LocalizationNode::CallbackReturn LocalizationNode::on_shutdown(
   wheel_subscription_.reset();
   points_subscription_.reset();
   gps_subscription_.reset();
+  imu_subscription_.reset();
   set_initial_pose_service_.reset();
   reload_map_service_.reset();
   save_map_service_.reset();
@@ -1066,6 +1188,78 @@ bool LocalizationNode::is_usable_mapping_fix(const GpsFix& fix) const {
   return horizontal_std_m <= init_gps_max_std_m_;
 }
 
+void LocalizationNode::handle_imu(const sensor_msgs::msg::Imu::SharedPtr message) {
+  if (!is_active()) return;
+  ingest_imu_sample(*message);
+}
+
+void LocalizationNode::ingest_imu_sample(const sensor_msgs::msg::Imu& message) {
+  if (!gyro_yaw_tracker_) return;
+  const double stamp_sec =
+      rclcpp::Time(message.header.stamp, get_clock()->get_clock_type()).seconds();
+  try_resolve_imu_expected_up_axis(message.header.frame_id, stamp_sec);
+  gyro_yaw_tracker_->add_imu_sample(
+      stamp_sec,
+      Eigen::Vector3d(message.angular_velocity.x, message.angular_velocity.y,
+                      message.angular_velocity.z),
+      Eigen::Vector3d(message.linear_acceleration.x, message.linear_acceleration.y,
+                      message.linear_acceleration.z));
+}
+
+void LocalizationNode::drain_imu_subscription() {
+  if (!imu_subscription_) return;
+  sensor_msgs::msg::Imu message;
+  rclcpp::MessageInfo message_info;
+  for (std::size_t taken = 0; taken < kMaxImuMessagesPerWheelSample; ++taken) {
+    if (!imu_subscription_->take(message, message_info)) return;
+    ingest_imu_sample(message);
+  }
+}
+
+std::optional<double> LocalizationNode::compute_gyro_yaw_delta(double stamp_sec) const {
+  if (!gyro_yaw_tracker_ || !localizer_ || !previous_wheel_stamp_sec_) return std::nullopt;
+  if (!(stamp_sec > *previous_wheel_stamp_sec_)) return std::nullopt;
+  return gyro_yaw_delta_for_localizer(
+      localizer_->gyro_fusion_status().consistency,
+      gyro_yaw_tracker_->integrate_yaw(*previous_wheel_stamp_sec_, stamp_sec));
+}
+
+void LocalizationNode::remember_gyro_fusion_state() {
+  if (!localizer_) return;
+  const GyroFusionStatus status = localizer_->gyro_fusion_status();
+  carried_gyro_consistency_ = status.consistency;
+  carried_gyro_outvoted_total_ = status.consistency_outvoted_total;
+}
+
+void LocalizationNode::try_resolve_imu_expected_up_axis(const std::string& imu_frame,
+                                                        double stamp_sec) {
+  if (imu_frame.empty()) return;
+  if (imu_frame != imu_frame_) {
+    // A different frame_id (or the first one): look the TF up again.
+    imu_frame_ = imu_frame;
+    has_imu_expected_up_axis_ = false;
+    last_imu_tf_attempt_sec_ = kNeverSec;
+    gyro_yaw_tracker_->set_expected_up_axis(std::nullopt);
+  }
+  if (has_imu_expected_up_axis_) return;
+  // A replay that restarts moves the stamps back: count the retry period from the new time.
+  if (stamp_sec < last_imu_tf_attempt_sec_) last_imu_tf_attempt_sec_ = kNeverSec;
+  if (stamp_sec - last_imu_tf_attempt_sec_ < kImuTfRetryPeriodSec) return;
+  last_imu_tf_attempt_sec_ = stamp_sec;
+  try {
+    // Transform from base_frame to the IMU frame: a base-frame vector expressed in the IMU frame.
+    const geometry_msgs::msg::TransformStamped transform_stamped =
+        tf_buffer_->lookupTransform(imu_frame_, base_frame_, tf2::TimePointZero);
+    const Eigen::Isometry3d imu_from_base = tf2::transformToEigen(transform_stamped);
+    if (!is_finite_isometry(imu_from_base)) return;
+    gyro_yaw_tracker_->set_expected_up_axis(
+        Eigen::Vector3d(imu_from_base.linear() * Eigen::Vector3d::UnitZ()));
+    has_imu_expected_up_axis_ = true;
+  } catch (const tf2::TransformException&) {
+    // No TF: the IMU still works, the up axis check just reports unavailable.
+  }
+}
+
 void LocalizationNode::handle_wheel_odom(const nav_msgs::msg::Odometry::SharedPtr message) {
   if (!is_active()) return;
   Eigen::Isometry3d odom_to_base = Eigen::Isometry3d::Identity();
@@ -1079,6 +1273,13 @@ void LocalizationNode::handle_wheel_odom(const nav_msgs::msg::Odometry::SharedPt
   alignment_odom_buffer_.add(stamp_sec, odom_to_base);
   alignment_odom_buffer_.prune_before(stamp_sec - kWheelBufferSec);
 
+  // Order of Issue #92: take the queued IMU samples, then tell the tracker about this wheel sample
+  // (standstill, timeout reference), then ask for the yaw change since the previous wheel sample.
+  if (gyro_yaw_tracker_) {
+    drain_imu_subscription();
+    gyro_yaw_tracker_->add_wheel_pose(stamp_sec, odom_to_base);
+  }
+
   if (!is_localizer_initialized_) {
     if (is_mapping()) {
       // With GPS the next fix carries the current position; starting between fixes would use a
@@ -1089,20 +1290,25 @@ void LocalizationNode::handle_wheel_odom(const nav_msgs::msg::Odometry::SharedPt
     }
   }
   if (is_localizer_initialized_) {
-    if (!has_localizer_wheel_) {
+    const bool is_first_localizer_wheel = !has_localizer_wheel_;
+    if (is_first_localizer_wheel) {
       has_localizer_wheel_ = true;
       first_localizer_wheel_stamp_sec_ = stamp_sec;
     }
     // Capture event time now; the next diagnostics publication may be up to a second away.
     localizer_->poll_state(get_clock()->now().seconds());
+    // The Localizer has no previous wheel sample at its first one, so there is no yaw change to pass.
+    const std::optional<double> gyro_yaw_delta_rad =
+        is_first_localizer_wheel ? std::nullopt : compute_gyro_yaw_delta(stamp_sec);
     const std::optional<LocalizerOutput> output =
-        localizer_->on_wheel_odom(stamp_sec, odom_to_base);
+        localizer_->on_wheel_odom(stamp_sec, odom_to_base, gyro_yaw_delta_rad);
     if (output) {
       last_output_ = *output;
       publish_output(*output, stamp, odom_to_base);
       if (output->state != last_status_state_) publish_status();
     }
   }
+  previous_wheel_stamp_sec_ = stamp_sec;
   handle_pending_scans();
 }
 
@@ -1399,8 +1605,13 @@ bool LocalizationNode::try_start_initialization() {
   }
 
   if (!localizer_) {
+    localizer_parameters_.initial_gyro_consistency = carried_gyro_consistency_;
+    localizer_parameters_.initial_gyro_outvoted_total = carried_gyro_outvoted_total_;
     localizer_ =
         std::make_unique<Localizer>(localizer_parameters_, map_points_, gps_origin_);
+    if (lidar_match_hook_for_test_) localizer_->set_lidar_match_hook_for_test(lidar_match_hook_for_test_);
+    if (scan_processing_hook_for_test_)
+      localizer_->set_scan_processing_hook_for_test(scan_processing_hook_for_test_);
   }
   localizer_->initialize(map_to_base);
   is_localizer_initialized_ = true;
@@ -1543,6 +1754,7 @@ void LocalizationNode::handle_reload_map(
     response->message = error;
     return;
   }
+  remember_gyro_fusion_state();
   localizer_.reset();
   is_localizer_initialized_ = false;
   has_localizer_wheel_ = false;
@@ -1842,6 +2054,75 @@ DiagnosticStatus LocalizationNode::build_performance_status(bool has_localizer) 
   return performance_status;
 }
 
+DiagnosticStatus LocalizationNode::build_imu_status(bool has_localizer) const {
+  const GyroYawStatus tracker =
+      gyro_yaw_tracker_ ? gyro_yaw_tracker_->status() : GyroYawStatus{};
+  const GyroFusionStatus fusion = has_localizer ? localizer_->gyro_fusion_status() : GyroFusionStatus{};
+  const GyroConsistencyState consistency =
+      has_localizer ? fusion.consistency : carried_gyro_consistency_;
+  const std::size_t outvoted_total =
+      has_localizer ? fusion.consistency_outvoted_total : carried_gyro_outvoted_total_;
+  const std::string consistency_text =
+      gyro_consistency_name(consistency, has_localizer && fusion.is_inconsistent_warning);
+  const std::string state_text = gyro_yaw_state_name(tracker.state);
+
+  const bool is_state_warning = tracker.state != GyroYawState::kReady;
+  const bool is_consistency_warning = consistency != GyroConsistencyState::kUnverified &&
+                                      consistency != GyroConsistencyState::kActive;
+  const bool is_inconsistent_warning = has_localizer && fusion.is_inconsistent_warning;
+
+  DiagnosticStatus status;
+  status.name = "localization_node: IMU";
+  // The estimate continues without the IMU, so this never reaches ERROR.
+  status.level = (is_state_warning || is_consistency_warning || is_inconsistent_warning ||
+                  tracker.is_up_axis_warning)
+                     ? DiagnosticStatus::WARN
+                     : DiagnosticStatus::OK;
+  if (is_state_warning) {
+    status.message = state_text;
+  } else if (is_consistency_warning || is_inconsistent_warning) {
+    status.message = consistency_text;
+  } else if (tracker.is_up_axis_warning) {
+    status.message = "TF and gravity up axes disagree";
+  } else {
+    status.message = "OK";
+  }
+
+  add_diagnostic_value(status, "state", state_text);
+  add_diagnostic_value(status, "consistency", consistency_text);
+  add_diagnostic_value(status, "consistency_confirmed_total",
+                       std::to_string(fusion.consistency_confirmed_total));
+  add_diagnostic_value(status, "consistency_outvoted_total", std::to_string(outvoted_total));
+  add_diagnostic_value(status, "consistency_rejected_total",
+                       std::to_string(fusion.consistency_rejected_total));
+  add_diagnostic_value(status, "last_yaw_deltas_rad", format_optional_vector(fusion.last_yaw_deltas_rad));
+  add_diagnostic_value(status, "verification_sums_rad",
+                       format_optional_vector(fusion.verification_sums_rad));
+  add_diagnostic_value(status, "sample_rate_hz", format_number(tracker.sample_rate_hz));
+  add_diagnostic_value(status, "last_sample_age_s", format_optional_number(tracker.last_sample_age_s));
+  add_diagnostic_value(status, "gyro_bias_rad_s", format_optional_vector(tracker.gyro_bias_rad_s));
+  add_diagnostic_value(status, "yaw_bias_rad_s", format_optional_number(tracker.yaw_bias_rad_s));
+  add_diagnostic_value(status, "bias_age_s", format_optional_number(tracker.bias_age_s));
+  add_diagnostic_value(status, "bias_updates_total", std::to_string(tracker.bias_updates_total));
+  add_diagnostic_value(status, "bias_rejected_total", std::to_string(tracker.bias_rejected_total));
+  add_diagnostic_value(status, "up_axis_in_imu", format_optional_vector(tracker.up_axis_in_imu));
+  add_diagnostic_value(status, "tf_up_axis_disagreement_deg",
+                       format_optional_number(tracker.tf_up_axis_disagreement_deg));
+  add_diagnostic_value(status, "yaw_rate_rad_s", format_optional_number(tracker.yaw_rate_rad_s));
+  add_diagnostic_value(status, "yaw_increments_gyro_total",
+                       std::to_string(fusion.yaw_increments_gyro_total));
+  add_diagnostic_value(status, "yaw_increments_wheel_total",
+                       std::to_string(fusion.yaw_increments_wheel_total));
+  add_diagnostic_value(status, "rotation_factors_added_total",
+                       std::to_string(fusion.rotation_factors_added_total));
+  add_diagnostic_value(status, "rotation_factors_skipped_total",
+                       std::to_string(fusion.rotation_factors_skipped_total));
+  add_diagnostic_value(status, "slip_detected_total", std::to_string(fusion.slip_detected_total));
+  add_diagnostic_value(status, "slip_max_rad", format_number(fusion.slip_max_rad));
+  add_diagnostic_value(status, "dropped_samples_total", std::to_string(tracker.dropped_samples_total));
+  return status;
+}
+
 void LocalizationNode::publish_diagnostics(const rclcpp::Time& now) {
   if (!diagnostics_publisher_ || !diagnostics_publisher_->is_activated()) return;
   if (has_diagnostics_publish_time_ &&
@@ -1855,6 +2136,7 @@ void LocalizationNode::publish_diagnostics(const rclcpp::Time& now) {
   array.status.push_back(build_map_match_status(now, has_localizer));
   array.status.push_back(build_errors_status(has_localizer));
   array.status.push_back(build_performance_status(has_localizer));
+  if (is_imu_enabled()) array.status.push_back(build_imu_status(has_localizer));
   diagnostics_publisher_->publish(array);
   last_diagnostics_publish_time_ = now;
   has_diagnostics_publish_time_ = true;

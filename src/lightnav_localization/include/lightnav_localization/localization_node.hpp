@@ -22,6 +22,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_lifecycle/lifecycle_node.hpp>
 #include <rclcpp_lifecycle/lifecycle_publisher.hpp>
+#include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/nav_sat_fix.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <std_srvs/srv/trigger.hpp>
@@ -30,6 +31,7 @@
 #include <tf2_ros/transform_listener.h>
 
 #include "lightnav_localization/gps_input.hpp"
+#include "lightnav_localization/gyro_yaw.hpp"
 #include "lightnav_localization/initial_alignment.hpp"
 #include "lightnav_localization/localizer.hpp"
 #include "lightnav_localization/map_builder.hpp"
@@ -39,6 +41,14 @@
 #include "lightnav_localization/visualization.hpp"
 
 namespace lightnav_localization {
+
+// The yaw change the node passes to Localizer::on_wheel_odom (Issue #92 section 3.3). While the
+// consistency is disabled_inconsistent nothing is passed, whatever the gyro integrated.
+inline std::optional<double> gyro_yaw_delta_for_localizer(
+    GyroConsistencyState consistency, const std::optional<double>& integrated_delta_rad) {
+  if (consistency == GyroConsistencyState::kDisabledInconsistent) return std::nullopt;
+  return integrated_delta_rad;
+}
 
 // Lifecycle node for localization mode (Issue #29). The ROS-free pipeline lives in Localizer; this
 // class owns parameter/TF/message plumbing, the initial alignment and the status/TF publications.
@@ -51,6 +61,22 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
 
   void set_map_match_hook_for_test(std::function<void(MatchResult&)> hook) {
     if (localizer_) localizer_->set_map_match_hook(std::move(hook));
+  }
+  // Issue #92 test seams of the Localizer. The node keeps them and gives them to every Localizer it
+  // builds (set_initial_pose / reload_map / a rebuild), so they survive a rebuild.
+  void set_lidar_match_hook_for_test(std::function<void(MatchResult&)> hook) {
+    lidar_match_hook_for_test_ = hook;
+    if (localizer_) localizer_->set_lidar_match_hook_for_test(std::move(hook));
+  }
+  void set_scan_processing_hook_for_test(std::function<void()> hook) {
+    scan_processing_hook_for_test_ = hook;
+    if (localizer_) localizer_->set_scan_processing_hook_for_test(std::move(hook));
+  }
+  // The QoS the IMU subscription was created with (nullopt without one). The graph does not report the
+  // depth the same way on every RMW, so a test reads it here.
+  std::optional<rclcpp::QoS> imu_subscription_qos_for_test() const {
+    if (!imu_subscription_) return std::nullopt;
+    return imu_subscription_qos_;
   }
   void inject_optimization_failure_for_test() {
     if (localizer_) localizer_->inject_optimization_failure_for_test();
@@ -65,6 +91,7 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
  private:
   void declare_parameters();
   bool read_parameters(std::string& error);
+  bool read_imu_parameters(std::string& error);
   bool load_map_data(std::string& error);
   void reset_runtime_state();
   bool is_active() const;
@@ -73,6 +100,20 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
   void handle_wheel_odom(const nav_msgs::msg::Odometry::SharedPtr message);
   void handle_point_cloud(const sensor_msgs::msg::PointCloud2::SharedPtr message);
   void handle_nav_sat_fix(const sensor_msgs::msg::NavSatFix::SharedPtr message);
+  // Issue #92: hands one IMU sample to the GyroYawTracker. Not called when imu_topic is empty.
+  void handle_imu(const sensor_msgs::msg::Imu::SharedPtr message);
+  void ingest_imu_sample(const sensor_msgs::msg::Imu& message);
+  // First step of the wheel callback: takes every IMU message that is already queued (the executor
+  // serves the queued wheel samples before the IMU ones, and a scan can block this thread for tens of ms).
+  void drain_imu_subscription();
+  // Yaw change from the previous wheel sample to this one; nullopt = "no increment" (wheel yaw is used).
+  std::optional<double> compute_gyro_yaw_delta(double stamp_sec) const;
+  // Keeps the consistency state and the outvote count of the Localizer that is about to be discarded.
+  void remember_gyro_fusion_state();
+  // Looks up the TF base_frame -> imu frame once and gives its up axis to the tracker. The TF is only
+  // compared with the gravity-based up axis, never used to compute the yaw.
+  void try_resolve_imu_expected_up_axis(const std::string& imu_frame, double stamp_sec);
+  bool is_imu_enabled() const { return !imu_topic_.empty(); }
   void handle_watchdog();
   void handle_set_initial_pose(
       const std::shared_ptr<lightnav_msgs::srv::SetInitialPose::Request> request,
@@ -120,6 +161,7 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
   diagnostic_msgs::msg::DiagnosticStatus build_map_match_status(const rclcpp::Time& now, bool has_localizer) const;
   diagnostic_msgs::msg::DiagnosticStatus build_errors_status(bool has_localizer) const;
   diagnostic_msgs::msg::DiagnosticStatus build_performance_status(bool has_localizer);
+  diagnostic_msgs::msg::DiagnosticStatus build_imu_status(bool has_localizer) const;
   double sample_cpu_percent();
   void publish_diagnostics(const rclcpp::Time& now);
   // Live preview for Foxglove / RViz (visualization_enabled). Mapping: the scans placed by the online
@@ -146,6 +188,10 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
   std::string wheel_odom_topic_;
   std::string points_topic_;
   std::string gps_topic_;
+  // Issue #92 external IMU. An empty imu_topic_ disables everything (no subscription, no tracker, no
+  // diagnostics entry), which keeps the node exactly as it was without the IMU.
+  std::string imu_topic_;
+  GyroYawParameters gyro_yaw_parameters_;
   bool publish_tf_ = true;
   double status_rate_hz_ = 2.0;
   double diagnostics_cpu_warn_percent_ = 200.0;
@@ -205,6 +251,19 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
   bool has_gps_antenna_to_base_ = false;
   Eigen::Vector3d gps_antenna_in_base_ = Eigen::Vector3d::Zero();
 
+  // IMU input (Issue #92). The tracker lives from on_configure to on_cleanup, across Localizer rebuilds.
+  std::unique_ptr<GyroYawTracker> gyro_yaw_tracker_;
+  std::string imu_frame_;
+  bool has_imu_expected_up_axis_ = false;
+  double last_imu_tf_attempt_sec_ = -1e9;
+  // Consistency state and outvote total that survive a Localizer rebuild (reload_map). Back to
+  // kUnverified and 0 by on_configure / on_cleanup (reset_runtime_state).
+  GyroConsistencyState carried_gyro_consistency_ = GyroConsistencyState::kUnverified;
+  std::size_t carried_gyro_outvoted_total_ = 0;
+  std::optional<double> previous_wheel_stamp_sec_;
+  std::function<void(MatchResult&)> lidar_match_hook_for_test_;
+  std::function<void()> scan_processing_hook_for_test_;
+
   // Wheel input and the node-side buffer used for initial alignment/debug deskew.
   bool has_wheel_odom_ = false;
   rclcpp::Time last_wheel_stamp_;
@@ -250,6 +309,8 @@ class LocalizationNode : public rclcpp_lifecycle::LifecycleNode {
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr wheel_subscription_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr points_subscription_;
   rclcpp::Subscription<sensor_msgs::msg::NavSatFix>::SharedPtr gps_subscription_;
+  rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_subscription_;
+  rclcpp::QoS imu_subscription_qos_{rclcpp::SensorDataQoS()};
   rclcpp::Service<lightnav_msgs::srv::SetInitialPose>::SharedPtr set_initial_pose_service_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr reload_map_service_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr save_map_service_;
