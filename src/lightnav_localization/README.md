@@ -100,6 +100,7 @@ params ファイル `docker/config/localization_indoor.yaml` で切り替える
   `init_gps_max_std_m` を通る。topic 名を実在のものに間違えると、黙って GNSS に戻る。
 - `map.yaml` が `has_gps_origin: false` であれば、localization は GNSS を `gps_topic` に関係なく無効にする。status の
   `last_error` に `map has no GPS origin: GPS disabled` が出るが、知らせのためのもの。
+- 室内用の設定が書く Issue #93 の値は、傾きと高さの拘束（`absolute_sigma_tilt_rad` 0.3・`absolute_sigma_z_m` 2.0）だけ。車輪の向きの重み（`wheel_sigma_yaw_per_m`）とループ閉じ込みは書かない（既定の 0.01・無効のまま）。**室内用の設定では、`save_map` を呼んでもループ閉じ込みは走らない**。値の一覧は「設定ファイルの値」。
 - 状態は mapping 中ずっと `ODOM_ONLY` と出る。事前地図も GNSS も無いためで、正常（mapping 中は LOST にならない）。
 
 手順:
@@ -133,11 +134,11 @@ W-1 は既定で無効。スリップ判定の根拠は LiDAR の照合だけな
 | `map_frame` / `odom_frame` / `base_frame` | `map` / `odom` / `base_footprint` | |
 | `gps_frame` | `gnss` | GPS アンテナの frame |
 | `wheel_timeout_s` / `scan_timeout_s` / `gps_timeout_s` | 0.2 / 0.5 / 3.0 | 入力の鮮度 |
-| `init_gps_max_std_m` / `init_scan_count` / `init_yaw_step_deg` | 3.0 / 3 / 15 | 初期位置合わせ |
+| `init_gps_max_std_m` / `init_scan_count` / `init_yaw_step_deg` | 3.0 / 3 / 15 | 初期位置合わせ。`init_gps_max_std_m` は、地図の原点・初期位置合わせに使う測位の、状態ごとの表（`gps_std_m_by_status`）の標準偏差の上限。単独測位は 2.0 m として扱うので、`robot.yaml` は 3.0（Issue #93。1.5 では単独測位が通らず、mapping が始まらなかった） |
 | `init_gps_reported_std_max_m` | 0.0（判定しない） | 地図の原点と初期位置合わせに使う測位の、**受信機が申告する誤差**の上限。申告 ＝ 測位に付いている誤差の、東と北の大きい方の平方根（型が「不明」以外で、値が正で有限のとき）。超える間は原点・初期化を待ち、`last_error` に `waiting for a GPS fix with reported std <= <上限> m (latest <値> m)`（ログは WARN、2 秒に 1 回まで）を出す。使える測位が来たら消える。申告の無い測位は弾かない。走行中の姿勢グラフに入る標準偏差は変えない（状態ごとの表の値） |
 | `init_coarse_corr_m` / `init_fine_corr_m` / `init_inlier_ratio_min` | 2.0 / 0.5 / 0.6 | 初期 yaw 照合 |
 | `publish_tf` / `status_rate_hz` | true / 2.0 | |
-| `wheel_yaw_slip_threshold_rad` / `wheel_sigma_yaw_per_rad` / `wheel_sigma_yaw_per_m` | 0.0 / 0.1 / 0.01 | 既定では無効。閾値を正の値にすると、受理された LiDAR 照合と車輪のキーフレーム間の相対 yaw の差が閾値を超えた場合に限り、車輪 yaw の標準偏差をその差以上に広げる。それ以外は従来の式を使う |
+| `wheel_yaw_slip_threshold_rad` / `wheel_sigma_yaw_per_rad` / `wheel_sigma_yaw_per_m` | 0.0 / 0.1 / 0.01 | `wheel_sigma_yaw_per_m` は車輪の向きの標準偏差の、移動 1 m あたりの増え方。`docker/config/robot.yaml`（屋外）は 0.2（Issue #93。車輪から求めた向きを今より信用しない）、室内用の設定は書かない（0.01）。以下はスリップ判定の説明: 既定では無効。閾値を正の値にすると、受理された LiDAR 照合と車輪のキーフレーム間の相対 yaw の差が閾値を超えた場合に限り、車輪 yaw の標準偏差をその差以上に広げる。それ以外は従来の式を使う |
 | `wheel_robust_kernel` / `wheel_robust_k` | huber / 8.0 | スリップと判定した車輪因子の白色化残差に適用する Huber または cauchy。地図・GPS の `huber_k` とは独立。σ を不一致の大きさまで広げるため白色化残差はおよそ 1σ 以下になり、カーネルは追加の保険で、現状ほぼ効かない。8.0 は暫定値 |
 | `absolute_sigma_tilt_rad` / `absolute_sigma_z_m` | 0.0 / 0.0 | 既定では無効（0）。正の値にすると、すべてのノードに「車体は水平に近い」（`absolute_sigma_tilt_rad`。mapping と localization の両方）「高さは最初のノードに近い」（`absolute_sigma_z_m`。**mapping のときだけ**。localization では正の値でも入れない: 地図との照合で高さが決まり、出発点と違う場所で初期化すると「最初のノードの高さ」がその場所の高さになって、高低差のあるコースで照合を引っぱるため）という弱い絶対の拘束を入れる。負や非有限の値は configure で拒む。LiDAR オドメトリの roll / pitch / z は相対の拘束だけだと積み上がり、GNSS なしの 650 m の走行で高さが ±8 m 流れた（2026-11-25）。小さすぎると坂が潰れる: 0.05 rad では 10° の坂が平らになる。実走で試した値は 0.3 rad / 2.0 m（高さの流れ ±0.3 m。2 m 程度の高低差は残る） |
 | `loop_closure_enabled` | false | 真のとき、**`~/save_map` の呼び出しのときだけ**（停止時の保存では行わない）、mapping の保存の段階 2 と 3 の間に、同じ場所へ戻ったキーフレームの組を探してバッチ最適化に入れる。候補は「推定上で近い組」と「見え方が似ている組（推定が大きく外れていても見つかる）」。照合は大域初期化と同じ 2D 探索 + 3D 検証。37 分の走行で数分かかる（Mac で 3 分強）。停止の制限時間（45 秒）内には終わらないので、停止時の保存では行わない |
@@ -159,14 +160,34 @@ W-1 は既定で無効。スリップ判定の根拠は LiDAR の照合だけな
 | `map_max_correspondence_distance_m` / `map_max_iterations` | 1.0 / 30 | GICP または VGICP 細段の対応点距離上限（m） / 各段の反復回数上限 |
 | `map_inlier_ratio_min` / `map_gate_translation_m` / `map_gate_rotation_rad` | 0.5 / 1.0 / 0.2 | 事前地図照合 |
 | `gps_std_m_by_status` | `[2.0, 1.0, 0.3]` | GST 無しの FIX / SBAS / GBAS |
-| `gps_min_status` | -1 | この `NavSatStatus` 未満の fix は `Localizer` に渡さない（-1 = 全部受ける）。`docker/config/robot.yaml` は 1（Float 以上）。Single（status 0）は初期化・mapping の原点・因子のどれにも使わず、棄却数にも数えない |
-| `gps_min_interval_s` | 0.0 | 前回 `Localizer` に渡した fix の `header.stamp` からこの秒数未満の fix を捨てる（0 = 間引かない）。`robot.yaml` は 1.0（受信機の 5 Hz を 1 Hz に） |
+| `gps_min_status` | -1 | この `NavSatStatus` 未満の fix は `Localizer` に渡さない（-1 = 全部受ける）。`docker/config/robot.yaml` は 0（Issue #93。単独測位（status 0）から使う。初期化・mapping の原点・因子のすべてに使う）。1 以上にすると、それ未満の測位は初期化・原点・因子のどれにも使わず、棄却数にも数えない。**単独測位は `/fix` には出ず `/fix_all` にだけ出る**ので、0 にするには `gps_topic` も `/fix_all` にする |
+| `gps_min_interval_s` | 0.0 | 前回 `Localizer` に渡した fix の `header.stamp` からこの秒数未満の fix を捨てる（0 = 間引かない）。`robot.yaml` は 1.0（1 秒に 1 件まで。受信機は 1 Hz で出す） |
 | `gps_gate_mahalanobis` / `gps_trusted_std_m` / `gps_absolute_gate_m` | 3.0 / 0.3 / 2.0 | GPS ゲート |
 | `correction_slew_mps` / `correction_slew_rps` / `large_correction_threshold_m` | 0.2 / 0.1 / 1.0 | 補正の平滑化 |
 | `tracking_window_s` / `lost_position_std_m` | 5.0 / 2.0 | 状態判定 |
 | `odom_only_max_distance_m` / `odom_only_max_s` / `drift_rate` | 50 / 60 / 0.02 | ODOM_ONLY の上限。**`mode: mapping` では無効**（この 2 つで LOST にしない。D5） |
 
 VGICP は対象点のボクセルと隣接する 26 ボクセルを探索するため、対応距離を大きくしても探索範囲はボクセル幅で制限される。VGICP のインライア率は距離条件を満たすボクセル対応がある入力点の割合で、GICP の点同士の対応率とは異なる。`map_inlier_ratio_min` は方式ごとに調整する。
+
+## 設定ファイルの値（`robot.yaml` と室内用）
+
+Issue #93（ユーザー決定 2026-11-27）で、傾きと高さの拘束・車輪の向きの重み・単独測位の GNSS・ループ閉じ込みを入れた。コードの既定は変えていない（拘束なし・ループ無効・`gps_min_status` -1）ので、設定ファイルに書いたものだけが効く。2 つの設定ファイルは重ねて使わない（`params_file` はどちらか 1 つ）。書かなかった値はコードの既定になる。値は `test/test_tilt_loop_config.py` が検査する。
+
+| パラメータ | コードの既定 | `docker/config/robot.yaml`（屋外・GNSS あり） | `docker/config/localization_indoor.yaml`（室内） |
+|---|---:|---:|---:|
+| `absolute_sigma_tilt_rad` | 0.0（無効） | 0.3 | 0.3 |
+| `absolute_sigma_z_m` | 0.0（無効。**mapping のときだけ**効く） | 2.0 | 2.0 |
+| `wheel_sigma_yaw_per_m` | 0.01 | 0.2 | 書かない（0.01） |
+| `gps_min_status` | -1 | 0 | 書かない（GNSS を聞かない） |
+| `gps_topic` | `/gps/fix` | `/fix_all` | `/lightnav/gnss_disabled`（変えない） |
+| `init_gps_max_std_m` | 3.0 | 3.0（以前は 1.5） | 書かない |
+| `init_gps_reported_std_max_m` | 0.0（判定しない） | 10.0（仮） | 書かない |
+| `loop_closure_enabled` | false | true | 書かない（無効） |
+| `lidar_odom_gate_yaw_rad` | 0.1 | 書かない | 書かない（0.5 は別の場面で悪くなったので 0.1 のまま） |
+
+- ループ閉じ込みの探索の値（`loop_closure_*`）と `map_save_keyframe_clouds` は、どちらの設定ファイルにも書かない。
+- **屋外で GNSS が取れないとき用の設定ファイルは無い**。`robot.yaml` は GNSS が取れないと地図作りを始めず、室内用の設定はループ無効・車輪の重み 0.01 なので、GNSS なしの長い周回では、ループを閉じた地図は作れない。
+- `robot.yaml` の車輪の向きの重み 0.2 とループ閉じ込みは屋外用の決定で、室内には持ち込まない。
 
 ## 診断とエラーの保持
 
@@ -187,7 +208,7 @@ performance は直近のスキャン処理時間とプロセスの CPU・メモ�
 
 ## GNSS の入力と `/diagnostics`
 
-`gps_topic`（`robot.yaml` は `/fix`。CLAS 用ファームの受信機が出す Float / Fix。Issue #88）の fix は、購読コールバックで次の順に扱う: 最後に受けた fix の
+`gps_topic`（`robot.yaml` は `/fix_all`。Issue #93。受信機のドライバは、単独測位を `/fix_all` にだけ出し、`/fix` には Float / Fix（CLAS 用ファームの受信機。Issue #88）だけを出す。`/fix_all` には Float / Fix も同じように出るので、1 つのトピックで足りる。ドライバ側の「`/fix_all` は表示用」という注記とは食い違うが、位置推定には `/fix_all` を使う）の fix は、購読コールバックで次の順に扱う: 最後に受けた fix の
 `gps_status`・`gps_std_m`（status の表の σ）を記録 → `gps_min_status` 未満なら捨てる → 初期化・mapping の原点 →
 `gps_min_interval_s` で間引く → `Localizer::on_gps`（Mahalanobis ゲート）。`LocalizationStatus` の
 `gps_status`・`gps_std_m` は、落とす前に記録した**最後に受けた fix** の値（Float から Single に落ちたことが見える）。
@@ -205,6 +226,8 @@ performance は直近のスキャン処理時間とプロセスの CPU・メモ�
 | `is_gps_conflict` | `true` / `false` |
 
 `gps_min_status` で落とした分と `gps_min_interval_s` で間引いた分は棄却数に入れない（外れ値ではない）。
+
+**標準偏差の決まり方**: ドライバは誤差を「対角だけ既知」の型で出す。lightnav は「全要素が既知」の型のときだけ受信機の値を使うので、今のドライバでは受信機の申告は姿勢グラフに入らず、標準偏差は状態ごとの表（`gps_std_m_by_status`。単独 2.0 m・Float 1.0 m・Fix 0.3 m）の値になる。そのため `init_gps_max_std_m` は、単独測位なら申告が何 m でも通る。電源を入れた直後の、申告が数十 m の測位が原点や初期化に使われないように、**地図の原点と初期位置合わせに使う測位に限り**、受信機が申告する誤差が `init_gps_reported_std_max_m`（`robot.yaml` は 10.0。仮）を超えたら使わない（意味と `last_error` の文言は「パラメータ」の表）。走行中に姿勢グラフへ入る標準偏差は、この上限に関係なく表の値のまま。
 累計は `Localizer` を作り直す（初期化し直す）と 0 に戻る。
 
 ## 既知の限界
@@ -221,6 +244,7 @@ performance は直近のスキャン処理時間とプロセスの CPU・メモ�
 - mapping 中は LOST にしない（odom_only の 50 m／60 s と、位置の不確かさ `lost_position_std_m` の両方を
   無効にする。`drift_rate` の項が GNSS 欠測の距離で増えるため、後者を残すと約 30 s で LOST になる）。
   localization モードは従来どおり。
+- **屋外で GNSS が取れないとき用の設定ファイルは無い**（Issue #93 の K2。仮）。`robot.yaml` は GNSS が取れないと地図作りを始めず、室内用の設定はループ無効・車輪の重み 0.01 なので、GNSS なしの屋外の長い周回では、ループを閉じた地図は作れない。
 - ループ閉じ込みは `~/save_map` のときだけで、誤検出しうる（見え方が似た別の場所を結ぶ。動きが経路長の 0.2 倍を超える見え方の候補は試さない）。動的物体除去・地図更新は v1 の非スコープ。
 - 電源を入れてしばらくは受信機の申告する誤差が大きく、`init_gps_reported_std_max_m` が正のときは、その間は地図の原点と初期位置合わせに使われない（Issue #93 の bag では約 3.5 分）。待っている間に走った区間は地図に入らない。
 - 申告の無い測位（誤差の型が「不明」）は `init_gps_reported_std_max_m` で弾かれない。ドライバの設定が変わって申告が出なくなると、この判定は黙って働かなくなる。
